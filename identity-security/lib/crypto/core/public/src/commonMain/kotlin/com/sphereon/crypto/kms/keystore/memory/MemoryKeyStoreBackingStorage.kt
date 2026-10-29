@@ -18,10 +18,13 @@
 package com.sphereon.crypto.kms.keystore.memory
 
 import com.sphereon.core.compat.JsExportCompat
+import com.sphereon.core.compat.JsExportIgnoreCompat
 import com.sphereon.crypto.core.ManagedKeyInfoType
 import com.sphereon.crypto.core.x509.Certificate
 import com.sphereon.di.context.UserContext
 import com.sphereon.di.session.SessionContext
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlin.experimental.ExperimentalObjCName
 import kotlin.jvm.JvmOverloads
 import kotlin.jvm.JvmStatic
@@ -90,6 +93,7 @@ StoragePartitionKey
 
 /**
  * Holds the actual storage for a single partition (keys, certificate chains, and certificates).
+ * Access the mutable maps within [withLock] when the partition is shared between callers.
  */
 @OptIn(ExperimentalObjCName::class)
 @ObjCName("StoragePartition", exact = true)
@@ -101,7 +105,13 @@ StoragePartition
         val keys: MutableMap<String, ManagedKeyInfoType<*>> = mutableMapOf(),
         val certificateChains: MutableMap<String, Array<Certificate>> = mutableMapOf(),
         val certificates: MutableMap<String, Certificate> = mutableMapOf(),
-    )
+    ) {
+        private val monitor = SynchronizedObject()
+
+        /** Serializes compound access to this partition's key and certificate maps. */
+        @JsExportIgnoreCompat
+        fun <T> withLock(block: () -> T): T = synchronized(monitor) { block() }
+    }
 
 @OptIn(ExperimentalObjCName::class)
 @ObjCName("MemoryKeyStoreBackingStorage", exact = true)
@@ -109,8 +119,7 @@ StoragePartition
 interface MemoryKeyStoreBackingStorage {
     /**
      * Gets or creates a storage partition for the given key.
-     * Note: getOrPut is not fully thread-safe in all KMP targets, but should be sufficient
-     * for most use cases. For high-concurrency scenarios, consider adding platform-specific locking.
+     * Concurrent callers for the same key receive the same partition instance.
      */
     fun getPartition(partitionKey: StoragePartitionKey): StoragePartition
 

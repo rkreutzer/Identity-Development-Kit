@@ -17,6 +17,7 @@
 
 package com.sphereon.di.context
 
+import com.sphereon.di.supervisedChild
 import com.sphereon.core.api.log.UserContextLogManager
 import com.sphereon.di.session.SessionContextManager
 import dev.zacsweers.metro.AppScope
@@ -84,7 +85,7 @@ interface UserContextScopedProviders {
     @ForScope(UserScope::class)
     fun provideContextCoroutineScope(
         @ForScope(UserScope::class) contextScopeCoroutineScopeScoped: CoroutineScopeScoped,
-    ): CoroutineScope = contextScopeCoroutineScopeScoped.createChild()
+    ): CoroutineScope = contextScopeCoroutineScopeScoped.supervisedChild()
 
     @Multibinds(allowEmpty = true)
     @ForScope(UserScope::class)

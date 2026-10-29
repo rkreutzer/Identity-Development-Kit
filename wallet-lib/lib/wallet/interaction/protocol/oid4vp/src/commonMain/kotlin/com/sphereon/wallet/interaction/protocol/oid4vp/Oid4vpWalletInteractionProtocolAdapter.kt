@@ -6,12 +6,14 @@
 
 package com.sphereon.wallet.interaction.protocol.oid4vp
 
+import com.sphereon.wallet.interaction.WalletInteractionCompletionTransport
 import com.sphereon.oauth2.common.model.AuthorizationRequest
 import com.sphereon.openid.oid4vp.common.ResponseMode
 import com.sphereon.openid.oid4vp.common.responseUri
 import com.sphereon.openid.oid4vp.dcql.DcqlQuery
 import com.sphereon.openid.oid4vp.holder.DigitalCredentialsAuthorizationRequest
 import com.sphereon.openid.oid4vp.holder.Oid4vpHolderService
+import com.sphereon.openid.oid4vp.holder.SubmissionResult
 import com.sphereon.openid.oid4vp.holder.ResolvedOid4vpRequest
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.wallet.credential.WalletCredentialStore
@@ -59,15 +61,18 @@ import com.sphereon.wallet.interaction.WalletSecurityGateResult
 import com.sphereon.wallet.interaction.WalletSecurityOperation
 import com.sphereon.wallet.interaction.WalletSecurityGrantValidation
 import com.sphereon.wallet.interaction.validateFor
+import com.sphereon.wallet.interaction.WalletTrustStatus
 import com.sphereon.wallet.interaction.WalletTrustPolicyAction
 import com.sphereon.wallet.interaction.classifiedWalletInteractionError
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -140,6 +145,32 @@ class Oid4vpWalletInteractionProtocolAdapter(
             } else {
                 null
             }
+        val digitalCredentialsSelection =
+            if (digitalCredentialsRequest != null) {
+                try {
+                    DigitalCredentialsSelectionMetadata.parse(context.attributes)
+                } catch (_: Exception) {
+                    val state =
+                        context.baseState(
+                            status = WalletInteractionStatus.Failed,
+                            flowKind = WalletInteractionFlowKind.CredentialPresent,
+                            protocol = WalletProtocol.OID4VP,
+                            adapterId = capability.adapterId,
+                            entryPoint = entryPoint,
+                        ).copy(
+                            terminal = true,
+                            error =
+                                classifiedWalletInteractionError(
+                                    code = WalletInteractionFailureCodes.OID4VP_DCA_SELECTION_INVALID,
+                                    messageKey = "wallet.interaction.error.oid4vp_digital_credentials_selection_invalid",
+                                    arguments = mapOf("reason" to "invalid_selection_metadata"),
+                                ),
+                        )
+                    return WalletInteractionSession(context.sessionId, state)
+                }
+            } else {
+                null
+            }
         val rawRequest = entryPoint.raw ?: digitalCredentialsRequest?.data?.toString()
         val launchState =
             context.baseState(
@@ -156,6 +187,16 @@ class Oid4vpWalletInteractionProtocolAdapter(
                 entryPoint.parsedType
                     ?.takeIf { it in DIGITAL_CREDENTIAL_PROTOCOLS }
                     ?.let { put(DIGITAL_CREDENTIAL_PROTOCOL_PRIVATE_KEY, it) }
+                digitalCredentialsSelection?.let { selection ->
+                    selection.selectedEntryId?.let { put(DigitalCredentialsSelectionMetadata.SELECTED_ENTRY_ID_KEY, it) }
+                    selection.selectedCredentialSetId?.let { put(DigitalCredentialsSelectionMetadata.SELECTED_CREDENTIAL_SET_ID_KEY, it) }
+                    if (selection.constrainsCredentialIds) {
+                        put(
+                            DigitalCredentialsSelectionMetadata.SELECTED_CREDENTIAL_IDS_KEY,
+                            JsonArray(selection.requiredCredentialIds.map(::JsonPrimitive)).toString(),
+                        )
+                    }
+                }
             },
         )
         val parsed =
@@ -270,11 +311,43 @@ class Oid4vpWalletInteractionProtocolAdapter(
                     ),
             )
 
-        val candidateCredentialIds =
-            resolved?.let { candidateResolver.candidateCredentialIds(context, it) }.orEmpty()
-        val requirements =
+        val requestError = resolved?.authorizationError
+        val discoveredCandidateCredentialIds =
+            if (requestError == null) resolved?.let { candidateResolver.candidateCredentialIds(context, it) }.orEmpty() else emptyMap()
+        val restrictedCandidates = digitalCredentialsSelection?.restrictCandidates(discoveredCandidateCredentialIds)
+        val unknownPlatformCredentialIds = restrictedCandidates?.unavailableSelectedIds.orEmpty()
+        val platformSelectionInvalid =
+            unknownPlatformCredentialIds.isNotEmpty() ||
+                (digitalCredentialsSelection?.constrainsCredentialIds == true &&
+                    digitalCredentialsSelection.requiredCredentialIds.isEmpty() &&
+                    resolved?.dcqlQuery?.credentials.orEmpty().isNotEmpty())
+        if (requestError == null && platformSelectionInvalid) {
+            val state =
+                context.baseState(
+                    status = WalletInteractionStatus.Failed,
+                    flowKind = WalletInteractionFlowKind.CredentialPresent,
+                    protocol = WalletProtocol.OID4VP,
+                    adapterId = capability.adapterId,
+                    entryPoint = entryPoint,
+                ).copy(
+                    activity = activity,
+                    counterparty = verifier,
+                    counterpartyEncounter = encounter,
+                    terminal = true,
+                    error =
+                        classifiedWalletInteractionError(
+                            code = WalletInteractionFailureCodes.OID4VP_DCA_SELECTION_UNAVAILABLE,
+                            messageKey = "wallet.interaction.error.oid4vp_digital_credentials_selection_unavailable",
+                            arguments = mapOf("unavailableCredentialCount" to unknownPlatformCredentialIds.size.toString()),
+                        ),
+                )
+            return WalletInteractionSession(context.sessionId, state)
+        }
+        val candidateCredentialIds = restrictedCandidates?.byRequirement ?: discoveredCandidateCredentialIds
+        val resolvedRequirements =
             resolved?.dcqlQuery?.toCredentialSelectionRequest(candidateCredentialIds)
                 ?: WalletCredentialSelectionRequest(emptyList(), satisfiable = false)
+        val requirements = resolvedRequirements
         val requestedClaims = requirements.requirements.flatMap { requirement -> requirement.requiredClaimPaths.map { WalletClaimDescriptor(path = it) } }
         context.storePrivate(
             mapOf(
@@ -300,6 +373,47 @@ class Oid4vpWalletInteractionProtocolAdapter(
                     ),
                 ).let { trust -> trust.copy(policyAction = context.trustPolicy.evaluate(trust).action) }
                 .copy(counterparty = verifier)
+        if (requestError != null) {
+            val authenticatedRequest = requireNotNull(resolved)
+            // A captured request is user interaction. Return only its protocol error after the
+            // client identity and the wallet's assigned trust policy have both been checked.
+            val submitted = if (authenticatedRequest.verifierInfo.clientIdValid && trust.status == WalletTrustStatus.TRUSTED &&
+                trust.policyAction == WalletTrustPolicyAction.ALLOW) {
+                holder?.submitAuthorizationErrorResponse(authenticatedRequest, requestError)
+            } else null
+            val completionUri = (submitted?.getOrNull() as? SubmissionResult.Success)?.redirectUri
+            val completionRef = completionUri?.let { uri ->
+                context.sensitiveInputAuthority.register(
+                    sessionId = context.sessionId,
+                    purpose = WalletInteractionSensitiveInputPurpose.PROTOCOL_COMPLETION_HANDOFF,
+                    value = uri,
+                )
+            }
+            val state = context.baseState(
+                status = WalletInteractionStatus.Failed,
+                flowKind = WalletInteractionFlowKind.CredentialPresent,
+                protocol = WalletProtocol.OID4VP,
+                adapterId = capability.adapterId,
+                entryPoint = entryPoint,
+            ).copy(
+                activity = activity,
+                counterparty = verifier,
+                counterpartyEncounter = encounter,
+                trust = trust,
+                completionHandoffRef = completionRef,
+                completionHandoffTransport = completionRef?.let { WalletInteractionCompletionTransport.BROWSER_REDIRECT },
+                terminal = true,
+                error = classifiedWalletInteractionError(
+                    code = WalletInteractionFailureCodes.OID4VP_REQUEST_RESOLVE_FAILED,
+                    messageKey = "wallet.interaction.error.oid4vp_request_resolve_failed",
+                    arguments = mapOf(
+                        "providerErrorCode" to requestError.error,
+                        "errorResponseSubmitted" to (submitted?.getOrNull() is SubmissionResult.Success || submitted?.getOrNull() is SubmissionResult.DigitalCredential).toString(),
+                    ),
+                ),
+            )
+            return WalletInteractionSession(context.sessionId, state)
+        }
         if (!encounter.organizationCreated && trust.policyAction == WalletTrustPolicyAction.BLOCK) {
             val state =
                 context
@@ -392,7 +506,7 @@ class Oid4vpWalletInteractionProtocolAdapter(
                         revision = sessionState.revision + 1,
                     )
                 } else {
-                    val invalidSelection = sessionState.validateCredentialSelection(action)
+                    val invalidSelection = sessionState.validateCredentialSelection(action, context)
                     if (invalidSelection != null) {
                         sessionState.copy(
                             status = WalletInteractionStatus.CredentialSelection,
@@ -574,10 +688,14 @@ class Oid4vpWalletInteractionProtocolAdapter(
         val operationId = "${sessionState.sessionId.value}-share"
         val operationBinding = securityContext.operationBinding ?: "operation:$operationId"
         storePrivate(mapOf(SECURITY_OPERATION_BINDING_PRIVATE_KEY to operationBinding))
+        var preparedWalletAccountId: String? = null
         val operations =
             when (val preparation = presentationExecutor.preparePresentation(this, sessionState)) {
                 Oid4vpPresentationPreparation.Ready -> emptyList()
-                is Oid4vpPresentationPreparation.ApprovalRequired -> preparation.operations
+                is Oid4vpPresentationPreparation.ApprovalRequired -> {
+                    preparedWalletAccountId = preparation.walletAccountId
+                    preparation.operations
+                }
                 is Oid4vpPresentationPreparation.Failed ->
                     return sessionState.next(
                         status = WalletInteractionStatus.Failed,
@@ -596,7 +714,8 @@ class Oid4vpWalletInteractionProtocolAdapter(
                         operation = WalletSecurityOperation.PRESENT_CREDENTIALS,
                         audience = sessionState.counterparty?.identifier,
                         walletUnitId = sessionState.walletUnitId,
-                        walletAccountId = securityContext.walletAccountId,
+                        // A backend-owned interaction names the account through its prepared holder keys.
+                        walletAccountId = securityContext.walletAccountId ?: preparedWalletAccountId,
                         operationBinding = operationBinding,
                         operations = operations,
                     ),
@@ -735,6 +854,7 @@ class Oid4vpWalletInteractionProtocolAdapter(
                     status = WalletInteractionStatus.Completed,
                     revision = sessionState.revision + 1,
                     completionHandoffRef = handoffRef,
+                    completionHandoffTransport = WalletInteractionCompletionTransport.BROWSER_REDIRECT,
                     message = WalletDisplayMessage(titleKey = "wallet.interaction.oid4vp.shared"),
                     error = null,
                     terminal = true,
@@ -774,6 +894,7 @@ class Oid4vpWalletInteractionProtocolAdapter(
                         status = WalletInteractionStatus.Completed,
                         revision = sessionState.revision + 1,
                         completionHandoffRef = handoffRef,
+                    completionHandoffTransport = WalletInteractionCompletionTransport.DIGITAL_CREDENTIALS_API,
                         message = WalletDisplayMessage(titleKey = "wallet.interaction.oid4vp.shared"),
                         error = null,
                         terminal = true,
@@ -795,7 +916,10 @@ class Oid4vpWalletInteractionProtocolAdapter(
             }
         }
 
-    private fun WalletInteractionState.validateCredentialSelection(action: WalletInteractionAction): WalletInteractionError? {
+    private suspend fun WalletInteractionState.validateCredentialSelection(
+        action: WalletInteractionAction,
+        context: WalletInteractionContext,
+    ): WalletInteractionError? {
         val request = credentialSelection ?: return null
         val requirements = request.requirements
         if (requirements.isEmpty()) return null
@@ -815,31 +939,70 @@ class Oid4vpWalletInteractionProtocolAdapter(
         }
 
         val selectedByRequirement = action.selection?.selectedCredentialIdsByRequirement.orEmpty()
+        val privateValues = context.privateSessionStore.get(sessionId, ADAPTER_ID)?.values.orEmpty()
+        val platformSelectedIdsJson = privateValues[DigitalCredentialsSelectionMetadata.SELECTED_CREDENTIAL_IDS_KEY]
+        if (platformSelectedIdsJson != null) {
+            val platformSelectedIds =
+                runCatching {
+                    Json.parseToJsonElement(platformSelectedIdsJson).jsonArray.map { it.jsonPrimitive.content }
+                }.getOrNull() ?: return error(WalletInteractionFailureCodes.OID4VP_DCA_SELECTION_INVALID)
+            val submittedIds = selectedByRequirement.values.flatten()
+            if (submittedIds.toSet() != platformSelectedIds.toSet()) {
+                return error(WalletInteractionFailureCodes.OID4VP_DCA_SELECTION_MISMATCH)
+            }
+        }
         val requirementIds = requirements.map { it.id }.toSet()
         val unknownRequirementId = selectedByRequirement.keys.firstOrNull { it !in requirementIds }
         if (unknownRequirementId != null) {
             return error(WalletInteractionFailureCodes.OID4VP_SELECTION_UNKNOWN_REQUIREMENT, mapOf("requirementId" to unknownRequirementId))
         }
 
+        if (request.credentialSets.isNotEmpty()) {
+            val selectedRequirementIds = selectedByRequirement.filterValues { it.isNotEmpty() }.keys
+            val coveredRequirementIds = mutableSetOf<String>()
+            request.credentialSets.forEach { set ->
+                if (set.options.isEmpty() || set.options.any { option ->
+                        option.requirementIds.isEmpty() || option.requirementIds.any { it !in requirementIds }
+                    }
+                ) {
+                    return error(WalletInteractionFailureCodes.OID4VP_SELECTION_UNSATISFIABLE)
+                }
+                val satisfiedOptions = set.options.filter { option ->
+                    option.satisfiable && option.requirementIds.all { it in selectedRequirementIds }
+                }
+                if (set.required && satisfiedOptions.isEmpty()) {
+                    return error(WalletInteractionFailureCodes.OID4VP_SELECTION_MISSING_REQUIREMENT, mapOf("requirementId" to set.id))
+                }
+                satisfiedOptions.forEach { coveredRequirementIds.addAll(it.requirementIds) }
+            }
+            if (selectedRequirementIds.isEmpty() || selectedRequirementIds.any { it !in coveredRequirementIds }) {
+                return error(WalletInteractionFailureCodes.OID4VP_SELECTION_UNSATISFIABLE)
+            }
+        }
+
         requirements.forEach { requirement ->
             val selectedCredentialIds = selectedByRequirement[requirement.id].orEmpty()
             if (selectedCredentialIds.isEmpty()) {
-                return error(WalletInteractionFailureCodes.OID4VP_SELECTION_MISSING_REQUIREMENT, mapOf("requirementId" to requirement.id))
+                if (request.credentialSets.isEmpty()) {
+                    return error(WalletInteractionFailureCodes.OID4VP_SELECTION_MISSING_REQUIREMENT, mapOf("requirementId" to requirement.id))
+                }
+                return@forEach
+            }
+            if (selectedCredentialIds.size != selectedCredentialIds.distinct().size) {
+                return error(WalletInteractionFailureCodes.OID4VP_SELECTION_CREDENTIAL_NOT_CANDIDATE, mapOf("requirementId" to requirement.id))
             }
             if (!requirement.multipleAllowed && selectedCredentialIds.size > 1) {
                 return error(WalletInteractionFailureCodes.OID4VP_SELECTION_MULTIPLE_NOT_ALLOWED, mapOf("requirementId" to requirement.id))
             }
-            if (requirement.candidateCredentialIds.isNotEmpty()) {
-                val unavailableCredentialId = selectedCredentialIds.firstOrNull { it !in requirement.candidateCredentialIds }
-                if (unavailableCredentialId != null) {
-                    return error(
-                        WalletInteractionFailureCodes.OID4VP_SELECTION_CREDENTIAL_NOT_CANDIDATE,
-                        mapOf(
-                            "requirementId" to requirement.id,
-                            "credentialId" to unavailableCredentialId,
-                        ),
-                    )
-                }
+            val unavailableCredentialId = selectedCredentialIds.firstOrNull { it !in requirement.candidateCredentialIds }
+            if (unavailableCredentialId != null) {
+                return error(
+                    WalletInteractionFailureCodes.OID4VP_SELECTION_CREDENTIAL_NOT_CANDIDATE,
+                    mapOf(
+                        "requirementId" to requirement.id,
+                        "credentialId" to unavailableCredentialId,
+                    ),
+                )
             }
         }
 
@@ -890,8 +1053,15 @@ class Oid4vpWalletInteractionProtocolAdapter(
             priority: Int = 90,
             preparedJwtSigningProvider: Oid4vpPreparedJwtSigningProvider? = null,
             mdocHolderSigningProvider: Oid4vpMdocHolderSigningProvider? = null,
+            credentialClaimValuesResolver: WalletCredentialClaimValuesResolver? = null,
         ): Oid4vpWalletInteractionProtocolAdapter {
-            val resolver = WalletStoreOid4vpCredentialResolver(credentialStore, holderIdentityResolver, holderVerificationMethodResolver)
+            val resolver =
+                WalletStoreOid4vpCredentialResolver(
+                    credentialStore = credentialStore,
+                    holderIdentityResolver = holderIdentityResolver,
+                    holderVerificationMethodResolver = holderVerificationMethodResolver,
+                    credentialClaimValuesResolver = credentialClaimValuesResolver,
+                )
             return Oid4vpWalletInteractionProtocolAdapter(
                 holder = holder,
                 presentationExecutor =
@@ -976,20 +1146,18 @@ fun DcqlQuery.toCredentialSelectionRequest(candidateCredentialIds: Map<String, L
                     },
             )
         }
-    val credentialIdsInSets =
-        credential_sets
-            .orEmpty()
-            .flatMap { set -> set.options.flatten() }
-            .toSet()
-    val standaloneRequirementIds = requirements.map { it.id }.filter { it !in credentialIdsInSets }
-    val standaloneRequirementsSatisfied = standaloneRequirementIds.all { id -> candidateCredentialIds[id].orEmpty().isNotEmpty() }
     val requiredSetsSatisfied =
         credentialSets
             .filter { it.required }
             .all { set -> set.options.any { option -> option.satisfiable } }
     return WalletCredentialSelectionRequest(
         requirements = requirements,
-        satisfiable = standaloneRequirementsSatisfied && requiredSetsSatisfied,
+        satisfiable =
+            if (credentialSets.isEmpty()) {
+                requirements.all { it.candidateCredentialIds.isNotEmpty() }
+            } else {
+                requiredSetsSatisfied
+            },
         credentialSets = credentialSets,
     )
 }

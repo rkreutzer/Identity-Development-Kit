@@ -59,6 +59,19 @@ interface CommandErrorMapper<E : IdkErrorType> {
     ): E
 
     /**
+     * Creates an error when a lifecycle interceptor denied the command, or failed (then [denialCode] is
+     * `INTERCEPTOR_ERROR`). Mappers that can carry it keep [interceptorName] and [denialCode] on the error
+     * (see [CommandErrors.DENIED_BY_INTERCEPTOR_META]); the default drops them and delegates to [notAuthorized],
+     * so existing implementers keep compiling and behave as before.
+     */
+    fun notAuthorizedByInterceptor(
+        commandId: CommandId,
+        reason: String,
+        interceptorName: String,
+        denialCode: String,
+    ): E = notAuthorized(commandId, reason)
+
+    /**
      * Creates an error for unknown/unexpected failures.
      */
     fun unknown(
@@ -103,6 +116,13 @@ object IdkErrorCommandErrorMapper : CommandErrorMapper<IdkError> {
         reason: String,
     ): IdkError = CommandErrors.notAuthorized(commandId, reason)
 
+    override fun notAuthorizedByInterceptor(
+        commandId: CommandId,
+        reason: String,
+        interceptorName: String,
+        denialCode: String,
+    ): IdkError = CommandErrors.notAuthorizedByInterceptor(commandId, reason, interceptorName, denialCode)
+
     override fun unknown(
         message: String,
         cause: Throwable?,
@@ -135,6 +155,13 @@ object IdkErrorTypeCommandErrorMapper : CommandErrorMapper<IdkErrorType> {
         commandId: CommandId,
         reason: String,
     ): IdkErrorType = IdkErrorCommandErrorMapper.notAuthorized(commandId, reason)
+
+    override fun notAuthorizedByInterceptor(
+        commandId: CommandId,
+        reason: String,
+        interceptorName: String,
+        denialCode: String,
+    ): IdkErrorType = IdkErrorCommandErrorMapper.notAuthorizedByInterceptor(commandId, reason, interceptorName, denialCode)
 
     override fun unknown(
         message: String,

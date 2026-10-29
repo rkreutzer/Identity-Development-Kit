@@ -16,8 +16,10 @@ import com.sphereon.core.api.encodeToBase64
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.credential.claims.mapper.api.error.ClaimMappingErrors
 import com.sphereon.credential.claims.mapper.api.resolver.CredentialClaimResolver
+import com.sphereon.mdoc.data.device.DataElementIdentifier
 import com.sphereon.mdoc.data.device.IssuerSigned
 import com.sphereon.mdoc.data.device.IssuerSignedCborCodec
+import com.sphereon.mdoc.data.device.NameSpace
 import com.sphereon.openid.oid4vp.common.CredentialFormat
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesIntoSet
@@ -62,14 +64,26 @@ class MdocClaimResolver(
         claimPath: List<String>,
         disclosedClaims: JsonObject?,
     ): IdkResult<JsonElement?, IdkError> {
-        val decoded = decodeClaims(credential, format)
-        return if (decoded.isErr) Err(decoded.error) else Ok(decoded.value[claimPathKey(claimPath)])
+        if (claimPath.size != 2) return if (supports(format)) Ok(null) else extractionFailure("Unsupported credential format '${format.value}'")
+        val decoded = decodeIssuerSigned(credential, format)
+        if (decoded.isErr) return Err(decoded.error)
+        val item = decoded.value.getIssuerSignedItem(NameSpace(claimPath[0]), DataElementIdentifier(claimPath[1]))
+        return Ok(item?.elementValue?.toJsonElement())
     }
 
     private fun decodeClaims(
         credential: String,
         format: CredentialFormat,
     ): IdkResult<Map<String, JsonElement>, IdkError> {
+        val decoded = decodeIssuerSigned(credential, format)
+        if (decoded.isErr) return Err(decoded.error)
+        return Ok(decoded.value.toClaims())
+    }
+
+    private fun decodeIssuerSigned(
+        credential: String,
+        format: CredentialFormat,
+    ): IdkResult<IssuerSigned, IdkError> {
         if (!supports(format)) return extractionFailure("Unsupported credential format '${format.value}'")
         val bytes = try {
             credential.decodeFromBase64Url()
@@ -80,7 +94,7 @@ class MdocClaimResolver(
         if (decoded.isErr) {
             return extractionFailure("Failed to decode mdoc IssuerSigned data: ${decoded.error.message}", decoded.error.exception)
         }
-        return Ok(decoded.value.value.toClaims())
+        return Ok(decoded.value.value)
     }
 
     private fun IssuerSigned.toClaims(): Map<String, JsonElement> =
@@ -92,10 +106,10 @@ class MdocClaimResolver(
                 }
             }.toMap(linkedMapOf())
 
-    private fun extractionFailure(
+    private fun <T> extractionFailure(
         reason: String,
         cause: Throwable? = null,
-    ): IdkResult<Map<String, JsonElement>, IdkError> =
+    ): IdkResult<T, IdkError> =
         Err(
             ClaimMappingErrors.claimExtractionFailed(
                 credentialId = "unknown",

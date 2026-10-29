@@ -212,7 +212,9 @@ object PathPlaceholderInterpreter {
 abstract class BaseKeyStoreLoader(
     private val type: String,
 ) : KeyStoreLoader {
-    override suspend fun load(opts: KeyStoreLoaderOpts): KeyStore {
+    override suspend fun load(opts: KeyStoreLoaderOpts): KeyStore = loadSnapshot(opts).keyStore
+
+    internal suspend fun loadSnapshot(opts: KeyStoreLoaderOpts): KeyStoreLoaderFactory.Snapshot {
         val ks = KeyStore.getInstance(type)
 
         val effectiveSource: KeyStoreLoaderOpts.Source =
@@ -230,11 +232,19 @@ abstract class BaseKeyStoreLoader(
                 }
             }
 
+        var loadedFileRevision: String? = null
+
         // Always load through the uniform channel path for all sources
         try {
             withContext(Dispatchers.IO) {
                 KeyStoreUtils.openChannel(effectiveSource).toInputStream().use {
-                    ks.load(it, opts.keyStorePassword?.toCharArray())
+                    if (effectiveSource is KeyStoreLoaderOpts.Source.File) {
+                        val bytes = it.readBytes()
+                        ks.load(bytes.inputStream(), opts.keyStorePassword?.toCharArray())
+                        loadedFileRevision = KeyStoreLoaderFactory.contentRevision(bytes)
+                    } else {
+                        ks.load(it, opts.keyStorePassword?.toCharArray())
+                    }
                 }
             }
         } catch (ioe: java.io.IOException) {
@@ -244,7 +254,9 @@ abstract class BaseKeyStoreLoader(
                 val bakFile = java.io.File(dir, "${mainFile.name}.bak")
                 if (bakFile.exists()) {
                     java.io.FileInputStream(bakFile).use { bakIn ->
-                        ks.load(bakIn, opts.keyStorePassword?.toCharArray())
+                        val bytes = bakIn.readBytes()
+                        ks.load(bytes.inputStream(), opts.keyStorePassword?.toCharArray())
+                        loadedFileRevision = KeyStoreLoaderFactory.contentRevision(bytes)
                     }
                     try {
                         java.nio.file.Files.copy(
@@ -262,7 +274,7 @@ abstract class BaseKeyStoreLoader(
                 throw ioe
             }
         }
-        return ks
+        return KeyStoreLoaderFactory.Snapshot(ks, loadedFileRevision)
     }
 
     private fun resolveFileSource(src: KeyStoreLoaderOpts.Source.File): Pair<KeyStoreLoaderOpts.Source.File, File> {

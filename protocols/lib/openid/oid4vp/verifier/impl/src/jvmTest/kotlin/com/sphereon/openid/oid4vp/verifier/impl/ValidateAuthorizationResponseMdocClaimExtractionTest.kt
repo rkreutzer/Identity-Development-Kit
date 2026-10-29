@@ -16,6 +16,7 @@
 
 package com.sphereon.openid.oid4vp.verifier.impl
 
+import com.sphereon.cbor.CborParserImpl
 import com.sphereon.core.api.Err
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
@@ -75,6 +76,8 @@ import dev.zacsweers.metro.Named
 import dev.zacsweers.metro.Provides
 import dev.zacsweers.metro.createGraphFactory
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -276,27 +279,30 @@ class ValidateAuthorizationResponseMdocClaimExtractionTest {
                      ),
                      deviceResponseCborCodec = DeviceResponseCborCodecImpl(),
                      mobileSecurityObjectCborCodec = MobileSecurityObjectCborCodecImpl(),
+                     cborParser = CborParserImpl(),
                      vcdmDataIntegrityVerifier = RejectingVcdmDataIntegrityVerifierForMdoc,
                     credentialStatusVerifiers = emptySet(),
                     credentialTrustValidators = emptySet(),
                     businessAuthorizations = emptySet(),
+                    credentialTypeMatcher = com.sphereon.openid.oid4vp.verifier.impl.testutil.testCredentialTypeMatcher(),
                 )
 
-            val claims = command.extractDisclosedClaims(presentation, CredentialFormat.MSO_MDOC)
+            val projection = command.extractClaimProjections(presentation, CredentialFormat.MSO_MDOC).value.single()
+            val claims = projection.claims
 
             // Keys are <namespace>.<elementIdentifier>, mirroring mdoc DCQL [namespace, element] paths.
-            assertEquals("Jane", claims["org.iso.18013.5.1.given_name"])
-            assertEquals("Doe", claims["org.iso.18013.5.1.family_name"])
-            assertEquals(true, claims["org.iso.18013.5.1.age_over_18"])
-            assertEquals("yes", claims["org.iso.18013.5.1.aamva.organ_donor"])
+            assertEquals(JsonPrimitive("Jane"), claims["org.iso.18013.5.1.given_name"])
+            assertEquals(JsonPrimitive("Doe"), claims["org.iso.18013.5.1.family_name"])
+            assertEquals(JsonPrimitive(true), claims["org.iso.18013.5.1.age_over_18"])
+            assertEquals(JsonPrimitive("yes"), claims["org.iso.18013.5.1.aamva.organ_donor"])
             assertEquals(4, claims.size)
-            // Values are unwrapped native types, not CBOR wrappers / quoted strings.
-            assertTrue(claims["org.iso.18013.5.1.given_name"] is String)
-            assertTrue(claims["org.iso.18013.5.1.age_over_18"] is Boolean)
+            // The query root nests the same values by namespace, the shape DCQL claim paths address.
+            assertEquals(JsonPrimitive("yes"), (projection.queryRoot["org.iso.18013.5.1.aamva"] as JsonObject)["organ_donor"])
+            assertEquals("org.iso.18013.5.1.mDL", projection.credentialType)
         }
 
     @Test
-    fun `returns empty map for an undecodable mso_mdoc presentation`() =
+    fun shouldRefuseAnUndecodableMdocPresentationInsteadOfReportingNoClaims() =
         runTest {
             val setup = Setup(this)
             val command =
@@ -319,15 +325,17 @@ class ValidateAuthorizationResponseMdocClaimExtractionTest {
                      ),
                      deviceResponseCborCodec = DeviceResponseCborCodecImpl(),
                      mobileSecurityObjectCborCodec = MobileSecurityObjectCborCodecImpl(),
+                     cborParser = CborParserImpl(),
                      vcdmDataIntegrityVerifier = RejectingVcdmDataIntegrityVerifierForMdoc,
                     credentialStatusVerifiers = emptySet(),
                     credentialTrustValidators = emptySet(),
                     businessAuthorizations = emptySet(),
+                    credentialTypeMatcher = com.sphereon.openid.oid4vp.verifier.impl.testutil.testCredentialTypeMatcher(),
                 )
 
-            // Valid base64url ("notcbor") but not a CBOR DeviceResponse -> graceful empty map.
-            val claims = command.extractDisclosedClaims("bm90Y2Jvcg", CredentialFormat.MSO_MDOC)
-            assertTrue(claims.isEmpty())
+            // Valid base64url ("notcbor") but not a CBOR DeviceResponse: refused, never an empty claims map.
+            assertTrue(command.extractClaimProjections("bm90Y2Jvcg", CredentialFormat.MSO_MDOC).isErr)
+            assertTrue(command.extractClaimProjections("!!", CredentialFormat.MSO_MDOC).isErr)
         }
 }
 

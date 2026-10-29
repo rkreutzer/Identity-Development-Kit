@@ -18,6 +18,10 @@
 package com.sphereon.ktor.server.inject
 
 import com.sphereon.di.app.AppGraph
+import com.sphereon.core.defaults.context.ValidatedJwtClaimsInput
+import com.sphereon.di.context.IdentityResolutionResult
+import com.sphereon.di.context.SecuredTenantContextDetails
+import io.ktor.server.application.ApplicationCall
 import com.sphereon.ktor.server.inject.resolver.DefaultPrincipalResolver
 import com.sphereon.ktor.server.inject.resolver.PrincipalResolver
 import com.sphereon.ktor.server.inject.resolver.TenantResolver
@@ -45,6 +49,13 @@ import com.sphereon.ktor.server.inject.resolver.TenantResolver
  * ```
  */
 class KotlinInjectConfiguration {
+    /**
+     * Optional host projection of an already validated bearer into request-scoped credentials.
+     * Invoked only with validated JWT input and the final resolved identity. The host may retain
+     * stronger validation provenance here; it must preserve the exact bearer, issuer and lifetime.
+     * It also owns any service-audience marker on its result. The default projection stays generic.
+     */
+    var validatedSecureDetailsFactory: ValidatedRequestSecureDetailsFactory? = null
     /**
      * The root kotlin-inject AppGraph instance.
      * This is the entry point to the kotlin-inject dependency injection tree.
@@ -107,4 +118,12 @@ class KotlinInjectConfiguration {
      * and from remote configuration sources.
      */
     var ignoredPathPrefixes: List<String> = listOf("/health", "/ready", "/metrics")
+}
+
+fun interface ValidatedRequestSecureDetailsFactory {
+    fun create(
+        call: ApplicationCall,
+        validatedJwt: ValidatedJwtClaimsInput,
+        identity: IdentityResolutionResult,
+    ): SecuredTenantContextDetails
 }

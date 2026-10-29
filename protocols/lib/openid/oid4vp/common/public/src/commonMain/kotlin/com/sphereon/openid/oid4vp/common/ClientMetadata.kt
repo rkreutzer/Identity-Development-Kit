@@ -18,6 +18,7 @@ package com.sphereon.openid.oid4vp.common
 
 import com.sphereon.core.compat.JsExportCompat
 import com.sphereon.core.compat.JsExportIgnoreCompat
+import com.sphereon.crypto.core.jose.AlgorithmType
 import com.sphereon.crypto.core.jose.JoseKeyOperations
 import com.sphereon.crypto.core.jose.JwkSet
 import com.sphereon.crypto.core.jose.JwkType
@@ -64,6 +65,7 @@ data class ClientMetadata(
      * MUST contain the encryption public key per OID4VP §8.3 — wallet picks one and the
      * JWE `alg` equals the chosen JWK's `alg`. Per HAIP §5 the JWK MUST be ECDH-ES P-256.
      */
+    @Serializable(with = ClientMetadataJwkSetSerializer::class)
     val jwks: JwkSet? = null,
     @SerialName("jwks_uri")
     val jwksUri: String? = null,
@@ -92,12 +94,22 @@ data class ClientMetadata(
  */
 fun ClientMetadata.selectEncryptedResponseJwk(requireAlgorithm: Boolean = true): JwkType? =
     jwks?.keys?.firstOrNull { jwk ->
+        val hasEncryptionOperation =
+            jwk.key_ops?.any { operation ->
+                operation == JoseKeyOperations.ENCRYPT || operation == JoseKeyOperations.WRAP_KEY
+            } == true
+        val hasContradictoryUse = jwk.use != null && jwk.use != "enc"
+        val hasContradictoryOperations = jwk.key_ops != null && !hasEncryptionOperation
+        val hasExplicitEncryptionIntent = jwk.use == "enc" || hasEncryptionOperation
+        val hasEncryptionAlgorithm = jwk.alg?.type == AlgorithmType.ENCRYPTION
+        // RFC 7517 makes `use` optional. OID4VP §8.3 requires `alg` on the JWK
+        // and binds the JWE alg to it, so an encryption alg can identify an
+        // encryption key when neither optional `use` nor `key_ops` is present.
+        // Any explicit contradictory intent remains disqualifying.
         val isEncryptionKey =
-            jwk.use == "enc" ||
-                jwk.key_ops?.any { operation ->
-                    operation == JoseKeyOperations.ENCRYPT || operation == JoseKeyOperations.WRAP_KEY
-                } == true
-        isEncryptionKey && (!requireAlgorithm || jwk.alg != null)
+            !hasContradictoryUse && !hasContradictoryOperations &&
+                (hasExplicitEncryptionIntent || (jwk.use == null && jwk.key_ops == null && hasEncryptionAlgorithm))
+        isEncryptionKey && (hasEncryptionAlgorithm || (!requireAlgorithm && jwk.alg == null))
     }
 
 /**

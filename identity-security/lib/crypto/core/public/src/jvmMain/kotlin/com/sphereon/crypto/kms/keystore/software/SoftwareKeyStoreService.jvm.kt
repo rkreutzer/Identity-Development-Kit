@@ -72,6 +72,7 @@ import dev.zacsweers.metro.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -144,7 +145,7 @@ actual class SoftwareKeyStoreService actual constructor(
     private suspend fun cachedResolvedKey(alias: String): ResolvedKeyInfoType<*>? = sharedState().resolved(alias) as? ResolvedKeyInfoType<*>
 
     // Background scope for async I/O operations
-    private val backgroundScope = CoroutineScope(Dispatchers.IO)
+    private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // Atomic counter to track pending changes and ensure no updates are lost
     private val pendingChanges = AtomicLong(0)
@@ -161,22 +162,13 @@ actual class SoftwareKeyStoreService actual constructor(
     @Volatile
     private var currentPersistenceJob: Deferred<Unit>? = null
 
-    // Cross-instance durability: a file-backed keystore is loaded into memory once. When a DIFFERENT
-    // instance (e.g. another session/scope) durably overwrites the same file, this instance would
-    // otherwise keep serving its stale in-memory copy — and, critically, keep resolving the OLD entry
-    // for an alias that was overwritten on disk (so it never registers as a "miss"). To make the
-    // file-backed store behave as one shared durable store, reads reload the in-memory KeyStore from
-    // disk whenever the file's last-modified time has advanced past what this instance last loaded.
-    //
-    // The reloaded KeyStore overlays the lazily-loaded one; reads go through `currentKeyStore()`.
+    // Keep the revision belonging to the actual loaded snapshot, never a newer
+    // filesystem timestamp sampled after a cached older KeyStore was returned.
     @Volatile
     private var reloadedKeyStore: KeyStore? = null
 
-    // Last-modified time (epoch millis) of the source file as last observed by this instance — either
-    // the value present when first loaded, or the value after our own durable write / a disk reload.
-    // 0 means "not yet established"; reload decisions compare the live file mtime against this.
     @Volatile
-    private var loadedFileModifiedMillis: Long = 0L
+    private var loadedFileRevision: String? = null
 
     // Guards reload-from-disk so concurrent reads do not load the file multiple times in parallel.
     private val reloadMutex = Mutex()
@@ -209,9 +201,9 @@ actual class SoftwareKeyStoreService actual constructor(
 
     private val keyStoreData: Deferred<LoadedKeyStoreData> by lazy {
         backgroundScope.async {
-            val loadedKeyStore =
+            val loadedSnapshot =
                 withContext(Dispatchers.IO) {
-                    KeyStoreLoaderFactory.load(
+                    KeyStoreLoaderFactory.loadSnapshot(
                         KeyStoreLoaderOpts(
                             type = config.keyStoreType,
                             source = source,
@@ -233,15 +225,8 @@ actual class SoftwareKeyStoreService actual constructor(
                         src
                     }
                 }
-            // Record the file mtime present at load so later reads can detect a durable write made by
-            // another instance to the same file (see [maybeReloadFromDisk]).
-            (resolvedSource as? KeyStoreLoaderOpts.Source.File)?.let {
-                loadedFileModifiedMillis = java.io
-                    .File(it.path)
-                    .takeIf(java.io.File::exists)
-                    ?.lastModified() ?: 0L
-            }
-            LoadedKeyStoreData(loadedKeyStore, resolvedSource)
+            loadedFileRevision = loadedSnapshot.fileRevision
+            LoadedKeyStoreData(loadedSnapshot.keyStore, resolvedSource)
         }
     }
 
@@ -258,40 +243,23 @@ actual class SoftwareKeyStoreService actual constructor(
      */
     private suspend fun currentKeyStore(): KeyStore = reloadedKeyStore ?: keyStoreData.await().keyStore
 
-    /**
-     * Reloads the in-memory [KeyStore] from disk when the source file has been durably updated by
-     * another instance since this instance last loaded it. This is what makes a file-backed keystore
-     * (e.g. the platform `license` PKCS12) behave as one shared durable store: after an import
-     * session durably overwrites the recipient key on disk, a separate decrypt session that reused an
-     * older keystore instance picks up the new key here instead of resolving the stale entry.
-     *
-     * No-op for non-file (in-memory) keystores and when the file mtime has not advanced.
-     */
+    /** Reloads changed encrypted file contents; memory sources retain their normal cache behavior. */
     private suspend fun maybeReloadFromDisk() {
         val resolvedSource = keyStoreData.await().resolvedSource as? KeyStoreLoaderOpts.Source.File ?: return
-        val file = java.io.File(resolvedSource.path)
-        if (!file.exists()) return
-        val diskModified = file.lastModified()
-        // Fast path: file not newer than what we loaded — nothing to do.
-        if (diskModified <= loadedFileModifiedMillis) return
+        val diskRevision = KeyStoreLoaderFactory.fileRevision(resolvedSource)
+        if (diskRevision == loadedFileRevision) return
         reloadMutex.withLock {
-            // Re-check under the lock in case another coroutine just reloaded.
-            val current = file.lastModified()
-            if (current <= loadedFileModifiedMillis) return
-            val reloaded =
-                withContext(Dispatchers.IO) {
-                    KeyStoreLoaderFactory.load(
-                        KeyStoreLoaderOpts(
-                            type = config.keyStoreType,
-                            source = resolvedSource,
-                            keyStorePassword = String(password),
-                        ),
-                        forceReload = true,
-                    )
-                }
-            reloadedKeyStore = reloaded
-            loadedFileModifiedMillis = current
-            // Resolved-key conversions cached against the previous in-memory state are now stale.
+            if (KeyStoreLoaderFactory.fileRevision(resolvedSource) == loadedFileRevision) return
+            val snapshot = KeyStoreLoaderFactory.loadSnapshot(
+                KeyStoreLoaderOpts(
+                    type = config.keyStoreType,
+                    source = resolvedSource,
+                    keyStorePassword = String(password),
+                ),
+                forceReload = true,
+            )
+            reloadedKeyStore = snapshot.keyStore
+            loadedFileRevision = snapshot.fileRevision
             invalidateCache()
         }
     }

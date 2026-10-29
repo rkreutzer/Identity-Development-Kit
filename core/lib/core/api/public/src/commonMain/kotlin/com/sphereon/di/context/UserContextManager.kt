@@ -129,11 +129,29 @@ interface UserContextManager {
         makeActive: Boolean = true,
     ): UserContextInstance
 
+    @Deprecated(
+        message = "Use createOrGet(tenantAware, principalAware, principalType, makeActive) instead to avoid principal classification and tenant boundary ambiguities.",
+    )
     fun createOrGetFromData(
         tenantData: TenantContextData,
         principalValue: Any?,
         makeActive: Boolean = true,
     ): UserContextInstance
+
+    @Deprecated(
+        message = "Use createOrGet(tenantAware, principalAware, principalType, makeActive) instead to avoid principal classification and tenant boundary ambiguities.",
+    )
+    fun createOrGetFromData(
+        tenantData: TenantContextData,
+        principalValue: Any?,
+        principalType: PrincipalType,
+        makeActive: Boolean = true,
+    ): UserContextInstance =
+        createOrGetFromData(
+            tenantData = tenantData,
+            principalValue = principalValue,
+            makeActive = makeActive,
+        )
 
     fun createOrGetWithId(
         contextId: String,

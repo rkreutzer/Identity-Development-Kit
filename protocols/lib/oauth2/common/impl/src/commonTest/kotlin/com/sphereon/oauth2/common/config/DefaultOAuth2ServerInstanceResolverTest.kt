@@ -342,6 +342,72 @@ class DefaultOAuth2ServerInstanceResolverTest {
             assertEquals(0, provider.reloads)
         }
 
+    @Test
+    fun wellKnownSuffixNamingNoIssuerIsNotFoundInsteadOfTheDefaultServer() =
+        runTest {
+            val resolver = DefaultOAuth2ServerInstanceResolver(providerOf(tenantServers("operator")))
+
+            for (path in listOf(
+                "/.well-known/oauth-authorization-server/zzz",
+                "/.well-known/openid-configuration/zzz",
+                "/.well-known/oauth-authorization-server/as",
+                "/zzz/.well-known/openid-configuration",
+            )) {
+                val result = resolver.resolve(request(path = path, host = "globex.example.com"))
+                assertTrue(result.isErr, "$path names no hosted issuer, got ${if (result.isOk) result.value else null}")
+                assertEquals("NOT_FOUND_ERROR", result.error.code, path)
+            }
+            val own = resolver.resolve(request(path = "/.well-known/openid-configuration/as/operator", host = "globex.example.com"))
+            assertEquals("operator", own.value)
+        }
+
+    /**
+     * The platform tenant always hosts its authorization server at the bare origin. That server
+     * answers its own bare URLs, but a URL naming another issuer path is not its URL.
+     */
+    @Test
+    fun bareOriginServerAnswersOnlyItsOwnUrls() =
+        runTest {
+            val resolver =
+                DefaultOAuth2ServerInstanceResolver(
+                    providerOf(
+                        OAuth2ServersConfig(
+                            defaultServer = "platform",
+                            servers = mapOf("platform" to OAuth2ServerInstanceConfig(issuer = "https://platform.example.com")),
+                        ),
+                    ),
+                )
+
+            for (path in listOf("/token", "/authorize", "/par", "/.well-known/oauth-authorization-server", "/.well-known/openid-configuration")) {
+                val result = resolver.resolve(request(path = path, host = "platform.example.com"))
+                assertEquals("platform", result.value, path)
+            }
+            for (path in listOf(
+                "/as/does-not-exist/token",
+                "/as/does-not-exist/authorize",
+                "/.well-known/oauth-authorization-server/as/does-not-exist",
+                "/.well-known/openid-configuration/zzz",
+                "/as/does-not-exist/.well-known/openid-configuration",
+            )) {
+                val result = resolver.resolve(request(path = path, host = "platform.example.com"))
+                assertTrue(result.isErr, "$path must not reach the bare-origin server, got ${if (result.isOk) result.value else null}")
+                assertEquals("NOT_FOUND_ERROR", result.error.code, path)
+            }
+        }
+
+    @Test
+    fun namedIssuerPathSelectsItsServerWhenCalledThroughAnotherHost() =
+        runTest {
+            // East-west calls carry the platform host while naming the tenant issuer path.
+            val resolver = DefaultOAuth2ServerInstanceResolver(providerOf(tenantServers("acme", "wallet-proxy")))
+
+            assertEquals("acme", resolver.resolve(request(path = "/as/acme/token", host = "platform.example.com")).value)
+            assertEquals(
+                "wallet-proxy",
+                resolver.resolve(request(path = "/.well-known/oauth-authorization-server/as/wallet-proxy", host = "platform.example.com")).value,
+            )
+        }
+
     private fun tenantServers(vararg slugs: String): OAuth2ServersConfig =
         OAuth2ServersConfig(
             defaultServer = slugs.first(),

@@ -65,7 +65,7 @@ class TokenHttpEndpointCommandImpl(
     private val handleTokenRequestCommand: HandleTokenRequestCommand,
     private val configProvider: OAuth2ServersConfigProvider,
     private val baseUrlResolver: OAuth2ServerBaseUrlResolver,
-    private val dpopNonceManager: DpopNonceManager,
+    private val dpopNonceManager: Lazy<DpopNonceManager>,
     private val clientCertificateExtractor: ClientCertificateExtractor,
     private val auditEmitter: OAuth2AuditEmitter,
 ) : HttpEndpointCommandAdapter(
@@ -165,7 +165,7 @@ class TokenHttpEndpointCommandImpl(
         // error paths we attach the current nonce here.
         val finalResponse =
             if (dpopProofPresented && !baseResponse.headers.containsKey("DPoP-Nonce")) {
-                baseResponse.copy(headers = baseResponse.headers + ("DPoP-Nonce" to dpopNonceManager.currentNonce()))
+                baseResponse.copy(headers = baseResponse.headers + ("DPoP-Nonce" to dpopNonceManager.value.currentNonce()))
             } else {
                 baseResponse
             }

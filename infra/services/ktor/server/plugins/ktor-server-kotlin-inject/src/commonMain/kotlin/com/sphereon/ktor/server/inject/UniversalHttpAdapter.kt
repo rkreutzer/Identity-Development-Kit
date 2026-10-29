@@ -21,16 +21,17 @@ import com.sphereon.core.api.http.GenericHttpRequest
 import com.sphereon.core.api.http.GenericHttpResponse
 import com.sphereon.core.api.http.dispatch.HttpAdapterDispatcher
 import com.sphereon.core.api.http.dispatch.HttpAdapterRouteMatch
+import com.sphereon.core.api.session.CommandInvocationContext
 import dev.zacsweers.metro.createGraph
 import io.ktor.http.ContentType
-import io.ktor.http.HttpMethod
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.log
-import io.ktor.server.request.contentLength
 import io.ktor.server.request.contentType
 import io.ktor.server.request.httpMethod
+import io.ktor.server.request.httpVersion
 import io.ktor.server.request.path
 import io.ktor.server.request.receiveChannel
 import io.ktor.server.request.receiveText
@@ -44,9 +45,13 @@ import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.util.AttributeKey
 import io.ktor.utils.io.core.readBytes
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.readAvailable
 import io.ktor.utils.io.readRemaining
 import io.ktor.utils.io.writeFully
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.flowOn
 
 /**
  * Per-call attribute holding the Layer 1 resolved base tenant id.
@@ -87,6 +92,19 @@ val ValidatedJwtClaimsAttribute: AttributeKey<com.sphereon.core.defaults.context
  */
 val AuthoritativePrincipalTypeAttribute: AttributeKey<com.sphereon.di.context.PrincipalType> =
     AttributeKey("sphereon.auth.authoritativePrincipalType")
+
+/**
+ * Per-call attribute holding the receiver audience the host ingress verified the bearer was issued
+ * for, the service's own configured audience.
+ *
+ * Set it next to [ValidatedJwtClaimsAttribute] only after the validated token's audience contains
+ * that service audience. The request session then exposes its secure details as a
+ * [com.sphereon.di.context.PreauthorizedServiceBearer] for exactly this one audience, the contract
+ * a binary transport ingress gives command code. Absent means the bearer was not verified for this
+ * service.
+ */
+val ValidatedServiceAudienceAttribute: AttributeKey<String> =
+    AttributeKey("sphereon.auth.validatedServiceAudience")
 
 /** Marks Ktor routes whose method/path must be selected from the AppScope HTTP catalog. */
 val UniversalHttpAdapterRouteAttribute: AttributeKey<Boolean> =
@@ -170,18 +188,27 @@ private suspend fun ApplicationCall.dispatchUniversal(config: UniversalHttpAdapt
         val selectedRoute =
             attributes.getOrNull(SelectedHttpAdapterRouteAttribute)
                 ?: error("Universal HTTP dispatch requires an AppScope-selected route")
-        val dispatcher = (this.sessionInstance.graph as HttpAdapterDispatcher.Graph).httpAdapterDispatcher
         val genericRequest =
-            this.toGenericHttpRequest().let { request ->
+            this.toGenericHttpRequest(selectedRoute.maxRequestBodyBytes).let { request ->
                 request.copy(path = config.routePolicy().selectionPath(request.path))
             }
+        val dispatcher = (this.sessionInstance.graph as HttpAdapterDispatcher.Graph).httpAdapterDispatcher
         if (config.verboseLogging) {
             this.application.log.info("Dispatching: ${genericRequest.method} ${genericRequest.path}")
         }
-        val genericResponse = dispatcher.dispatch(genericRequest, selectedRoute)
+        val genericResponse = dispatchUniversalHttpRequest(dispatcher, genericRequest, selectedRoute)
         this.respondWithGenericResponse(genericResponse)
     } catch (cancelled: CancellationException) {
         throw cancelled
+    } catch (framing: InvalidHttpRequestFramingException) {
+        if (framing.closeConnection) this.response.header(HttpHeaders.Connection, "close")
+        this.respond(HttpStatusCode.BadRequest)
+    } catch (_: UniversalHttpRequestBodyTooLargeException) {
+        this.respondText(
+            text = "Request body exceeds endpoint byte limit",
+            contentType = ContentType.Text.Plain,
+            status = HttpStatusCode.PayloadTooLarge,
+        )
     } catch (expected: Throwable) {
         val handler = config.errorHandler
         if (handler != null) {
@@ -195,6 +222,23 @@ private suspend fun ApplicationCall.dispatchUniversal(config: UniversalHttpAdapt
             )
         }
     }
+}
+
+/** The network ingress owns a fresh boundary even when the handler has no standalone command. */
+internal suspend fun dispatchUniversalHttpRequest(
+    dispatcher: HttpAdapterDispatcher,
+    request: GenericHttpRequest,
+    route: HttpAdapterRouteMatch,
+): GenericHttpResponse = withContext(CommandInvocationContext.externalBoundary()) {
+    val response = dispatcher.dispatch(request, route)
+    val body = response.bodyContent
+    if (body is GenericHttpBody.TextStream) {
+        // A lazy body outlives dispatch. A declared command owns the stream; an inline handler's
+        // first command remains an external root when the body is collected later by Ktor.
+        val invocation = if (route.commandId == null) CommandInvocationContext.externalBoundary()
+            else CommandInvocationContext.externalCommand()
+        response.copy(bodyContent = GenericHttpBody.TextStream(body.flow.flowOn(invocation), body.charset))
+    } else response
 }
 
 /**
@@ -335,7 +379,11 @@ private fun UniversalHttpAdapterConfig.routePolicy(): UniversalHttpAdapterRouteP
  * - Extracts query parameters as a map
  * - Provides a lazy body supplier to defer reading the request body
  */
-suspend fun ApplicationCall.toGenericHttpRequest(): GenericHttpRequest {
+suspend fun ApplicationCall.toGenericHttpRequest(): GenericHttpRequest = toGenericHttpRequest(null)
+
+/** A descriptor-selected byte limit is checked before dispatch, including unknown-length bodies. */
+suspend fun ApplicationCall.toGenericHttpRequest(maxRequestBodyBytes: Int?): GenericHttpRequest {
+    require(maxRequestBodyBytes == null || maxRequestBodyBytes >= 0)
     val method = request.httpMethod.value
     val path = request.path()
     val resolvedBaseTenantId = attributes.getOrNull(BaseTenantIdAttribute)
@@ -358,6 +406,12 @@ suspend fun ApplicationCall.toGenericHttpRequest(): GenericHttpRequest {
             .entries()
             .associate { (name, values) -> name to values.firstOrNull().orEmpty() }
 
+    // Keep decoded occurrences separate: a delimiter can be part of an individual value.
+    val multiValueQueryParameters =
+        request.queryParameters
+            .names()
+            .associateWith { name -> request.queryParameters.getAll(name)?.toList() ?: emptyList() }
+
     // Path parameters from Ktor routing (if any)
     val pathParameters =
         parameters
@@ -365,12 +419,26 @@ suspend fun ApplicationCall.toGenericHttpRequest(): GenericHttpRequest {
             .filter { (key, _) -> key != "..." } // Filter out the catch-all parameter
             .associate { (name, values) -> name to values.firstOrNull().orEmpty() }
 
+    // Validate raw framing before the best-effort body-read catch below.
+    val framing = resolveHttpRequestBodyFraming(
+        request.httpVersion,
+        request.headers.getAll(HttpHeaders.ContentLength).orEmpty(),
+        request.headers.getAll(HttpHeaders.TransferEncoding).orEmpty(),
+    )
+    val contentLength = framing.contentLength
+
     // Read the body once and cache it since Ktor request bodies can only be consumed once.
     val bodyContent =
         try {
-            val contentLength = request.contentLength()
-            if (request.httpMethod.mayCarryRequestBody() && contentLength != 0L) {
-                if (request.contentType().isTextLikeRequestBody()) {
+            if (maxRequestBodyBytes != null && contentLength != null && contentLength > maxRequestBodyBytes) {
+                throw UniversalHttpRequestBodyTooLargeException()
+            }
+            if (framing.shouldReadBody) {
+                if (maxRequestBodyBytes != null) {
+                    val bytes = readUniversalBoundedRequestBytes(receiveChannel(), maxRequestBodyBytes)
+                    if (request.contentType().isTextLikeRequestBody()) GenericHttpBody.Text(bytes.decodeToString())
+                    else GenericHttpBody.Bytes(bytes)
+                } else if (request.contentType().isTextLikeRequestBody()) {
                     GenericHttpBody.Text(receiveText())
                 } else {
                     GenericHttpBody.Bytes(receiveChannel().readRemaining().readBytes())
@@ -378,7 +446,8 @@ suspend fun ApplicationCall.toGenericHttpRequest(): GenericHttpRequest {
             } else {
                 GenericHttpBody.Empty
             }
-        } catch (_: Exception) {
+        } catch (receiveFailure: Exception) {
+            if (maxRequestBodyBytes != null || receiveFailure is CancellationException) throw receiveFailure
             GenericHttpBody.Empty
         }
 
@@ -397,10 +466,43 @@ suspend fun ApplicationCall.toGenericHttpRequest(): GenericHttpRequest {
         resolvedTenantId = resolvedBaseTenantId,
         multiValueHeaders = multiValueHeaders,
         queryParameters = queryParameters,
+        multiValueQueryParameters = multiValueQueryParameters,
         pathParameters = pathParameters,
         bodyContent = bodyContent,
         clientCertificateChain = clientCertificateChain,
     )
+}
+
+/** Transport overflow is handled as HTTP 413 instead of a successful empty or partial body. */
+class UniversalHttpRequestBodyTooLargeException : IllegalArgumentException("Request body exceeds endpoint byte limit")
+
+internal suspend fun readUniversalBoundedRequestBytes(channel: ByteReadChannel, maxBytes: Int): ByteArray {
+    require(maxBytes >= 0)
+    val chunks = mutableListOf<ByteArray>()
+    val buffer = ByteArray(8192)
+    var size = 0
+    while (!channel.isClosedForRead) {
+        // Consume at most one byte past the bound, without overflowing Int for a large limit.
+        val length = minOf(buffer.size.toLong(), maxBytes.toLong() - size + 1).toInt()
+        val count = channel.readAvailable(buffer, 0, length)
+        if (count < 0) break
+        if (count > maxBytes - size) {
+            channel.cancel(UniversalHttpRequestBodyTooLargeException())
+            throw UniversalHttpRequestBodyTooLargeException()
+        }
+        if (count > 0) {
+            chunks.add(buffer.copyOf(count))
+            size += count
+        }
+    }
+    channel.closedCause?.let { throw it }
+    val bytes = ByteArray(size)
+    var offset = 0
+    for (chunk in chunks) {
+        chunk.copyInto(bytes, offset)
+        offset += chunk.size
+    }
+    return bytes
 }
 
 private fun ContentType.isTextLikeRequestBody(): Boolean {
@@ -411,8 +513,50 @@ private fun ContentType.isTextLikeRequestBody(): Boolean {
         value.startsWith("application/x-www-form-urlencoded")
 }
 
-private fun HttpMethod.mayCarryRequestBody(): Boolean =
-    this == HttpMethod.Post || this == HttpMethod.Put || this == HttpMethod.Patch || this == HttpMethod.Delete
+internal data class HttpRequestBodyFraming(val contentLength: Long?, val shouldReadBody: Boolean)
+
+internal class InvalidHttpRequestFramingException(
+    message: String,
+    val closeConnection: Boolean,
+) : IllegalArgumentException(message)
+
+/** Validate raw framing fields before the best-effort body-read catch can hide errors. */
+internal fun resolveHttpRequestBodyFraming(
+    httpVersion: String,
+    contentLengthFields: List<String>,
+    transferEncodingFields: List<String>,
+): HttpRequestBodyFraming {
+    val http10 = httpVersion == "HTTP/1.0"
+    val http11 = httpVersion == "HTTP/1.1"
+    val isHttp1 = httpVersion.startsWith("HTTP/1.")
+    fun invalid(reason: String): Nothing = throw InvalidHttpRequestFramingException(reason, closeConnection = isHttp1)
+    if (isHttp1 && !http10 && !http11) invalid("Unsupported HTTP/1.x version")
+
+    val contentLength = when (contentLengthFields.size) {
+        0 -> null
+        1 -> {
+            val field = contentLengthFields.single().trim(' ', '\t')
+            if (field.isEmpty() || field.any { it !in '0'..'9' }) invalid("Invalid Content-Length")
+            field.toLongOrNull() ?: invalid("Invalid Content-Length")
+        }
+        else -> invalid("Multiple Content-Length fields")
+    }
+
+    if (transferEncodingFields.isNotEmpty()) {
+        if (!http11 || contentLength != null) invalid("Unsupported or ambiguous Transfer-Encoding")
+        val codings = transferEncodingFields.flatMap { field -> field.split(',') }
+            .map { it.trim(' ', '\t').lowercase() }
+        if (codings.last() != "chunked" || codings.count { it == "chunked" } != 1 ||
+            codings.any { it != "identity" && it != "chunked" }
+        ) {
+            invalid("Unsupported or ambiguous Transfer-Encoding")
+        }
+        return HttpRequestBodyFraming(contentLength = null, shouldReadBody = true)
+    }
+
+    val shouldReadBody = contentLength?.let { it > 0L } ?: !isHttp1
+    return HttpRequestBodyFraming(contentLength, shouldReadBody)
+}
 
 /**
  * Platform hook for extracting the TLS client certificate chain (DER, leaf-first) from a

@@ -276,7 +276,8 @@ class SessionContextManagerImpl(
                     "contextId=${userContextInstance.contextId.sanitizeLogToken()} remainingSessions=0 " +
                     "parentChildrenBefore=${parentChildrenBefore ?: "unknown"} reason=destroy-all",
             )
-            runCatching { instance.scope.destroy() }
+            // Same monitor as session creation: destroying removes the scope from the context's child set.
+            runCatching { synchronized(this) { instance.scope.destroy() } }
                 .onSuccess {
                     val parentChildrenAfter = parentScope?.let { parent -> runCatching { parent.children().size }.getOrNull() }
                     log.debug(
@@ -583,127 +584,176 @@ class SessionContextManagerImpl(
             return existing.graph
         }
 
-        // Slow path: need to create, use synchronized block with double-check
+        // Slow path. Building a session graph and materializing its scoped instances can resolve
+        // configuration, which may block on I/O or on a lock. None of that runs under this manager's
+        // monitor: holding it there would stall every session creation in this context behind one
+        // slow build. The monitor guards the registry and the context scope's child set, which is not
+        // thread-safe: only the build that wins registration attaches its session scope, under it.
         return try {
-            synchronized(this) {
-                // Double-check after acquiring lock - read atomic value once
-                val lockedInstances =
-                    timing.measure(SessionScopeResolutionPhase.CONTEXT_SCOPE_RESOLUTION) { instances.value }
-                val lockedExisting = lockedInstances[sessionId]
-                if (lockedExisting != null) {
-                    logSessionReused(
-                        sessionId = sessionId,
-                        source = source.value,
-                        makeActive = makeActive,
-                        secureDetailsPresent = secureDetails != null,
-                    )
-                    timing.measure(SessionScopeResolutionPhase.CONTEXT_SCOPE_RESOLUTION) {
-                        if (makeActive) {
-                            setActiveInstance(lockedExisting)
-                        }
-                    }
-                    timing.complete(SessionScopeResolutionOutcome.REUSE)
-                    return lockedExisting.graph
-                }
-
+            val built =
                 ConfigBootstrapGuard.withContextRegistration {
-                    // Determine the correct scope for this session.
-                    val contextScope =
-                        timing.measure(SessionScopeResolutionPhase.CONTEXT_SCOPE_RESOLUTION) {
-                            when {
-                                isBackgroundContext() -> anonymousUserGraphManager.getBackgroundGraph().instance.scope
-                                isAnonymousContext() -> anonymousUserGraphManager.getAnonymousGraph().instance.scope
-                                else -> getContextScope()
-                            }
-                        }
-                    val parentChildrenBefore = runCatching { contextScope.children().size }.getOrNull()
-                    logSessionCreateStart(
+                    buildSession(
                         sessionId = sessionId,
-                        source = source.value,
+                        sessionContext = sessionContext,
+                        correlationId = correlationId,
                         makeActive = makeActive,
-                        secureDetailsPresent = secureDetails != null,
-                        retainedSessionsBefore = lockedInstances.size,
-                        parentChildrenBefore = parentChildrenBefore,
-                    )
-
-                    // Create the session context. Callback construction was timed by the caller.
-                    val actualSessionContext =
-                        sessionContext ?: timing.measure(SessionScopeResolutionPhase.SESSION_CONTEXT_CREATION) {
-                            if (sessionId == ANONYMOUS_SESSION_ID) {
-                                createAnonymousSessionContext(sessionId, correlationId)
-                            } else {
-                                SessionContextImpl(
-                                    context = userContextInstance.context,
-                                    sessionId = sessionId,
-                                    correlationId = correlationId,
-                                    secureDetails = secureDetails,
-                                    principalType = principalType,
-                                )
-                            }
-                        }
-
-                    // Create the session graph and scope. The per-session secure details ride the
-                    // graph factory so the DI-resolved SessionContext (what SessionExecution sees)
-                    // carries the same credentials as the scope-service copy above.
-                    val sessionGraph =
-                        timing.measure(SessionScopeResolutionPhase.METRO_GRAPH_CREATION) {
-                            sessionGraphFactory.createSessionGraph(
-                                sessionId,
-                                actualSessionContext.correlationId,
-                                secureDetails,
-                                principalType,
-                            )
-                        }
-                    val scope =
-                        timing.measure(SessionScopeResolutionPhase.SCOPE_CREATION) {
-                            contextScope.buildChild("session:$sessionId") {
-                                addMetroDependencyGraph(sessionGraph)
-                                addService("sessionContext", actualSessionContext)
-                                addCoroutineScopeScoped(sessionGraph.sessionScopeCoroutineScopeScoped)
-                            }
-                        }
-
-                    // Initialize the instance.
-                    val instance =
-                        timing.measure(SessionScopeResolutionPhase.SESSION_INSTANCE_INITIALIZATION) {
-                            sessionGraph.instance.also { resolvedInstance ->
-                                (resolvedInstance as? SessionInstanceImpl)?.initialize(sessionGraph, scope)
-                            }
-                        }
-
-                    // Store the instance atomically.
-                    instances.value = lockedInstances + (sessionId to instance)
-
-                    // Set as active if requested.
-                    if (makeActive) {
-                        setActiveInstance(instance)
-                    }
-
-                    // Materialization and registration are deliberately separate. Evaluating the
-                    // Metro property may construct contributed SessionScope objects; the exact
-                    // materialized collection is retained and passed once to registration.
-                    materializeAndRegisterScopedInstances(
+                        secureDetails = secureDetails,
+                        principalType = principalType,
+                        source = source,
                         timing = timing,
-                        materialize = { sessionGraph.sessionScopedInstances },
-                        register = { instances -> scope.register(instances) },
                     )
-                    logSessionCreated(
-                        sessionId = sessionId,
-                        source = source.value,
-                        makeActive = makeActive,
-                        secureDetailsPresent = secureDetails != null,
-                        retainedSessionsAfter = instances.value.size,
-                        parentChildrenAfter = runCatching { contextScope.children().size }.getOrNull(),
-                    )
-
-                    timing.complete(SessionScopeResolutionOutcome.CREATE)
-                    sessionGraph
                 }
+            var attachedScope: Scope? = null
+            val registered =
+                synchronized(this) {
+                    val lockedInstances =
+                        timing.measure(SessionScopeResolutionPhase.CONTEXT_SCOPE_RESOLUTION) { instances.value }
+                    val winner =
+                        lockedInstances[sessionId] ?: built.instance.also { instance ->
+                            // Only the winner attaches a scope, so a losing build never enters the
+                            // context scope's child set and has nothing to release.
+                            val scope = timing.measure(SessionScopeResolutionPhase.SCOPE_CREATION) { built.attachScope() }
+                            timing.measure(SessionScopeResolutionPhase.SESSION_INSTANCE_INITIALIZATION) {
+                                (instance as? SessionInstanceImpl)?.initialize(built.sessionGraph, scope)
+                            }
+                            attachedScope = scope
+                            instances.value = lockedInstances + (sessionId to instance)
+                        }
+                    if (makeActive) {
+                        setActiveInstance(winner)
+                    }
+                    winner
+                }
+            val scope = attachedScope
+            if (registered !== built.instance || scope == null) {
+                // Another caller registered this session while this one was building. Keep theirs. This
+                // build attached no scope, so nothing exits it: cancel its graph's session coroutine scope
+                // here, outside the monitor, so nothing it launched keeps running.
+                runCatching { built.sessionGraph.sessionScopeCoroutineScopeScoped.onExitScope() }
+                    .onFailure { error ->
+                        log.warn(
+                            "VDX_SESSION_SCOPE_DUPLICATE_RELEASE_FAILED sessionId=${sessionId.sanitizeLogToken()} " +
+                                "contextId=${userContextInstance.contextId.sanitizeLogToken()} " +
+                                "error=${error.message?.sanitizeLogToken() ?: error::class.simpleName}",
+                        )
+                    }
+                logSessionReused(
+                    sessionId = sessionId,
+                    source = source.value,
+                    makeActive = makeActive,
+                    secureDetailsPresent = secureDetails != null,
+                )
+                timing.complete(SessionScopeResolutionOutcome.REUSE)
+                return registered.graph
             }
+
+            // Materialization and registration are deliberately separate. Evaluating the Metro
+            // property may construct contributed SessionScope objects; the exact materialized
+            // collection is retained and passed once to registration. The session is already
+            // registered, as before, so code that runs here can look it up.
+            ConfigBootstrapGuard.withContextRegistration {
+                materializeAndRegisterScopedInstances(
+                    timing = timing,
+                    materialize = { built.sessionGraph.sessionScopedInstances },
+                    register = { scopedInstances -> scope.register(scopedInstances) },
+                )
+            }
+            logSessionCreated(
+                sessionId = sessionId,
+                source = source.value,
+                makeActive = makeActive,
+                secureDetailsPresent = secureDetails != null,
+                retainedSessionsAfter = instances.value.size,
+                parentChildrenAfter = runCatching { built.contextScope.children().size }.getOrNull(),
+            )
+
+            timing.complete(SessionScopeResolutionOutcome.CREATE)
+            built.sessionGraph
         } catch (failure: Throwable) {
             timing.complete(SessionScopeResolutionOutcome.FAILURE, failure)
             throw failure
         }
+    }
+
+    /**
+     * Creates the session context, graph and instance. Runs without the manager's monitor. The session
+     * scope is attached later, under the monitor, by the build that wins registration.
+     */
+    private fun buildSession(
+        sessionId: String,
+        sessionContext: SessionContext?,
+        correlationId: String,
+        makeActive: Boolean,
+        secureDetails: SecuredTenantContextDetails?,
+        principalType: PrincipalType?,
+        source: SessionScopeResolutionSource,
+        timing: SessionScopeTimingAttempt,
+    ): BuiltSession {
+        // Determine the correct scope for this session.
+        val contextScope =
+            timing.measure(SessionScopeResolutionPhase.CONTEXT_SCOPE_RESOLUTION) {
+                when {
+                    isBackgroundContext() -> anonymousUserGraphManager.getBackgroundGraph().instance.scope
+                    isAnonymousContext() -> anonymousUserGraphManager.getAnonymousGraph().instance.scope
+                    else -> getContextScope()
+                }
+            }
+        val parentChildrenBefore = runCatching { contextScope.children().size }.getOrNull()
+        logSessionCreateStart(
+            sessionId = sessionId,
+            source = source.value,
+            makeActive = makeActive,
+            secureDetailsPresent = secureDetails != null,
+            retainedSessionsBefore = instances.value.size,
+            parentChildrenBefore = parentChildrenBefore,
+        )
+
+        // Create the session context. Callback construction was timed by the caller.
+        val actualSessionContext =
+            sessionContext ?: timing.measure(SessionScopeResolutionPhase.SESSION_CONTEXT_CREATION) {
+                if (sessionId == ANONYMOUS_SESSION_ID) {
+                    createAnonymousSessionContext(sessionId, correlationId)
+                } else {
+                    SessionContextImpl(
+                        context = userContextInstance.context,
+                        sessionId = sessionId,
+                        correlationId = correlationId,
+                        secureDetails = secureDetails,
+                        principalType = principalType,
+                    )
+                }
+            }
+
+        // Create the session graph and scope. The per-session secure details ride the
+        // graph factory so the DI-resolved SessionContext (what SessionExecution sees)
+        // carries the same credentials as the scope-service copy above.
+        val sessionGraph =
+            timing.measure(SessionScopeResolutionPhase.METRO_GRAPH_CREATION) {
+                sessionGraphFactory.createSessionGraph(
+                    sessionId,
+                    actualSessionContext.correlationId,
+                    secureDetails,
+                    principalType,
+                )
+            }
+        val instance = timing.measure(SessionScopeResolutionPhase.SESSION_INSTANCE_INITIALIZATION) { sessionGraph.instance }
+        return BuiltSession(sessionId, contextScope, sessionGraph, actualSessionContext, instance)
+    }
+
+    private class BuiltSession(
+        val sessionId: String,
+        val contextScope: Scope,
+        val sessionGraph: SessionGraph,
+        val sessionContext: SessionContext,
+        val instance: SessionInstance,
+    ) {
+        /** Adds the session scope to the context scope's child set. Call only under the manager's monitor. */
+        fun attachScope(): Scope =
+            contextScope.buildChild("session:$sessionId") {
+                addMetroDependencyGraph(sessionGraph)
+                addService("sessionContext", sessionContext)
+                addCoroutineScopeScoped(sessionGraph.sessionScopeCoroutineScopeScoped)
+            }
     }
 
     /**

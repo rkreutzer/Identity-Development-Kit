@@ -29,9 +29,10 @@ import com.sphereon.crypto.core.generic.computeHmac
 import com.sphereon.di.session.SessionScope
 import com.sphereon.ktor.http.client.provider.HttpClientFactory
 import com.sphereon.ktor.http.client.provider.HttpClientOptions
+import com.sphereon.openid.oid4vp.universal.GetAuthorizationRequestStatusOutput
+import com.sphereon.openid.oid4vp.universal.universalOid4vpResponseJson
 import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionCallbackDispatcher
 import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionCallbackSigning
-import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionStatusUpdate
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -44,7 +45,10 @@ import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import kotlinx.coroutines.CancellationException
-import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 
 /**
  * Default callback dispatcher using the IDK HTTP abstraction ([HttpClientFactory]).
@@ -60,19 +64,18 @@ class KtorAuthorizationSessionCallbackDispatcher(
 ) : AuthorizationSessionCallbackDispatcher {
     override suspend fun dispatch(
         url: String,
-        update: AuthorizationSessionStatusUpdate,
-    ): IdkResult<Unit, IdkError> = dispatch(url, update, null)
+        status: GetAuthorizationRequestStatusOutput,
+    ): IdkResult<Unit, IdkError> = dispatch(url, status, null)
 
     override suspend fun dispatch(
         url: String,
-        update: AuthorizationSessionStatusUpdate,
+        status: GetAuthorizationRequestStatusOutput,
         signing: AuthorizationSessionCallbackSigning?,
     ): IdkResult<Unit, IdkError> {
         var client: HttpClient? = null
         return try {
-            // Keep this byte serializer in lockstep with HttpClientOptions.createDefault()'s
-            // ContentNegotiation JSON configuration; the exact bytes are signed and then sent.
-            val body = CALLBACK_JSON.encodeToString(AuthorizationSessionStatusUpdate.serializer(), update).encodeToByteArray()
+            // The status API writes its body with the same configuration; the exact bytes are signed and then sent.
+            val body = universalOid4vpResponseJson.encodeToString(JsonElement.serializer(), status.toCallbackJson()).encodeToByteArray()
             val signature = when {
                 signing == null -> null
                 else -> {
@@ -120,12 +123,18 @@ class KtorAuthorizationSessionCallbackDispatcher(
         }
     }
 
+    /**
+     * The status response as the callback body. Verified data only appears when the mapper selected
+     * some, so `verified_data` and its unselected members are left off the wire instead of being sent
+     * as null.
+     */
+    private fun GetAuthorizationRequestStatusOutput.toCallbackJson(): JsonObject {
+        val encoded = universalOid4vpResponseJson.encodeToJsonElement(GetAuthorizationRequestStatusOutput.serializer(), this).jsonObject
+        val verifiedDataJson = encoded[VERIFIED_DATA] as? JsonObject ?: return JsonObject(encoded - VERIFIED_DATA)
+        return JsonObject(encoded + (VERIFIED_DATA to JsonObject(verifiedDataJson.filterValues { it !is JsonNull })))
+    }
+
     private companion object {
-        /** Matches HttpClientOptions.createDefault().contentNegotiationConfig exactly. */
-        val CALLBACK_JSON = Json {
-            encodeDefaults = true
-            ignoreUnknownKeys = true
-            prettyPrint = false
-        }
+        const val VERIFIED_DATA = "verified_data"
     }
 }

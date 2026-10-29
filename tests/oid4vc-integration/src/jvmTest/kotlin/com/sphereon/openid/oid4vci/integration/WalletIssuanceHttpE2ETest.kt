@@ -572,15 +572,17 @@ class WalletIssuanceHttpE2ETest {
 
             // Create access token via the real AS service
             val tokenResult =
-                asService.createAccessToken(
-                    CreateAccessTokenArgs(
-                        subject = consumed.sessionId,
-                        clientId = "wallet-e2e",
-                        scope = "degree",
-                        audience = listOf(issuerUrl),
-                        expiresInSeconds = 3600,
-                    ),
-                )
+                ctx.withAuthorizationServer {
+                    asService.createAccessToken(
+                        CreateAccessTokenArgs(
+                            subject = consumed.sessionId,
+                            clientId = "wallet-e2e",
+                            scope = "degree",
+                            audience = listOf(issuerUrl),
+                            expiresInSeconds = 3600,
+                        ),
+                    )
+                }
             assertTrue(
                 tokenResult.isOk,
                 "Access token creation should succeed: ${if (tokenResult.isErr) {

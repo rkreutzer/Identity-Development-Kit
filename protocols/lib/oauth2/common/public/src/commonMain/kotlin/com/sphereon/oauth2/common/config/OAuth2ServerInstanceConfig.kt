@@ -46,6 +46,10 @@ data class InternalClientConfig(
  * or EXTERNAL mode (IDK connects to this AS as an OAuth2 client).
  */
 @JsExportCompat
+@Serializable
+enum class FederatedAuthorizationRequestMode { PAR_ONLY, SIGNED_JAR_OR_AUTHENTICATED_PAR }
+
+@JsExportCompat
 @Suppress("NON_EXPORTABLE_TYPE")
 @Serializable
 data class OAuth2ServerInstanceConfig(
@@ -327,6 +331,8 @@ data class OAuth2ServerInstanceConfig(
      * provisioned from configuration, so it sets [ClientRegistrySourcePrecedence.CONFIGURATION_PRIMARY].
      */
     val clientRegistrySourcePrecedence: ClientRegistrySourcePrecedence = ClientRegistrySourcePrecedence.PERSISTENCE_PRIMARY,
+    /** Normal federation admission capability; existing PAR-only behavior is the default. */
+    val federationAutomaticRegistrationMode: FederatedAuthorizationRequestMode = FederatedAuthorizationRequestMode.PAR_ONLY,
 ) {
     /** Resolve this already-selected server's issuer without reading configuration again. */
     fun resolveIssuer(serverId: String, tenantId: String): String =

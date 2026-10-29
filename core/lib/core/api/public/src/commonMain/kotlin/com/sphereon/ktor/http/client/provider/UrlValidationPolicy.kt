@@ -19,6 +19,20 @@ package com.sphereon.ktor.http.client.provider
 import com.sphereon.core.compat.JsExportCompat
 import io.ktor.http.Url
 
+private val COUNTERPARTY_BLOCKED_HOSTS = setOf(
+    "localhost",
+    "metadata.google.internal",
+    "metadata.azure.internal",
+    "instance-data.ec2.internal",
+)
+private val COUNTERPARTY_BLOCKED_HOST_SUFFIXES = setOf(
+    ".local",
+    ".internal",
+    ".localhost",
+    ".corp",
+    ".home.arpa",
+)
+
 /**
  * Policy for validating request URLs before they are sent.
  *
@@ -61,7 +75,26 @@ data class UrlValidationPolicy(
      * must hold ([COUNTERPARTY_EGRESS]) sets this and the JS, wasmJs, Apple and Linux factories fail closed.
      */
     val requireResolvedAddressEnforcement: Boolean = false,
+    /** Exact HTTPS DNS authorities and RFC 1918 IPv4 answers explicitly permitted by an operator. */
+    val resolvedPrivateIpv4Targets: Set<ResolvedPrivateIpv4Target> = emptySet(),
 ) {
+    init {
+        require(resolvedPrivateIpv4Targets.map { it.host }.distinct().size == resolvedPrivateIpv4Targets.size) {
+            "only one private IPv4 target entry may be configured per hostname"
+        }
+        require(
+            resolvedPrivateIpv4Targets.isEmpty() ||
+                (
+                    allowedSchemes == setOf("https") && blockUserInfo && blockPrivateNetworks && blockRfc1918 &&
+                        blockSharedNetworks && requireResolvedAddressEnforcement &&
+                        blockedHosts.containsAll(COUNTERPARTY_BLOCKED_HOSTS) &&
+                        blockedHostSuffixes.containsAll(COUNTERPARTY_BLOCKED_HOST_SUFFIXES)
+                ),
+        ) {
+            "private IPv4 targets require the strict HTTPS counterparty policy"
+        }
+    }
+
     /**
      * Refuses a numeric address, as printed by an engine's resolver, that the address flags of this policy block. Platform
      * engines that resolve a host themselves call this for every address a host name resolves to. The message names no
@@ -71,6 +104,18 @@ data class UrlValidationPolicy(
         if (checkIpRanges(address, blockPrivateNetworks, blockRfc1918, blockSharedNetworks) != null) {
             throw UrlValidationException("The host resolves to an address that is not allowed")
         }
+    }
+
+    /**
+     * Validate the complete answer set returned by the JVM resolver. An exact configured authority is permitted
+     * only when every DNS answer is one of its explicitly configured RFC 1918 IPv4 addresses. This rejects mixed,
+     * changed, and rebound answers while allowing the engine to connect to the same validated set.
+     */
+    fun permitsResolvedPrivateIpv4Exception(host: String, addresses: List<String>): Boolean? {
+        val normalizedHost = host.lowercase().removeSuffix(".")
+        val target = resolvedPrivateIpv4Targets.singleOrNull { it.host == normalizedHost }
+            ?: return null
+        return addresses.isNotEmpty() && addresses.all { isCanonicalRfc1918Ipv4(it) && it in target.addresses }
     }
 
     /**
@@ -92,7 +137,8 @@ data class UrlValidationPolicy(
             validateExactTarget(approved = Url(approvedUri), requested = url)
         }
 
-        val host = url.host.lowercase().trimEnd('.')
+        val rawHost = url.host.lowercase()
+        val host = rawHost.trimEnd('.')
         if (host.isEmpty()) {
             throw UrlValidationException("URL has no host")
         }
@@ -106,6 +152,12 @@ data class UrlValidationPolicy(
         for (suffix in blockedHostSuffixes) {
             if (host.endsWith(suffix)) {
                 throw UrlValidationException("Host '$host' is blocked (suffix: $suffix)")
+            }
+        }
+
+        resolvedPrivateIpv4Targets.singleOrNull { it.host == host }?.let { target ->
+            if (rawHost != host || url.port != target.port) {
+                throw UrlValidationException("The private-address exception does not match this HTTPS authority")
             }
         }
 
@@ -171,20 +223,8 @@ data class UrlValidationPolicy(
                 blockRfc1918 = true,
                 blockSharedNetworks = true,
                 blockedHosts =
-                    setOf(
-                        "localhost",
-                        "metadata.google.internal",
-                        "metadata.azure.internal",
-                        "instance-data.ec2.internal",
-                    ),
-                blockedHostSuffixes =
-                    setOf(
-                        ".local",
-                        ".internal",
-                        ".localhost",
-                        ".corp",
-                        ".home.arpa",
-                    ),
+                    COUNTERPARTY_BLOCKED_HOSTS,
+                blockedHostSuffixes = COUNTERPARTY_BLOCKED_HOST_SUFFIXES,
                 requireResolvedAddressEnforcement = true,
             )
 
@@ -226,6 +266,51 @@ data class UrlValidationPolicy(
             )
         }
     }
+}
+
+/** One exact DNS hostname/port paired with its operator-approved RFC 1918 IPv4 addresses. */
+@JsExportCompat
+data class ResolvedPrivateIpv4Target(
+    val host: String,
+    val port: Int,
+    val addresses: Set<String>,
+) {
+    init {
+        require(isCanonicalDnsTargetHost(host)) { "private IPv4 targets require a canonical DNS hostname" }
+        require(port in 1..65535) { "private IPv4 target port is out of range" }
+        require(addresses.isNotEmpty()) { "private IPv4 target must contain at least one address" }
+        require(addresses.all(::isCanonicalRfc1918Ipv4)) { "private IPv4 target addresses must be canonical RFC 1918 IPv4 literals" }
+    }
+}
+
+private fun isCanonicalDnsTargetHost(host: String): Boolean {
+    if (host != host.lowercase() || host.endsWith('.') || host.length !in 1..253 || !host.contains('.')) return false
+    if (parseIpv4Literal(host) != null || parseIpv6Literal(host) != null) return false
+    if (host == "localhost" || host.endsWith(".localhost") || host.endsWith(".local") ||
+        host.endsWith(".internal") || host.endsWith(".corp") || host.endsWith(".home.arpa")
+    ) return false
+    val labels = host.split('.')
+    return labels.all { label ->
+        fun asciiAlphaNumeric(char: Char) = char in 'a'..'z' || char in '0'..'9'
+        label.length in 1..63 && asciiAlphaNumeric(label.first()) && asciiAlphaNumeric(label.last()) &&
+            label.all { asciiAlphaNumeric(it) || it == '-' }
+    }
+}
+
+private fun isCanonicalRfc1918Ipv4(address: String): Boolean {
+    val pieces = address.split('.')
+    if (pieces.size != 4) return false
+    val octets = IntArray(4)
+    for (index in pieces.indices) {
+        val piece = pieces[index]
+        if (piece.isEmpty() || piece.any { !it.isDigit() } || (piece.length > 1 && piece.startsWith('0'))) return false
+        val value = piece.toIntOrNull() ?: return false
+        if (value !in 0..255) return false
+        octets[index] = value
+    }
+    return octets[0] == 10 ||
+        (octets[0] == 172 && octets[1] in 16..31) ||
+        (octets[0] == 192 && octets[1] == 168)
 }
 
 private data class CanonicalUrlTarget(

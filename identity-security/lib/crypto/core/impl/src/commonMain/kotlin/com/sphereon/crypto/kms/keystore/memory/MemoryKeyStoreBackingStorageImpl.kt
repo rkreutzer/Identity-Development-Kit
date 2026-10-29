@@ -21,6 +21,8 @@ import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
+import kotlinx.atomicfu.locks.SynchronizedObject
+import kotlinx.atomicfu.locks.synchronized
 import kotlin.experimental.ExperimentalObjCName
 import kotlin.native.ObjCName
 
@@ -34,8 +36,7 @@ import kotlin.native.ObjCName
  * - tenant + principal + session (for session-specific data)
  * - or app-wide (single shared storage)
  *
- * Note: This is a simple in-memory implementation. For production use with high concurrency,
- * consider using platform-specific concurrent collections or add explicit locking.
+ * Partition allocation and lifecycle operations are synchronized across callers.
  */
 @Inject
 @SingleIn(AppScope::class)
@@ -43,35 +44,37 @@ import kotlin.native.ObjCName
 @OptIn(ExperimentalObjCName::class)
 @ObjCName("MemoryKeyStoreBackingStorageImpl", exact = true)
 class MemoryKeyStoreBackingStorageImpl : MemoryKeyStoreBackingStorage {
+    private val monitor = SynchronizedObject()
     private val partitions = mutableMapOf<StoragePartitionKey, StoragePartition>()
 
     /**
      * Gets or creates a storage partition for the given key.
-     * Note: getOrPut is not fully thread-safe in all KMP targets, but should be sufficient
-     * for most use cases. For high-concurrency scenarios, consider adding platform-specific locking.
+     * Concurrent callers for the same key receive the same partition instance.
      */
-    override fun getPartition(partitionKey: StoragePartitionKey): StoragePartition = partitions.getOrPut(partitionKey) { StoragePartition() }
+    override fun getPartition(partitionKey: StoragePartitionKey): StoragePartition =
+        synchronized(monitor) { partitions.getOrPut(partitionKey) { StoragePartition() } }
 
     /**
      * Removes a storage partition, clearing all associated keys and certificates.
      * Useful for cleanup when a session ends or a tenant is removed.
      */
-    override fun removePartition(partitionKey: StoragePartitionKey): Boolean = partitions.remove(partitionKey) != null
+    override fun removePartition(partitionKey: StoragePartitionKey): Boolean =
+        synchronized(monitor) { partitions.remove(partitionKey) != null }
 
     /**
      * Clears all storage partitions. Use with caution - typically only for testing or shutdown.
      */
     override fun clearAll() {
-        partitions.clear()
+        synchronized(monitor) { partitions.clear() }
     }
 
     /**
      * Returns the number of active storage partitions.
      */
-    override fun getPartitionCount(): Int = partitions.size
+    override fun getPartitionCount(): Int = synchronized(monitor) { partitions.size }
 
     /**
      * Returns all partition keys (useful for diagnostics/monitoring).
      */
-    override fun getPartitionKeys(): Set<StoragePartitionKey> = partitions.keys.toSet()
+    override fun getPartitionKeys(): Set<StoragePartitionKey> = synchronized(monitor) { partitions.keys.toSet() }
 }

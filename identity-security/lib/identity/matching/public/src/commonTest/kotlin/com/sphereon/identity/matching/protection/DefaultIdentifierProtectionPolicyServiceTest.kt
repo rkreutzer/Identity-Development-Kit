@@ -32,6 +32,17 @@ class DefaultIdentifierProtectionPolicyServiceTest {
     }
 
     @Test
+    fun oid4vciIssuerPreservesExactProtocolIdentity() = runTest {
+        val policy = service.policyFor("tenant-a", IdentifierType.OID4VCI_ISSUER)
+
+        assertEquals(IdentifierProtectionMode.PLAINTEXT, policy.mode)
+        assertEquals(NormalizationProfile.NONE, policy.normalization)
+        for (issuer in listOf("https://issuer.example/Issuer/", "https://issuer.example/Issuer", "https://issuer.example/issuer/")) {
+            assertEquals(issuer, normalizeIdentifier(issuer, policy.normalization))
+        }
+    }
+
+    @Test
     fun emailRemainsSearchableEncryptedPii() = runTest {
         val policy = service.policyFor("tenant-a", IdentifierType.EMAIL)
 

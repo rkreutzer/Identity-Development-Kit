@@ -26,6 +26,7 @@ import com.sphereon.crypto.jose.jwe.JweHeader
 import com.sphereon.oauth2.common.jarm.JarmConfig
 import com.sphereon.oauth2.common.model.AuthorizationRequest
 import com.sphereon.oauth2.common.model.AuthorizationResponse
+import com.sphereon.oauth2.common.model.AuthorizationErrorResponse
 import com.sphereon.openid.oid4vp.common.ResponseMode
 import kotlin.experimental.ExperimentalObjCName
 import kotlin.native.ObjCName
@@ -267,12 +268,18 @@ data class JarmOptions(
 @JsExportCompat
 data class SubmitAuthorizationResponseArgs(
     val resolvedRequest: ResolvedOid4vpRequest,
-    val response: AuthorizationResponse,
+    val response: AuthorizationResponse? = null,
     val responseMode: ResponseMode? = null,
     val jarmOptions: JarmOptions? = null,
     /** Holder-private binding to the verifier JWK used by prepared mdoc DeviceAuthentication. */
     val preparedOid4vpJweRecipientBinding: PreparedOid4vpJweRecipientBinding? = null,
-)
+    val errorResponse: AuthorizationErrorResponse? = null,
+) {
+    init {
+        require((response == null) != (errorResponse == null)) { "Exactly one authorization response is required" }
+        require(errorResponse == null || preparedOid4vpJweRecipientBinding == null) { "An error cannot carry prepared credential signing material" }
+    }
+}
 
 /**
  * Command for submitting an authorization response to the verifier

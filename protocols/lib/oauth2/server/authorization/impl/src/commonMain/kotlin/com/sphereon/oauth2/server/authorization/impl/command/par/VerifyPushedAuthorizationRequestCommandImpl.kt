@@ -247,6 +247,8 @@ class VerifyPushedAuthorizationRequestCommandImpl(
                 clientId = request.clientId,
                 redirectUri = finalRedirectUri,
                 grantedScopes = grantedScopes,
+                // Code issuance takes the audience from the pushed request; it must match front-channel verification.
+                defaultAccessTokenAudience = client.defaultAccessTokenAudience,
                 admittedAudiences = admission?.audiences?.toList(),
                 admittedClient = admission?.client,
                 pkceRequired = client.requirePkce || client.clientType == ClientType.PUBLIC,

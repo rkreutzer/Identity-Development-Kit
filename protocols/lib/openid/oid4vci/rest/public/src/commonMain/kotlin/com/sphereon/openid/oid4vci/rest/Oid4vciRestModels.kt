@@ -61,16 +61,31 @@ data class CreateCredentialOfferInput(
     @JsExportIgnoreCompat
     val initialConnectorFields: Map<String, JsonElement> = emptyMap(),
     /**
-     * Business key for later status queries.
-     * If omitted, the server generates one.
+     * Business key for later status queries. If omitted, the server generates one and the call never replays.
+     *
+     * A supplied value also makes the call idempotent. Repeating the same intent under it returns the original offer
+     * without creating another one, a different intent under it is refused, and a repeat while an earlier attempt's
+     * outcome is unknown is refused as in doubt until that attempt's offer has expired.
+     *
+     * A repeat returns the original offer and a status URI computed again. A transaction code is shown once and never
+     * stored, so only the first answer carries it and a repeat of a request that required one cannot recover it. A QR
+     * code is rendered again from the repeat's own QR options.
      */
     @SerialName("correlation_id")
     val correlationId: String? = null,
     /**
-     * Which configured issuer to use. Resolved from context if omitted.
+     * Which configured issuer to use. Resolved from context if omitted. Not part of the published contract: the issuer
+     * instance in the route owns its identifier, and this is read only on the route without an instance.
      */
     @SerialName("issuer_id")
     val issuerId: String? = null,
+    /**
+     * Canonical UUID of the issuer instance the offer belongs to. An HTTP caller selects the instance through the
+     * `instanceId` of the route and omits it, a caller outside HTTP supplies it, and so does a caller of the route without
+     * an instance. When the route and this field both name an instance they must be equal.
+     */
+    @SerialName("issuer_instance_id")
+    val issuerInstanceId: String? = null,
     /**
      * Authorization grant configuration for the credential offer.
      */

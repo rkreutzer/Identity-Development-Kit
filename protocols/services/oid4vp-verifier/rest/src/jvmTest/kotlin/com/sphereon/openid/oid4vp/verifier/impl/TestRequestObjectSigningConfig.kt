@@ -22,6 +22,8 @@ import com.sphereon.crypto.core.jose.Jwk
 import com.sphereon.crypto.core.kms.KeyManagerService
 import com.sphereon.di.session.SessionScope
 import com.sphereon.did.methods.jwk.JwkDidProviderImpl
+import com.sphereon.openid.oid4vp.verifier.config.DEFAULT_OID4VP_VERIFIER_INSTANCE_ID
+import com.sphereon.openid.oid4vp.verifier.config.Oid4vpVerifierInstanceIdProvider
 import com.sphereon.openid.oid4vp.verifier.impl.http.DefaultRequestObjectSigningConfigBinding
 import com.sphereon.openid.oid4vp.verifier.requesturi.RequestObjectSigningConfig
 import com.sphereon.openid.oid4vp.verifier.requesturi.VerifierSignerBinding
@@ -50,6 +52,7 @@ import dev.zacsweers.metro.binding
 @Inject
 class TestRequestObjectSigningConfig(
     private val kms: KeyManagerService,
+    private val instanceIdProvider: Oid4vpVerifierInstanceIdProvider,
 ) : RequestObjectSigningConfig {
     override val audience: String = "https://wallet.example.com"
     override val expirationSeconds: Long = 60
@@ -60,20 +63,33 @@ class TestRequestObjectSigningConfig(
     override val includeIss: Boolean
         get() = signingEnabled
 
-    override suspend fun resolveSigningKey(): KeyInfoType<*> = KeyInfo<Nothing>(alias = SIGNING_KEY_ALIAS)
+    override suspend fun resolveSigningKey(): KeyInfoType<*> = KeyInfo<Nothing>(alias = signingKeyAlias(instanceIdProvider.currentInstanceId()))
 
     override suspend fun resolveSignerBinding(scheme: com.sphereon.openid.oid4vp.common.ClientIdScheme?): VerifierSignerBinding? {
         if (!signingEnabled) return null
-        val keyResult = kms.getKeyResult(KeyInfo<Nothing>(alias = SIGNING_KEY_ALIAS))
-        check(keyResult.isOk) { "Failed to load signing key '$SIGNING_KEY_ALIAS' from KMS: ${keyResult.error}" }
+        val instanceId = instanceIdProvider.currentInstanceId()
+        observedInstances += instanceId
+        val alias = signingKeyAlias(instanceId)
+        val keyResult = kms.getKeyResult(KeyInfo<Nothing>(alias = alias))
+        check(keyResult.isOk) { "Failed to load signing key '$alias' from KMS: ${keyResult.error}" }
         val managedKey = keyResult.value.key
-        val jwk = (managedKey?.key as? Jwk) ?: error("Signing key '$SIGNING_KEY_ALIAS' is not a JWK")
+        val jwk = (managedKey?.key as? Jwk) ?: error("Signing key '$alias' is not a JWK")
         val did = JwkDidProviderImpl.didFromJwk(jwk)
         return VerifierSignerBinding.Did(did = did, verificationMethodId = "$did#0")
     }
 
     companion object {
         const val SIGNING_KEY_ALIAS: String = "test-request-uri-signing-key"
+
+        /**
+         * The default verifier signs with [SIGNING_KEY_ALIAS]. Any other verifier instance signs with its own key,
+         * so a test can tell which verifier a request was created and signed under.
+         */
+        fun signingKeyAlias(instanceId: String?): String =
+            if (instanceId.isNullOrBlank() || instanceId == DEFAULT_OID4VP_VERIFIER_INSTANCE_ID) SIGNING_KEY_ALIAS else "$SIGNING_KEY_ALIAS-$instanceId"
+
+        /** The verifier instance id that was active at each signer-binding resolution, in order. */
+        val observedInstances: MutableList<String?> = java.util.Collections.synchronizedList(mutableListOf())
 
         @Volatile
         private var signingEnabled: Boolean = false

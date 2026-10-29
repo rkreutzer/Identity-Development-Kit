@@ -46,20 +46,24 @@ import kotlin.test.assertTrue
 class VerifyAuthorizationRequestRequestNotSupportedTest {
     private val ctx = OAuth2ServerTestContext("verify-request-not-supported-test", this)
 
-    private fun createCommand(): VerifyAuthorizationRequestCommandImpl {
+    private fun createCommand(registration: ClientRegistration = client(),
+        mode: com.sphereon.oauth2.common.config.FederatedAuthorizationRequestMode = com.sphereon.oauth2.common.config.FederatedAuthorizationRequestMode.PAR_ONLY,
+    ): VerifyAuthorizationRequestCommandImpl {
         val serverConfig =
             OAuth2ServerInstanceConfig(
                 issuer = "http://localhost:8080",
                 responseTypesSupported = setOf("code"),
+                federationAutomaticRegistrationMode = mode,
             )
         val servers = OAuth2ServersConfig(servers = mapOf("default" to serverConfig), defaultServer = "default")
         return VerifyAuthorizationRequestCommandImpl(
             ctx.execution,
-            SingleClientRegistry(client()),
+            SingleClientRegistry(registration),
             TestOAuth2ServersConfigProvider(servers),
             emptySet(),
             com.sphereon.oauth2.server.authorization.impl.provider.NoCredentialIssuerAudienceResolver(),
             Oid4vciUnregisteredWalletAdmissionRule(),
+            com.sphereon.oauth2.server.authorization.impl.testutil.fixedAsInstanceIdProvider(),
         )
     }
 
@@ -123,6 +127,23 @@ class VerifyAuthorizationRequestRequestNotSupportedTest {
                 "PAR URN must NOT trigger request_uri_not_supported (got $code); downstream code handles PAR retrieval",
             )
         }
+
+    @Test
+    fun unsignedFederationRequestCannotUseFabricatedProcessEvidence() = runTest {
+        val registration = client().copy(
+            tokenEndpointAuthMethod = ClientAuthenticationMethod.PRIVATE_KEY_JWT,
+            authorizationRequestProofPolicy = com.sphereon.oauth2.server.authorization.model.AuthorizationRequestProofPolicy.FEDERATED_RP_ASYMMETRIC,
+        )
+        val command = createCommand(registration,
+            com.sphereon.oauth2.common.config.FederatedAuthorizationRequestMode.SIGNED_JAR_OR_AUTHENTICATED_PAR)
+        val counterfeit = object : com.sphereon.oauth2.server.authorization.command.jar.AuthorizationRequestEvidence {}
+        for (evidence in listOf(null, counterfeit)) {
+            val result = command.execute(request().copy(authorizationEvidence = evidence))
+            assertTrue(result.isErr, "Neither missing nor caller-constructed evidence may authenticate a federation request")
+            assertEquals("invalid_request", extractCode(result))
+            assertEquals("Invalid request: A client-bound signed federation Request Object is required", (result.error as com.sphereon.core.api.error.IdkError).message.defaultMessage)
+        }
+    }
 
     private fun extractCode(result: IdkResult<*, *>): String? = if (result.isErr) (result.error as? com.sphereon.core.api.error.IdkError)?.code else null
 

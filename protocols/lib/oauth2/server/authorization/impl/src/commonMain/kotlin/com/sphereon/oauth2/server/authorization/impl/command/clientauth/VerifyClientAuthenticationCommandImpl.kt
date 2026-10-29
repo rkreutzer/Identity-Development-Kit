@@ -48,6 +48,7 @@ import com.sphereon.oauth2.server.authorization.command.clientauth.VerifyAttesta
 import com.sphereon.oauth2.server.authorization.command.clientauth.VerifyAttestationClientAuthCommand
 import com.sphereon.oauth2.server.authorization.error.AuthorizationServerError
 import com.sphereon.oauth2.server.authorization.impl.command.TokenPathStage
+import com.sphereon.oauth2.server.authorization.impl.command.discovery.canonicalTokenEndpointForIssuer
 import com.sphereon.oauth2.server.authorization.impl.command.TokenPathStageTimings
 import com.sphereon.oauth2.server.authorization.impl.resolver.ClientJwksResolver
 import com.sphereon.oauth2.server.authorization.model.ClientRegistration
@@ -220,11 +221,11 @@ class VerifyClientAuthenticationCommandImpl(
                     }
 
                     is ClientAuthenticationConfig.SecretJwt -> {
-                        verifyJwtAssertion(auth, args.clientId, args.tokenEndpointUrl, client!!)
+                        verifyJwtAssertion(auth, args.clientId, args.tokenEndpointUrl, client!!, args.endpoint)
                     }
 
                     is ClientAuthenticationConfig.PrivateKeyJwt -> {
-                        verifyJwtAssertion(auth, args.clientId, args.tokenEndpointUrl, client!!)
+                        verifyJwtAssertion(auth, args.clientId, args.tokenEndpointUrl, client!!, args.endpoint)
                     }
 
                     is ClientAuthenticationConfig.AttestationJwt -> {
@@ -345,6 +346,7 @@ class VerifyClientAuthenticationCommandImpl(
         clientId: String,
         tokenEndpointUrl: String,
         client: ClientRegistration,
+        endpoint: ClientAuthenticationEndpoint,
     ): IdkResult<VerifiedClientAuthentication, AuthorizationServerError> {
         val assertion =
             when (auth) {
@@ -446,6 +448,9 @@ class VerifyClientAuthenticationCommandImpl(
                 clientId = clientId,
                 tokenEndpointUrl = tokenEndpointUrl,
                 requirePrivateKeyJwtIssuerAudience = auth is ClientAuthenticationConfig.PrivateKeyJwt,
+                requireFederatedParIssuerAudience = auth is ClientAuthenticationConfig.PrivateKeyJwt &&
+                    endpoint == ClientAuthenticationEndpoint.PAR &&
+                    client.authorizationRequestProofPolicy == com.sphereon.oauth2.server.authorization.model.AuthorizationRequestProofPolicy.FEDERATED_RP_ASYMMETRIC,
                 serverConfig = configProvider.serverConfig,
             )
         claimsValidation.getOrElse { return Err(it) }
@@ -462,11 +467,12 @@ class VerifyClientAuthenticationCommandImpl(
 
     /**
      * Validate required assertion claims. This AS applies a selected stricter private_key_jwt
-     * profile requiring the configured issuer as the sole audience; this is not a universal
+     * profile requiring the configured issuer or its canonical token endpoint as the sole audience; this is not a universal
      * RFC 7523 / OIDC Core §9 rule. client_secret_jwt retains its supported RFC 7523 audience set.
      *
      * - `iss` MUST equal `sub` AND equal `client_id` (both directions, not either-or).
-     * - private_key_jwt: the configured AS issuer MUST be the sole `aud` value.
+     * - Federation automatic-registration PAR (Connect Federation 1.1 sections 12.1.1.2/12.1.1.2.1): only the AS Entity Identifier is allowed.
+     * - Other private_key_jwt: the fixed configured AS issuer or its canonical token endpoint MUST be the sole `aud` value.
      * - client_secret_jwt: `aud` may identify the AS issuer or token endpoint; arrays retain the
      *   supported membership semantics.
      * - `exp` MUST be present and in the future.
@@ -478,6 +484,7 @@ class VerifyClientAuthenticationCommandImpl(
         clientId: String,
         tokenEndpointUrl: String,
         requirePrivateKeyJwtIssuerAudience: Boolean,
+        requireFederatedParIssuerAudience: Boolean,
         serverConfig: OAuth2ServerInstanceConfig,
     ): IdkResult<Unit, AuthorizationServerError> {
         val issValue = claims["iss"]
@@ -512,9 +519,13 @@ class VerifyClientAuthenticationCommandImpl(
         val audienceAccepted =
             if (!strictAudienceShapeIsValid) {
                 false
+            } else if (requireFederatedParIssuerAudience) {
+                val issuer = configuredIssuer?.takeIf { it.isNotBlank() }
+                issuer != null && audiences.size == 1 && audiences.single() == issuer
             } else if (requirePrivateKeyJwtIssuerAudience) {
                 val issuer = configuredIssuer?.takeIf { it.isNotBlank() }
-                strictAudienceShapeIsValid && issuer != null && audiences.size == 1 && audiences.single() == issuer
+                issuer != null && audiences.size == 1 &&
+                    (audiences.single() == issuer || audiences.single() == canonicalTokenEndpointForIssuer(issuer))
             } else {
                 audiences.any { it == configuredIssuer || it == tokenEndpointUrl }
             }
@@ -522,8 +533,10 @@ class VerifyClientAuthenticationCommandImpl(
             return Err(
                 AuthorizationServerError.InvalidClient(
                     details =
-                        if (requirePrivateKeyJwtIssuerAudience) {
-                            "private_key_jwt audience must be one string equal to the configured AS issuer"
+                        if (requireFederatedParIssuerAudience) {
+                            "Federated PAR private_key_jwt audience must be the configured AS Entity Identifier only"
+                        } else if (requirePrivateKeyJwtIssuerAudience) {
+                            "private_key_jwt audience must be one string equal to the configured AS issuer or its canonical token endpoint"
                         } else {
                             "JWT assertion audience must identify the AS issuer or token endpoint"
                         },

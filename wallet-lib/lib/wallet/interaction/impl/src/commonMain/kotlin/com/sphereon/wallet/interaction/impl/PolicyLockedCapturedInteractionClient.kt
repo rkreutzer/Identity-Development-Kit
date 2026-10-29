@@ -68,7 +68,7 @@ class PolicyLockedCapturedInteractionClient(
                 executionOwner = lockedPlan.executionOwner,
                 requestedFlowKinds = lockedPlan.permittedFlowKinds.toList(),
                 metadata =
-                    lockedPlan.evidence +
+                    input.launchAttributes + lockedPlan.evidence +
                         mapOf(
                             "captureSource" to input.source.name,
                             "walletProfileRef" to input.walletProfileRef,

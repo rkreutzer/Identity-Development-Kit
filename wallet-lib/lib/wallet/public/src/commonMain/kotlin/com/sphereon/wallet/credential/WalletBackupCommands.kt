@@ -30,6 +30,8 @@ data class WalletCredentialDeletionManifestEvidence(
     val tombstoneDigest: String,
     val erasedBodyDocumentRefs: Set<String>,
     val deletedAtEpochSeconds: Long,
+    /** Encrypted auxiliary secrets erased with the credential, separate from instance bodies. */
+    val erasedSecretDocumentRefs: Set<String> = emptySet(),
 ) {
     init {
         require(walletUnitId.isNotBlank() && credentialRecordId.isNotBlank()) {
@@ -41,7 +43,12 @@ data class WalletCredentialDeletionManifestEvidence(
         require(tombstoneDigest.startsWith("sha256:") && tombstoneDigest.length > "sha256:".length) {
             "wallet_credential_deletion_manifest_digest_invalid"
         }
-        require(erasedBodyDocumentRefs.none(String::isBlank) && deletedAtEpochSeconds > 0) {
+        require(
+            erasedBodyDocumentRefs.none(String::isBlank) &&
+                erasedSecretDocumentRefs.none(String::isBlank) &&
+                erasedSecretDocumentRefs.intersect(erasedBodyDocumentRefs).isEmpty() &&
+                deletedAtEpochSeconds > 0,
+        ) {
             "wallet_credential_deletion_manifest_evidence_invalid"
         }
     }

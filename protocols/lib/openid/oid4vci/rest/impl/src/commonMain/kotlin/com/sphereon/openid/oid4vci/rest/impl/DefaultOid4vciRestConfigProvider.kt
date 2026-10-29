@@ -44,6 +44,8 @@ class DefaultOid4vciRestConfigProvider(
     override fun getConfig(): Oid4vciRestConfig =
         Oid4vciRestConfig(
             externalBaseUrl = configService.getPropertyAsString("$NAMESPACE.externalBaseUrl"),
+            allowProcessLocalRequestStore =
+                configService.getPropertyAsString("$NAMESPACE.requests.allowProcessLocalStore")?.trim().equals("true", ignoreCase = true),
         )
 
     companion object {

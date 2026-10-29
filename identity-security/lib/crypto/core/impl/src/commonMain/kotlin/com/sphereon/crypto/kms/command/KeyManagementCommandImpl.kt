@@ -216,14 +216,14 @@ class GetKeyCommandImpl(
             appliedArgs.keyInfo
                 ?: return IdkError.ILLEGAL_ARGUMENT_ERROR(message = "keyInfo is required").asErrorResult()
 
-        log.debug("Getting key: ${keyInfo.kid ?: keyInfo.alias ?: "unknown"}")
+        log.debug("KMS_KEY_LOOKUP stage=begin kid_present=${keyInfo.kid != null} alias_present=${keyInfo.alias != null}")
 
         return try {
             val key = keyStore.getKey(keyInfo)
             log.debug("Key retrieved successfully")
             GetKeyResult(key).asOkResult()
         } catch (expected: Exception) {
-            log.warn("Get key failed: ${expected.message}")
+            log.warn("KMS_KEY_LOOKUP_FAILED stage=key-store exception=${expected::class.simpleName}")
             IdkError
                 .NOT_FOUND_ERROR(
                     resource = "Key",

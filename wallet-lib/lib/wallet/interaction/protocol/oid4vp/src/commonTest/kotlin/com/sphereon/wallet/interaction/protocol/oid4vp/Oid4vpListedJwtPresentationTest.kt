@@ -6,6 +6,9 @@ import com.sphereon.core.api.error.IdkError
 import com.sphereon.crypto.core.generic.SignatureAlgorithm
 import com.sphereon.crypto.core.generic.DigestAlg
 import com.sphereon.crypto.core.generic.hash
+import com.sphereon.crypto.core.jose.Jwk
+import com.sphereon.crypto.core.jose.JwkSet
+import com.sphereon.crypto.core.jose.tryGenerateJwkThumbprint
 import com.sphereon.crypto.core.CoseJoseKeyMappingService
 import com.sphereon.crypto.core.cose.CoseKeyCborCodec
 import com.sphereon.crypto.core.cose.DecodedCbor
@@ -229,15 +232,17 @@ class Oid4vpListedJwtPresentationTest {
 
     @Test fun mixedSdJwtMdocAndJwtUseOneOrderedApprovalAndCombinedHolderResponse() = runTest {
         val f = Fixture()
-        f.holder.resolved = f.holder.resolved.copy(request = f.holder.resolved.request.copy(responseMode = ResponseMode.DIRECT_POST_JWT.value))
+        f.holder.resolved = encryptedRequest(f.holder.resolved)
         f.credentials += SelectedCredential("sd", "sd-credential", JsonPrimitive("sdjwt~"), CredentialFormat.SD_JWT_VC)
-        val mdoc = mdocRecord("mdoc-credential")
+        val mdoc = mdocRecord("mdoc-credential", encrypted = true)
         f.credentials += SelectedCredential("mdoc-query", mdoc.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
         f.holder.mdocRecord = mdoc
         val mdocProvider = RecordingMdocSigningProvider(mdoc)
         val approval = assertIs<Oid4vpPresentationPreparation.ApprovalRequired>(f.executor(mdocHolderSigningProvider = mdocProvider).preparePresentation(f.context, f.state))
         assertEquals(listOf("sd-key", "mdoc-key-id", "credential-key"), approval.operations.map { it.keyRef })
         assertEquals(listOf("sd-hash", "mdoc-hash"), approval.operations.take(2).map { it.operationHash })
+        // The backend-owned approval names the wallet account its prepared holder keys belong to.
+        assertEquals("account", approval.walletAccountId)
         assertTrue(approval.operations.last().operationHash.isNotBlank())
         assertTrue(f.wsca.signCalls.isEmpty())
         assertEquals(listOf(mdoc.credentialId), f.saved().mdocSigning.map { it.signing.credentialId })
@@ -253,8 +258,8 @@ class Oid4vpListedJwtPresentationTest {
 
     @Test fun encryptedMdocPreparationWithoutRecipientBindingFailsBeforeApproval() = runTest {
         val f = Fixture()
-        f.holder.resolved = f.holder.resolved.copy(request = f.holder.resolved.request.copy(responseMode = ResponseMode.DIRECT_POST_JWT.value))
-        val mdoc = mdocRecord("mdoc-credential").copy(recipientBinding = null)
+        f.holder.resolved = encryptedRequest(f.holder.resolved)
+        val mdoc = mdocRecord("mdoc-credential", encrypted = true).copy(recipientBinding = null)
         f.credentials += SelectedCredential("mdoc-query", mdoc.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
         f.holder.mdocRecord = mdoc
         val signer = RecordingMdocSigningProvider(mdoc)
@@ -269,8 +274,8 @@ class Oid4vpListedJwtPresentationTest {
 
     @Test fun changedPreparedJweRecipientBindingFailsBeforeMdocSignature() = runTest {
         val f = Fixture()
-        f.holder.resolved = f.holder.resolved.copy(request = f.holder.resolved.request.copy(responseMode = ResponseMode.DIRECT_POST_JWT.value))
-        val mdoc = mdocRecord("mdoc-credential")
+        f.holder.resolved = encryptedRequest(f.holder.resolved)
+        val mdoc = mdocRecord("mdoc-credential", encrypted = true)
         f.credentials += SelectedCredential("mdoc-query", mdoc.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
         f.holder.mdocRecord = mdoc
         val signer = RecordingMdocSigningProvider(mdoc)
@@ -287,6 +292,88 @@ class Oid4vpListedJwtPresentationTest {
         assertIs<Oid4vpPresentationExecutionResult.Failed>(executor.submitPresentation(f.context, f.state))
         assertEquals(1, signer.validateCalls)
         assertEquals(0, signer.finalizeCalls)
+        assertTrue(f.wsca.signCalls.isEmpty())
+    }
+
+    // OID4VP 1.0 Annex B.2.6.1: the mdoc handover carries the verifier encryption-key thumbprint only
+    // when the response is encrypted; under plain direct_post there is no recipient to bind.
+    @Test fun plainDirectPostMdocWithoutRecipientBindingSubmitsUnencrypted() = runTest {
+        val f = Fixture()
+        val mdoc = mdocRecord("mdoc-credential")
+        f.credentials += SelectedCredential("mdoc-query", mdoc.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
+        f.holder.mdocRecord = mdoc
+        val signer = RecordingMdocSigningProvider(mdoc)
+        val executor = f.executor(mdocHolderSigningProvider = signer)
+        assertIs<Oid4vpPresentationPreparation.ApprovalRequired>(executor.preparePresentation(f.context, f.state))
+
+        assertIs<Oid4vpPresentationExecutionResult.Submitted>(executor.submitPresentation(f.context, f.state))
+        assertEquals(1, signer.finalizeCalls)
+        assertNull(f.holder.submittedJweRecipientBinding)
+    }
+
+    @Test fun plainDirectPostMdocCarryingARecipientBindingFailsBeforeApproval() = runTest {
+        val f = Fixture()
+        val mdoc = mdocRecord("mdoc-credential", encrypted = true)
+        f.credentials += SelectedCredential("mdoc-query", mdoc.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
+        f.holder.mdocRecord = mdoc
+        val signer = RecordingMdocSigningProvider(mdoc)
+
+        assertIs<Oid4vpPresentationPreparation.Failed>(f.executor(mdocHolderSigningProvider = signer).preparePresentation(f.context, f.state))
+        assertNull(f.values["jwt_vp.prepared"])
+        assertEquals(0, signer.finalizeCalls)
+        assertTrue(f.wsca.signCalls.isEmpty())
+    }
+
+    @Test fun encryptedMdocBoundToAKeyOutsideTheRequestJwksFailsBeforeMdocSignature() = runTest {
+        val f = Fixture()
+        f.holder.resolved = encryptedRequest(f.holder.resolved)
+        // A self-consistent binding (the thumbprint matches its JWK) to a key the verifier never offered.
+        val foreignKey = Jwk.fromJsonObject(Json.parseToJsonElement(FOREIGN_EC_JWK).jsonObject)
+        val mdoc = mdocRecord("mdoc-credential", encrypted = true).let {
+            it.copy(recipientBinding = checkNotNull(it.recipientBinding).copy(
+                publicJwkJson = FOREIGN_EC_JWK,
+                rfc7638Thumbprint = tryGenerateJwkThumbprint(foreignKey).getOrThrow(),
+                keyEncryptionAlgorithm = "ECDH-ES",
+            ))
+        }
+        f.credentials += SelectedCredential("mdoc-query", mdoc.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
+        f.holder.mdocRecord = mdoc
+        val signer = RecordingMdocSigningProvider(mdoc)
+        val executor = f.executor(mdocHolderSigningProvider = signer)
+        assertIs<Oid4vpPresentationPreparation.ApprovalRequired>(executor.preparePresentation(f.context, f.state))
+
+        assertIs<Oid4vpPresentationExecutionResult.Failed>(executor.submitPresentation(f.context, f.state))
+        assertEquals(0, signer.finalizeCalls)
+        assertEquals(0, f.holder.submissions)
+        assertTrue(f.wsca.signCalls.isEmpty())
+    }
+
+    @Test fun listedApprovalNamesTheSinglePreparedWalletAccountOrNoneAndRefusesMixedAccounts() = runTest {
+        val f = Fixture()
+        f.holder.resolved = encryptedRequest(f.holder.resolved)
+        val mdoc = mdocRecord("mdoc-credential", encrypted = true)
+        f.credentials += SelectedCredential("mdoc-query", mdoc.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
+        f.holder.mdocRecord = mdoc
+        val executor = f.executor(mdocHolderSigningProvider = RecordingMdocSigningProvider(mdoc))
+        val approval = assertIs<Oid4vpPresentationPreparation.ApprovalRequired>(executor.preparePresentation(f.context, f.state))
+        assertEquals("account", approval.walletAccountId)
+        val saved = f.saved()
+
+        val unnamed = saved.copy(
+            signing = saved.signing.map { it.copy(walletAccountId = null) },
+            mdocSigning = saved.mdocSigning.map { it.copy(walletAccountId = null) },
+        )
+        assertNull(checkNotNull(unnamed.approvalRequired()).walletAccountId)
+        // One named account among unnamed signings still names that account.
+        assertEquals("account", checkNotNull(unnamed.copy(mdocSigning = saved.mdocSigning).approvalRequired()).walletAccountId)
+
+        val mixed = saved.copy(
+            signing = saved.signing.map { it.copy(walletAccountId = "account") },
+            mdocSigning = saved.mdocSigning.map { it.copy(walletAccountId = "other-account") },
+        )
+        assertNull(mixed.approvalRequired())
+        f.values["jwt_vp.prepared"] = Json.encodeToString(mixed.sealed())
+        assertIs<Oid4vpPresentationPreparation.Failed>(executor.preparePresentation(f.context, f.state))
         assertTrue(f.wsca.signCalls.isEmpty())
     }
 
@@ -307,7 +394,7 @@ class Oid4vpListedJwtPresentationTest {
             "sd", "sd-credential", JsonPrimitive("$sdHeader.$sdPayload.issuer-signature~"), CredentialFormat.SD_JWT_VC, holderKeyRef = "sd-key",
         )
         // Plain direct_post: the holder prepares no JWE recipient binding (OID4VP 1.0 section 8.3 applies only to .jwt modes).
-        val mdoc = mdocRecord("mdoc-credential", encryptedResponse = false)
+        val mdoc = mdocRecord("mdoc-credential")
         f.credentials += SelectedCredential("mdoc-query", mdoc.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
         f.holder.mdocRecord = mdoc
         val mdocProvider = RecordingMdocSigningProvider(mdoc)
@@ -323,7 +410,7 @@ class Oid4vpListedJwtPresentationTest {
 
     @Test fun plainResponseModeRefusesAnEncryptedRecipientBindingBeforeApproval() = runTest {
         val f = Fixture()
-        val mdoc = mdocRecord("mdoc-credential")
+        val mdoc = mdocRecord("mdoc-credential", encrypted = true)
         f.credentials += SelectedCredential("mdoc-query", mdoc.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
         f.holder.mdocRecord = mdoc
         val signer = RecordingMdocSigningProvider(mdoc)
@@ -338,7 +425,7 @@ class Oid4vpListedJwtPresentationTest {
     @Test fun secureComponentMdocValidationRejectsAChangedRecipientBindingBeforeWsca() = runTest {
         val f = Fixture()
         f.holder.resolved = f.holder.resolved.copy(request = f.holder.resolved.request.copy(responseMode = ResponseMode.DIRECT_POST_JWT.value))
-        val record = mdocRecord("mdoc-credential")
+        val record = mdocRecord("mdoc-credential", encrypted = true)
         f.holder.mdocRecord = record
         val credential = SelectedCredential("mdoc-query", record.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
         val publicKey = mdocCoseKey()
@@ -367,7 +454,7 @@ class Oid4vpListedJwtPresentationTest {
 
     @Test fun changedMdocSnapshotAndExpiredCombinedApprovalFailBeforeAnySignature() = runTest {
         val f = Fixture()
-        val mdoc = mdocRecord("mdoc-credential", encryptedResponse = false)
+        val mdoc = mdocRecord("mdoc-credential")
         f.credentials += SelectedCredential("mdoc-query", mdoc.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
         f.holder.mdocRecord = mdoc
         val mdocProvider = RecordingMdocSigningProvider(mdoc)
@@ -395,7 +482,7 @@ class Oid4vpListedJwtPresentationTest {
 
     @Test fun mdocValidationTokenIsProviderAndRequestBoundBeforeSigning() = runTest {
         val f = Fixture()
-        val record = mdocRecord("mdoc-credential")
+        val record = mdocRecord("mdoc-credential", encrypted = true)
         val credential = SelectedCredential("mdoc-query", record.credentialId, JsonPrimitive("mdoc-presentation"), CredentialFormat.MSO_MDOC, holderKeyRef = "mdoc-key")
         f.holder.mdocRecord = record
         val publicKey = mdocCoseKey()
@@ -412,12 +499,21 @@ class Oid4vpListedJwtPresentationTest {
         val foreignProvider = SecureComponentOid4vpMdocHolderSigningProvider(f.holder, wsca, codec)
         assertIs<Err<IdkError>>(foreignProvider.finalize(request, plan, validation))
         assertTrue(wsca.signCalls.isEmpty())
+
+        val differentPublicKey = publicKey.copy(x = CborByteString(ByteArray(32) { 0x44 }))
+        val mismatchedWsca = RecordingWsca(
+            publicKeyJwks = mapOf("mdoc-key" to CoseJoseKeyMappingService.toJoseJwk(differentPublicKey).toJsonString()),
+        )
+        val mismatchedProvider = SecureComponentOid4vpMdocHolderSigningProvider(f.holder, mismatchedWsca, codec)
+        assertIs<Err<IdkError>>(mismatchedProvider.prepare(request))
+        assertEquals(listOf("mdoc-key"), mismatchedWsca.ensureAliases)
+        assertTrue(mismatchedWsca.signCalls.isEmpty(), "WSCA key mismatch must fail before any signing request")
     }
 
     @Test fun mdocPublicKeySnapshotRejectsPrivateMalformedAndNonCanonicalBytesBeforeWsca() = runTest {
         val publicKey = mdocCoseKey()
         val codec = FixtureCoseKeyCodec(publicKey)
-        val canonicalRecord = mdocRecord("mdoc-credential")
+        val canonicalRecord = mdocRecord("mdoc-credential", encrypted = true)
         val mismatch = Fixture()
         mismatch.holder.mdocRecord = canonicalRecord.copy(keyReference = "different-key")
         val mismatchWsca = RecordingWsca(publicKeyJwks = mapOf("mdoc-key" to CoseJoseKeyMappingService.toJoseJwk(publicKey).toJsonString()))
@@ -689,7 +785,14 @@ class Oid4vpListedJwtPresentationTest {
         }
     }
 
-    private fun mdocRecord(credentialId: String, encryptedResponse: Boolean = true): PreparedMdocCredentialSigning {
+    /** A `direct_post.jwt` request whose client metadata offers the RFC 7638 section 3.1 key for response encryption. */
+    private fun encryptedRequest(resolved: ResolvedOid4vpRequest): ResolvedOid4vpRequest = resolved.copy(
+        request = resolved.request.copy(responseMode = ResponseMode.DIRECT_POST_JWT.value),
+        clientMetadata = ClientMetadata(jwks = JwkSet.fromJsonString("{\"keys\":[$VERIFIER_ENCRYPTION_JWK]}")),
+    )
+
+    /** Records under plain `direct_post` carry no recipient binding; encrypted ones bind the verifier key. */
+    private fun mdocRecord(credentialId: String, encrypted: Boolean = false): PreparedMdocCredentialSigning {
         val key = mdocCoseKey()
         val publicKeyBytes = FixtureCoseKeyCodec(key).encode(key).getOrThrow()
         return PreparedMdocCredentialSigning(
@@ -707,10 +810,10 @@ class Oid4vpListedJwtPresentationTest {
                 publicDeviceKeyCbor = publicKeyBytes,
                 sigStructure = byteArrayOf(5, 6),
             ),
-            recipientBinding = if (!encryptedResponse) null else PreparedOid4vpJweRecipientBinding(
-                publicJwkJson = "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"verifier-x\",\"y\":\"verifier-y\"}",
-                rfc7638Thumbprint = "verifier-thumbprint",
-                keyEncryptionAlgorithm = "ECDH-ES",
+            recipientBinding = if (!encrypted) null else PreparedOid4vpJweRecipientBinding(
+                publicJwkJson = VERIFIER_ENCRYPTION_JWK,
+                rfc7638Thumbprint = VERIFIER_ENCRYPTION_JWK_THUMBPRINT,
+                keyEncryptionAlgorithm = "RSA-OAEP-256",
                 contentEncryptionAlgorithm = "A256GCM",
                 responseMode = ResponseMode.DIRECT_POST_JWT.value,
                 clientId = "verifier",
@@ -751,3 +854,17 @@ class Oid4vpListedJwtPresentationTest {
         }
     }
 }
+
+private const val VERIFIER_ENCRYPTION_JWK_N =
+    "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw"
+
+/** The RFC 7638 section 3.1 example key, offered by the verifier as its response-encryption key. */
+private const val VERIFIER_ENCRYPTION_JWK =
+    "{\"kty\":\"RSA\",\"use\":\"enc\",\"alg\":\"RSA-OAEP-256\",\"e\":\"AQAB\",\"n\":\"$VERIFIER_ENCRYPTION_JWK_N\"}"
+
+/** RFC 7638 section 3.1 known-answer thumbprint of [VERIFIER_ENCRYPTION_JWK]. */
+private const val VERIFIER_ENCRYPTION_JWK_THUMBPRINT = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
+
+private const val FOREIGN_EC_JWK =
+    "{\"kty\":\"EC\",\"use\":\"enc\",\"alg\":\"ECDH-ES\",\"crv\":\"P-256\"," +
+        "\"x\":\"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\",\"y\":\"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\"}"

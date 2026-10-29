@@ -87,6 +87,33 @@ import kotlin.test.fail
  * here" step is a deliberate friction point so the binder side never gets forgotten.
  */
 class OAuth2ServersConfigBinderRoundTripTest {
+    @Test
+    fun federationAutomaticRegistrationModeUsesNormalPerServerConfiguration() {
+        val root = OAuth2ServerInstanceConfig.CONFIG_PREFIX
+        val config = TypeAwarePrincipalConfigService(mapOf(
+            "$root.default-server" to "primary",
+            "$root.primary.issuer" to "https://as.example/primary",
+            "$root.direct.issuer" to "https://as.example/direct",
+            "$root.direct.federation-automatic-registration-mode" to "SIGNED_JAR_OR_AUTHENTICATED_PAR",
+        ))
+        val selected = com.sphereon.oauth2.common.config.DefaultOAuth2ServerInstanceIdProvider()
+        val binder = OAuth2ServersConfigBinder(TestSessionExecution(config), selected)
+        assertEquals(com.sphereon.oauth2.common.config.FederatedAuthorizationRequestMode.PAR_ONLY, binder.serverConfig.federationAutomaticRegistrationMode)
+        selected.setCurrentAsInstanceId("direct")
+        assertEquals(com.sphereon.oauth2.common.config.FederatedAuthorizationRequestMode.SIGNED_JAR_OR_AUTHENTICATED_PAR, binder.serverConfig.federationAutomaticRegistrationMode)
+    }
+
+    @Test
+    fun unknownFederationAutomaticRegistrationModeFailsClosed() {
+        val root = OAuth2ServerInstanceConfig.CONFIG_PREFIX
+        val binder = OAuth2ServersConfigBinder(TestSessionExecution(TypeAwarePrincipalConfigService(mapOf(
+            "$root.default-server" to "primary",
+            "$root.primary.issuer" to "https://as.example/primary",
+            "$root.primary.federation-automatic-registration-mode" to "unknown-mode",
+        ))), com.sphereon.oauth2.server.authorization.impl.testutil.fixedAsInstanceIdProvider())
+        kotlin.test.assertFailsWith<IllegalStateException> { binder.getConfig() }
+    }
+
     private val asId = "test-as"
     private val prefix = "${OAuth2ServerInstanceConfig.CONFIG_PREFIX}.$asId"
 

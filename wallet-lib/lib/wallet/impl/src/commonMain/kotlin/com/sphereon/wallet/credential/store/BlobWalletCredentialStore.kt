@@ -24,6 +24,7 @@ import com.sphereon.core.api.error.IdkError
 import com.sphereon.data.store.blob.BlobInfo
 import com.sphereon.data.store.blob.BlobService
 import com.sphereon.data.store.blob.MetadataSearchQuery
+import com.sphereon.data.store.blob.PutOptions
 import com.sphereon.di.session.SessionScope
 import com.sphereon.wallet.credential.BodyStorageKind
 import com.sphereon.wallet.credential.BodyStorageRef
@@ -62,6 +63,7 @@ private const val META_LIFECYCLE = "lifecycle"
 private const val META_VALIDITY = "validity"
 private const val META_CREDENTIAL_CONFIGURATION_ID = "credentialConfigurationId"
 private const val META_TYPE_REF_PREFIX = "credentialTypeRef."
+private const val ENVELOPE_UPDATE_ATTEMPTS = 4
 
 /**
  * Blob-backed [LocalWalletCredentialStore].
@@ -144,6 +146,60 @@ class BlobWalletCredentialStore(
 
         val envelope = walletJson.decodeFromString<CredentialRecord>(envelopeResult.value.data.decodeToString())
         return Ok(envelope.takeIf { it.walletUnitId == walletUnitId }?.withoutRawBodies())
+    }
+
+    override suspend fun updateCredentialEnvelope(
+        walletUnitId: String,
+        credentialRecordId: String,
+        transform: (CredentialRecord) -> CredentialRecord,
+    ): IdkResult<CredentialRecord?, IdkError> {
+        repeat(ENVELOPE_UPDATE_ATTEMPTS) {
+            val currentMetadataResult = getMetadata(walletUnitId, credentialRecordId)
+            if (currentMetadataResult.isErr) return Err(currentMetadataResult.error)
+            if (currentMetadataResult.value?.lifecycleSummary?.tombstone == true) return Ok(null)
+
+            val envelopeResult = blobService.getBlob(recordEnvelopeBlobInfo(walletUnitId, credentialRecordId))
+            if (envelopeResult.isErr) {
+                return if (envelopeResult.error.isNotFound()) Ok(null) else Err(envelopeResult.error)
+            }
+            val resolved = envelopeResult.value
+            val current = walletJson.decodeFromString<CredentialRecord>(resolved.data.decodeToString()).withoutRawBodies()
+            if (current.walletUnitId != walletUnitId || current.id != credentialRecordId) return Ok(null)
+
+            val transformed = transform(current)
+            if (!isSafeEnvelopeUpdate(current, transformed)) {
+                return Err(
+                    IdkError.ILLEGAL_ARGUMENT_ERROR(
+                        message = "Credential envelope updates must preserve record identity, instance inventory, and body references",
+                    ),
+                )
+            }
+            val updated = transformed.withoutRawBodies()
+            if (updated == current) return Ok(current)
+
+            val storeId = resolved.descriptor.storeId
+            val revision = resolved.descriptor.revision
+            if (revision == null || !blobService.getCapabilities(storeId).supportsRevisions) {
+                return putHydratedEnvelopeUpdate(walletUnitId, credentialRecordId, transform)
+            }
+
+            val writeResult =
+                blobService.storeBlob(
+                    target = recordEnvelopeBlobInfo(walletUnitId, credentialRecordId).copy(storeId = storeId),
+                    data = walletJson.encodeToString(updated).encodeToByteArray(),
+                    options = PutOptions(expectedRevision = revision),
+                )
+            if (writeResult.isErr) {
+                if (writeResult.error.code == "BLOB_PRECONDITION_FAILED") return@repeat
+                return Err(writeResult.error)
+            }
+
+            val metadata = updated.metadata(Clock.System.now())
+            val sidecarUpdateResult = updateMetadataSidecarIfCurrent(walletUnitId, credentialRecordId, writeResult.value.revision, metadata)
+            if (sidecarUpdateResult.isErr) return Err(sidecarUpdateResult.error)
+            return Ok(updated)
+        }
+        return Err(IdkError.fromString(message = "Credential envelope changed repeatedly during update", code = "BLOB_PRECONDITION_FAILED"))
     }
 
     override suspend fun getCredential(
@@ -283,6 +339,98 @@ class BlobWalletCredentialStore(
             }
         }
         return Ok(metadata)
+    }
+
+    private suspend fun putHydratedEnvelopeUpdate(
+        walletUnitId: String,
+        credentialRecordId: String,
+        transform: (CredentialRecord) -> CredentialRecord,
+    ): IdkResult<CredentialRecord?, IdkError> {
+        val current = getCredential(walletUnitId, credentialRecordId).getOrElse { return Err(it) } ?: return Ok(null)
+        val envelope = current.withoutRawBodies()
+        val updated = transform(envelope).withoutRawBodies()
+        if (!isSafeEnvelopeUpdate(envelope, updated)) {
+            return Err(
+                IdkError.ILLEGAL_ARGUMENT_ERROR(
+                    message = "Credential envelope updates must preserve record identity, instance inventory, and body references",
+                ),
+            )
+        }
+        val originalsById = current.instances.associateBy { it.id }
+        val hydrated =
+            updated.copy(
+                instances =
+                    updated.instances.map { instance ->
+                        val original = requireNotNull(originalsById[instance.id])
+                        instance.copy(raw = original.raw, bodyStorageRef = original.bodyStorageRef)
+                    },
+            )
+        val putResult = putCredential(walletUnitId, hydrated)
+        if (putResult.isErr) return Err(putResult.error)
+        return Ok(putResult.value.withoutRawBodies())
+    }
+
+    private fun isSafeEnvelopeUpdate(
+        current: CredentialRecord,
+        updated: CredentialRecord,
+    ): Boolean {
+        if (
+            current.id != updated.id ||
+            current.walletUnitId != updated.walletUnitId ||
+            current.instances.size != updated.instances.size ||
+            current.instances.map { it.id }.toSet() != updated.instances.map { it.id }.toSet() ||
+            updated.instances.any { it.raw != null }
+        ) {
+            return false
+        }
+        val updatedById = updated.instances.associateBy { it.id }
+        if (current.instances.any { it.bodyStorageRef != updatedById[it.id]?.bodyStorageRef }) return false
+
+        val comparableUpdated =
+            updated.copy(
+                updatedAt = current.updatedAt,
+                syncState = updated.syncState.copy(localRevision = current.syncState.localRevision),
+                instances =
+                    updated.instances.map { instance ->
+                        val original = current.instances.first { it.id == instance.id }
+                        instance.copy(bindingRefs = original.bindingRefs, updatedAt = original.updatedAt)
+                    },
+            )
+        return comparableUpdated == current
+    }
+
+    private suspend fun updateMetadataSidecarIfCurrent(
+        walletUnitId: String,
+        credentialRecordId: String,
+        committedEnvelopeRevision: Long?,
+        metadata: CredentialMetadata,
+    ): IdkResult<Unit, IdkError> {
+        if (committedEnvelopeRevision == null) return Ok(Unit)
+
+        val currentEnvelope = blobService.getBlob(recordEnvelopeBlobInfo(walletUnitId, credentialRecordId))
+        if (currentEnvelope.isErr) {
+            return if (currentEnvelope.error.isNotFound()) Ok(Unit) else Err(currentEnvelope.error)
+        }
+        if (currentEnvelope.value.descriptor.revision != committedEnvelopeRevision) return Ok(Unit)
+
+        val sidecarResult = blobService.getBlob(metadataBlobInfoRef(walletUnitId, credentialRecordId))
+        if (sidecarResult.isErr) {
+            return if (sidecarResult.error.isNotFound()) Ok(Unit) else Err(sidecarResult.error)
+        }
+        val currentMetadata = walletJson.decodeFromString<CredentialMetadata>(sidecarResult.value.data.decodeToString())
+        if (currentMetadata.walletUnitId != walletUnitId || currentMetadata.lifecycleSummary.tombstone) return Ok(Unit)
+
+        val revision = sidecarResult.value.descriptor.revision
+        if (revision == null || !blobService.getCapabilities(sidecarResult.value.descriptor.storeId).supportsRevisions) return Ok(Unit)
+
+        val updateResult =
+            blobService.storeBlob(
+                target = metadataBlobInfo(walletUnitId, credentialRecordId, metadata).copy(storeId = sidecarResult.value.descriptor.storeId),
+                data = walletJson.encodeToString(metadata).encodeToByteArray(),
+                options = PutOptions(expectedRevision = revision),
+            )
+        if (updateResult.isErr && updateResult.error.code != "BLOB_PRECONDITION_FAILED") return Err(updateResult.error)
+        return Ok(Unit)
     }
 
     private fun recordEnvelopeBlobInfo(

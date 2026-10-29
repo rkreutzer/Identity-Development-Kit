@@ -54,6 +54,9 @@ kotlin {
         val commonMain by getting {
             dependencies {
                 api(projects.libCoreCompatAnnotations)
+                // DefaultPropertySources extends atomicfu's SynchronizedObject: consumers compiling common
+                // metadata (any non-JVM target) need atomicfu on their classpath. On the JVM it is a typealias.
+                api(sphereonlib.org.jetbrains.kotlinx.atomicfu)
                 implementation(sphereonlib.co.touchlab.skie.configuration.annotations)
                 implementation(sphereonlib.com.michael.bull.kotlin.result.kotlin.result)
                 // default deps are already injected by conventions plugin!

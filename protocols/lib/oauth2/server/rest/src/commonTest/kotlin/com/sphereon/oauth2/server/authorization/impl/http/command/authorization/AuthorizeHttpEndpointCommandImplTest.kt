@@ -376,4 +376,63 @@ class AuthorizeHttpEndpointCommandImplTest {
             assertEquals(400, result.value.statusCode)
             assertTrue(result.value.body!!.contains("invalid_request"))
         }
+
+    @Test
+    fun getConflictingRequestWrappersRejectBeforeHandlerSelection() = runTest {
+        assertHttpWrapperConflict("GET")
+    }
+
+    @Test
+    fun formPostConflictingRequestWrappersRejectBeforeHandlerSelection() = runTest {
+        assertHttpWrapperConflict("POST")
+    }
+
+    private suspend fun assertHttpWrapperConflict(method: String) {
+        var calls = 0
+        val endpoint = AuthorizeHttpEndpointCommandImpl(
+            execution = TestSessionExecution(),
+            handleAuthorizeRequestCommands = setOf(FakeAuthorizeRequestCommand {
+                calls++
+                Ok(AuthorizationRequestOutcome.AuthInitiated(authProviderRedirectUrl = "https://idp.example/login"))
+            }),
+            createAuthorizationErrorResponseCommand = FakeCreateErrorResponseCommand(),
+            configProvider = TestOAuth2ServersConfigProvider(),
+            baseUrlResolver = DefaultOAuth2ServerBaseUrlResolver(),
+            loginSessionIdProvider = TestMutableOidcLoginSessionIdProvider(),
+        )
+        val cases = listOf(
+            "request=a.b.c&request_uri=https%3A%2F%2Frp.example%2Frequest.jwt" to mapOf("request" to "a.b.c", "request_uri" to "https://rp.example/request.jwt"),
+            "request=a.b.c&request_uri=urn%3Aietf%3Aparams%3Aoauth%3Arequest_uri%3Aone-use" to mapOf("request" to "a.b.c", "request_uri" to "urn:ietf:params:oauth:request_uri:one-use"),
+            "request=&request_uri=https%3A%2F%2Frp.example%2Frequest.jwt" to mapOf("request" to "", "request_uri" to "https://rp.example/request.jwt"),
+            "request=a.b.c&request_uri=" to mapOf("request" to "a.b.c", "request_uri" to ""),
+            "request=&request_uri=" to mapOf("request" to "", "request_uri" to ""),
+        )
+        for ((body, parameters) in cases) {
+            val result = endpoint.execute(GenericHttpRequest(
+                method = method,
+                path = "/authorize",
+                queryParameters = if (method == "GET") parameters else emptyMap(),
+                headers = if (method == "POST") mapOf("Content-Type" to "application/x-www-form-urlencoded") else emptyMap(),
+                bodySupplier = { if (method == "POST") body else null },
+            ))
+            assertTrue(result.isOk)
+            assertEquals(400, result.value.statusCode)
+            assertTrue(result.value.body!!.contains("invalid_request"))
+            assertEquals(0, calls, "Conflicting wrappers must not reach a handler or stored PAR retrieval")
+        }
+        // Single-wrapper controls must still be dispatched, including a stored-PAR URI wrapper.
+        for (parameters in listOf(mapOf("request" to "a.b.c"), mapOf("request_uri" to "urn:ietf:params:oauth:request_uri:one-use"))) {
+            val body = if (parameters.containsKey("request")) "request=a.b.c" else "request_uri=urn%3Aietf%3Aparams%3Aoauth%3Arequest_uri%3Aone-use"
+            val result = endpoint.execute(GenericHttpRequest(
+                method = method,
+                path = "/authorize",
+                queryParameters = if (method == "GET") parameters else emptyMap(),
+                headers = if (method == "POST") mapOf("Content-Type" to "application/x-www-form-urlencoded") else emptyMap(),
+                bodySupplier = { if (method == "POST") body else null },
+            ))
+            assertTrue(result.isOk)
+            assertEquals(302, result.value.statusCode)
+        }
+        assertEquals(2, calls)
+    }
 }

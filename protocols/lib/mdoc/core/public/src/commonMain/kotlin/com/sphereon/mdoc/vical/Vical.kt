@@ -43,8 +43,8 @@ data class VicalCertificateInfo(
         require(docTypes.isNotEmpty() && docTypes.all { it.isNotBlank() }) {
             "VICAL docTypes must contain at least one non-blank document type"
         }
-        require(certificateProfiles == null || certificateProfiles.all { it.isNotBlank() }) {
-            "VICAL certificateProfiles must not contain blank values"
+        require(certificateProfiles == null || certificateProfiles.all(::isVicalProfileUrn)) {
+            "VICAL certificateProfiles must be RFC 8141 URNs"
         }
     }
 
@@ -86,6 +86,7 @@ data class VicalCertificateInfo(
 data class Vical(
     val version: String = "1.0",
     val vicalProvider: String,
+    /** Optional unsigned issue identifier; zero is valid in the ISO/IEC 18013-5 CDDL. */
     val vicalIssueId: ULong? = null,
     val date: String,
     val nextUpdate: String? = null,
@@ -97,7 +98,6 @@ data class Vical(
     init {
         require(version == "1.0") { "VICAL version must be '1.0'" }
         require(vicalProvider.isNotBlank()) { "VICAL provider must not be blank" }
-        require(vicalIssueId == null || vicalIssueId > 0uL) { "VICAL issue ID must be positive" }
         require(certificateInfos.all { it.docTypes.isNotEmpty() }) { "VICAL certificateInfos must be valid" }
         require(vicalUrl == null || vicalUrl.isNotBlank()) { "VICAL URL must not be blank" }
     }
@@ -120,10 +120,18 @@ data class VicalValidationPolicy(
     val expectedCertificateSerialNumber: ByteArray? = null,
     val expectedCertificateSki: ByteArray? = null,
     val requiredCertificateProfiles: Set<String> = emptySet(),
+    /** Local policy requiring the otherwise optional expected publication time. */
     val requireNextUpdate: Boolean = true,
     val clockSkewSeconds: Long = 120,
     val embeddedIacaTrustMode: VicalEmbeddedIacaTrustMode = VicalEmbeddedIacaTrustMode.LEGACY_CONFIGURED_ISSUER_ANCHOR,
     val authenticatedIacaRestrictions: Array<String>? = null,
+    /**
+     * Local freshness cutoff, enabled by default for backwards compatibility.
+     * ISO/IEC 18013-5 defines nextUpdate as an expected publication time, not an expiry.
+     * Disabling this cutoff does not disable certificate validity or signature validation.
+     */
+    val rejectPastNextUpdate: Boolean = true,
+    val signerCertificateProfile: VicalSignerCertificateProfile = VicalSignerCertificateProfile.LEGACY,
 ) {
     init {
         require(trustedCerts.isNotEmpty()) { "VICAL validation requires configured trust anchors" }
@@ -137,7 +145,16 @@ data class VicalValidationPolicy(
             "Authenticated VICAL IACA mode does not consume trustedIssuerCerts; use authenticatedIacaRestrictions for local restrictions"
         }
         require(clockSkewSeconds >= 0) { "VICAL clock skew must not be negative" }
+        require(requiredCertificateProfiles.all(::isVicalProfileUrn)) { "VICAL required certificate profiles must be RFC 8141 URNs" }
     }
+}
+
+/** Explicitly adopted signer profile; Annex C is informative in ISO/IEC 18013-5. */
+enum class VicalSignerCertificateProfile {
+    /** Existing generic certificate-chain validation, without a dedicated VICAL leaf profile. */
+    LEGACY,
+    /** Annex C signer certificate checks, with the currently supported NIST EC curves. */
+    ISO_18013_5_ANNEX_C,
 }
 
 /** How certificates embedded in an already authenticated VICAL become trusted IACAs. */
@@ -224,3 +241,15 @@ private fun ByteArray?.contentEqualsNullable(other: ByteArray?): Boolean =
     }
 
 private fun ByteArray?.contentHashCodeNullable(): Int = this?.contentHashCode() ?: 0
+
+// RFC 8141 namestring grammar. Percent escapes must be complete; URI whitespace and
+// non-ASCII characters must be percent encoded. Namespace registration is not inferred.
+private val vicalUrnPchar = "(?:[A-Za-z0-9._~!$&'()*+,;=:@-]|%[0-9A-Fa-f]{2})"
+private val vicalProfileUrn = Regex(
+    "[uU][rR][nN]:[A-Za-z0-9][A-Za-z0-9-]{0,30}[A-Za-z0-9]:" +
+        "$vicalUrnPchar(?:$vicalUrnPchar|/)*" +
+        "(?:\\?\\+$vicalUrnPchar(?:$vicalUrnPchar|/|\\?(?!=))*)?" +
+        "(?:\\?=$vicalUrnPchar(?:$vicalUrnPchar|/|\\?)*)?" +
+        "(?:#(?:$vicalUrnPchar|/|\\?)*)?",
+)
+private fun isVicalProfileUrn(value: String): Boolean = vicalProfileUrn.matches(value)

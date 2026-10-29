@@ -158,13 +158,11 @@ class ResolveIssuerMetadataCommandImpl(
                     unsignedMetadata
                 }
 
-            // Validate that the credential_issuer in the metadata matches the requested issuer URL
-            val normalizedMetadataIssuer = metadata.credentialIssuer.trimEnd('/')
-            val normalizedRequestedIssuer = issuerUrl.trimEnd('/')
-            if (normalizedMetadataIssuer != normalizedRequestedIssuer) {
+            // OID4VCI 12.2.4 requires simple string comparison without normalization.
+            if (metadata.credentialIssuer != issuerUrl) {
                 return Err(
                     IdkError.ILLEGAL_ARGUMENT_ERROR(
-                        message = "credential_issuer in metadata ($normalizedMetadataIssuer) does not match requested issuer URL ($normalizedRequestedIssuer)",
+                        message = "credential_issuer in metadata (${metadata.credentialIssuer}) does not match requested issuer URL ($issuerUrl)",
                     ),
                 )
             }

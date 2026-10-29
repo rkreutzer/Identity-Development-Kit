@@ -78,6 +78,12 @@ interface HttpEndpointCommand : Command<GenericHttpRequest, GenericHttpResponse,
     val endpoint: HttpEndpointDescriptor
 
     /**
+     * Single-segment resource parameters that explicitly accept opaque percent-encoded identifiers.
+     * These are decoded once after matching; literals and other parameters retain strict path checks.
+     */
+    val encodedPathParameters: Set<String> get() = emptySet()
+
+    /**
      * Determines if this command can handle the given request.
      *
      * Default implementation matches the request against the endpoint descriptor.

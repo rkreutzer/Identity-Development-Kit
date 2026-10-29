@@ -4,22 +4,33 @@ import com.sphereon.ktor.http.client.provider.HttpClientEngineType
 import com.sphereon.ktor.http.client.provider.HttpClientFactory
 import com.sphereon.ktor.http.client.provider.HttpClientOptions
 import com.sphereon.core.api.conf.OpaqueSecretResolver
-import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionStatusUpdate
+import com.sphereon.openid.oid4vp.universal.GetAuthorizationRequestStatusOutput
+import com.sphereon.openid.oid4vp.universal.VerifiedClaimsValue
+import com.sphereon.openid.oid4vp.universal.VerifiedData
 import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionCallbackSigning
 import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionCallbackDispatcher
 import com.sphereon.core.api.Ok
 import com.sphereon.core.api.http.callback.CallbackSigningAlgorithm
 import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSessionStatus
+import com.sphereon.core.api.http.callback.CallbackSigning
+import com.sphereon.openid.oid4vc.common.SessionError
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.OutgoingContent
 import io.ktor.http.headersOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -28,10 +39,10 @@ import kotlin.test.assertTrue
 
 /** Real callback dispatcher with only the remote HTTP transport replaced. */
 class KtorAuthorizationSessionCallbackDispatcherTest {
-    private val update = AuthorizationSessionStatusUpdate(
+    private val update = GetAuthorizationRequestStatusOutput(
         correlationId = "callback-correlation-42",
         status = AuthorizationSessionStatus.AUTHORIZATION_RESPONSE_VERIFIED,
-        updatedAt = 1_800_000_000_000L,
+        lastUpdated = 1_800_000_000_000L,
     )
 
     @Test
@@ -52,6 +63,75 @@ class KtorAuthorizationSessionCallbackDispatcherTest {
             } finally {
                 factory.close()
             }
+        }
+    }
+
+    @Test
+    fun shouldPostTheStatusResponseUnderTheSpecificationFieldNames() = runTest {
+        val body = postedBody(update.copy(sessionId = "session-1", createdAt = 1L, expiresAt = 9L))
+
+        assertEquals("callback-correlation-42", body.getValue("correlation_id").jsonPrimitive.content)
+        assertEquals("authorization_response_verified", body.getValue("status").jsonPrimitive.content)
+        assertEquals(1_800_000_000_000L, body.getValue("last_updated").jsonPrimitive.long)
+        assertEquals("session-1", body.getValue("session_id").jsonPrimitive.content)
+        for (legacyKey in listOf("correlationId", "updatedAt", "errorCode", "errorMessage")) {
+            assertFalse(body.containsKey(legacyKey), "the previous camelCase body key $legacyKey must not be sent")
+        }
+    }
+
+    @Test
+    fun shouldOmitVerifiedDataWhenTheStatusCarriesNone() = runTest {
+        assertFalse(postedBody(update).containsKey("verified_data"))
+    }
+
+    @Test
+    fun shouldOmitTheVerifiedDataMembersThatWereNotSelected() = runTest {
+        val claims = VerifiedClaimsValue(id = "passport", type = "urn:test:passport")
+        val claimsOnly = postedBody(update.copy(verifiedData = VerifiedData(credentialClaims = listOf(claims))))
+            .getValue("verified_data").jsonObject
+        assertEquals(setOf("credential_claims"), claimsOnly.keys)
+
+        val responseOnly = postedBody(
+            update.copy(verifiedData = VerifiedData(authorizationResponse = JsonObject(mapOf("state" to JsonPrimitive("s"))))),
+        ).getValue("verified_data").jsonObject
+        assertEquals(setOf("authorization_response"), responseOnly.keys)
+
+        val both = postedBody(
+            update.copy(
+                verifiedData = VerifiedData(
+                    credentialClaims = listOf(claims),
+                    authorizationResponse = JsonObject(mapOf("state" to JsonPrimitive("s"))),
+                ),
+            ),
+        ).getValue("verified_data").jsonObject
+        assertEquals(setOf("credential_claims", "authorization_response"), both.keys)
+    }
+
+    @Test
+    fun shouldSendTheStructuredErrorTheStatusApiShows() = runTest {
+        val error = SessionError(code = "invalid_request", message = "bad response")
+        val body = postedBody(update.copy(status = AuthorizationSessionStatus.ERROR, error = error))
+
+        assertEquals("error", body.getValue("status").jsonPrimitive.content)
+        assertEquals("invalid_request", body.getValue("error").jsonObject.getValue("code").jsonPrimitive.content)
+        assertEquals("bad response", body.getValue("error").jsonObject.getValue("message").jsonPrimitive.content)
+    }
+
+    @Test
+    fun shouldPostJsonWithoutSigningHeadersWhenUnsigned() = runTest {
+        var contentType: String? = null
+        var signature: String? = null
+        val factory = TransportFactory(MockEngine { request ->
+            contentType = request.body.contentType?.withoutParameters()?.toString()
+            signature = request.headers[CallbackSigning.SIGNATURE_HEADER]
+            respond("", HttpStatusCode.OK)
+        })
+        try {
+            KtorAuthorizationSessionCallbackDispatcher(factory).dispatch("https://receiver.example.com/oid4vp", update)
+            assertEquals("application/json", contentType)
+            assertEquals(null, signature)
+        } finally {
+            factory.close()
         }
     }
 
@@ -175,7 +255,7 @@ class KtorAuthorizationSessionCallbackDispatcherTest {
         val legacy = object : AuthorizationSessionCallbackDispatcher {
             override suspend fun dispatch(
                 url: String,
-                update: AuthorizationSessionStatusUpdate,
+                update: GetAuthorizationRequestStatusOutput,
             ) = Ok(Unit).also { legacyCalls++ }
         }
 
@@ -240,6 +320,22 @@ class KtorAuthorizationSessionCallbackDispatcherTest {
                 factory.closeEngineOnly()
             }
         }
+    }
+
+    private suspend fun postedBody(status: GetAuthorizationRequestStatusOutput): JsonObject {
+        var posted: ByteArray? = null
+        val factory = TransportFactory(MockEngine { request ->
+            posted = (request.body as OutgoingContent.ByteArrayContent).bytes()
+            respond("", HttpStatusCode.OK)
+        })
+        try {
+            val result = KtorAuthorizationSessionCallbackDispatcher(factory)
+                .dispatch("https://receiver.example.com/oid4vp", status)
+            assertTrue(result.isOk)
+        } finally {
+            factory.close()
+        }
+        return Json.parseToJsonElement(posted!!.decodeToString()).jsonObject
     }
 
     private class TransportFactory(private val engine: MockEngine) : HttpClientFactory {

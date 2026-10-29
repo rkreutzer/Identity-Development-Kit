@@ -81,6 +81,49 @@ class Oid4vpSdJwtHolderBindingProviderTest {
         assertFalse(samePublicKey(jwk("""{"kty":"oct","k":"secret"}"""), jwk("""{"kty":"oct","k":"secret"}""")))
     }
 
+    @Test
+    fun didJwkCredentialUsesItsEmbeddedPublicKeyForHolderBinding() = runTest {
+        val holderKey = """{"kty":"EC","crv":"P-256","x":"holder-x","y":"holder-y"}"""
+        val didMethod = "did:jwk:${holderKey.encodeToByteArray().encodeToBase64Url()}#0"
+        val wsca = RecordingWsca(publicKeyJwks = mapOf("holder-alias-first" to holderKey))
+        val provider = SecureComponentOid4vpSdJwtHolderBindingProvider(wsca)
+        val credential = SelectedCredential(
+            credentialQueryId = "first",
+            credentialId = "sdjwt-did-bound",
+            presentation = JsonPrimitive(sdJwtCredentialWithKid(didMethod)),
+            credentialFormat = CredentialFormat.SD_JWT_VC,
+            holderKeyRef = "holder-alias-first",
+        )
+
+        val result = provider.applyHolderBinding(
+            Oid4vpSdJwtHolderBindingRequest("wallet-1", "attended-operation-1", sdJwtResolvedRequest(), listOf(credential)),
+        )
+
+        assertTrue(result.isOk, result.errorOrNull()?.message?.defaultMessage)
+        assertEquals(1, wsca.signCalls.size)
+        assertTrue(result.value.single().sdJwtKeyBindingApplied)
+    }
+
+    @Test
+    fun didJwkHolderBindingRejectsWrongOrMalformedVerificationMethod() = runTest {
+        val issuedKey = """{"kty":"EC","crv":"P-256","x":"issued-x","y":"issued-y"}"""
+        val runtimeKey = """{"kty":"EC","crv":"P-256","x":"runtime-x","y":"runtime-y"}"""
+        val didMethod = "did:jwk:${issuedKey.encodeToByteArray().encodeToBase64Url()}#0"
+        val wsca = RecordingWsca(publicKeyJwks = mapOf("holder-alias-first" to runtimeKey))
+        val provider = SecureComponentOid4vpSdJwtHolderBindingProvider(wsca)
+        suspend fun present(kid: String) = provider.applyHolderBinding(
+            Oid4vpSdJwtHolderBindingRequest(
+                "wallet-1", "attended-operation-1", sdJwtResolvedRequest(),
+                listOf(SelectedCredential("first", "sdjwt-did-bound", JsonPrimitive(sdJwtCredentialWithKid(kid)),
+                    credentialFormat = CredentialFormat.SD_JWT_VC, holderKeyRef = "holder-alias-first")),
+            ),
+        )
+
+        assertEquals("oid4vp.key_binding_key_mismatch", present(didMethod).errorOrNull()?.code)
+        assertEquals("oid4vp.key_binding_cnf_jwk_missing", present("did:jwk:invalid#1").errorOrNull()?.code)
+        assertTrue(wsca.signCalls.isEmpty())
+    }
+
     private fun jwk(value: String): JsonObject = Json.parseToJsonElement(value) as JsonObject
 
     private fun sdJwtResolvedRequest() = ResolvedOid4vpRequest(
@@ -100,6 +143,15 @@ class Oid4vpSdJwtHolderBindingProviderTest {
             put("iss", "https://issuer.example")
             put("sub", subject)
             put("cnf", Json.parseToJsonElement("{\"jwk\":$holderJwk}"))
+        }.toString().encodeToByteArray().encodeToBase64Url()
+        return "$header.$payload.issuer-signature~"
+    }
+
+    private fun sdJwtCredentialWithKid(kid: String): String {
+        val header = """{"alg":"ES256","typ":"dc+sd-jwt"}""".encodeToByteArray().encodeToBase64Url()
+        val payload = buildJsonObject {
+            put("iss", "https://issuer.example")
+            put("cnf", buildJsonObject { put("kid", kid) })
         }.toString().encodeToByteArray().encodeToBase64Url()
         return "$header.$payload.issuer-signature~"
     }

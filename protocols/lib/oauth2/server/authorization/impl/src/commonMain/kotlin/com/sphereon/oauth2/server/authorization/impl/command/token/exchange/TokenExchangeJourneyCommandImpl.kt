@@ -104,7 +104,7 @@ class TokenExchangeJourneyCommandImpl(
     private val authenticator =
         TokenEndpointRequestAuthenticator(
             parseTokenRequestCommand = parseTokenRequestCommand,
-            verifyClientAuthenticationCommand = verifyClientAuthenticationCommand,
+            verifyClientAuthenticationCommand = lazyOf(verifyClientAuthenticationCommand),
             serversConfigProvider = serversConfigProvider,
             verifyDpopProofCommand = verifyDpopProofCommand,
             dpopProofJtiCache = dpopProofJtiCache,

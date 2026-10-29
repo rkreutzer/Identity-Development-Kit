@@ -19,8 +19,10 @@ package com.sphereon.openid.oid4vp.holder
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.core.compat.JsExportCompat
+import kotlin.js.JsName
 import com.sphereon.oauth2.common.model.AuthorizationRequest
 import com.sphereon.oauth2.common.model.AuthorizationResponse
+import com.sphereon.oauth2.common.model.AuthorizationErrorResponse
 import com.sphereon.openid.oid4vp.common.ResponseMode
 import kotlin.experimental.ExperimentalObjCName
 import kotlin.native.ObjCName
@@ -105,6 +107,15 @@ interface Oid4vpHolderService {
     ): IdkResult<AuthorizationResponse, IdkError> =
         com.sphereon.core.api.Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Holder JWT VP finalization is not configured"))
 
+    /** Sends an error through the authenticated response route, without credential material. */
+    suspend fun submitAuthorizationErrorResponse(
+        resolvedRequest: ResolvedOid4vpRequest,
+        error: AuthorizationErrorResponse,
+        responseMode: ResponseMode? = null,
+        jarmOptions: JarmOptions? = null,
+    ): IdkResult<SubmissionResult, IdkError> =
+        com.sphereon.core.api.Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Authorization error submission is not configured"))
+
     suspend fun submitAuthorizationResponse(
         resolvedRequest: ResolvedOid4vpRequest,
         response: AuthorizationResponse,
@@ -116,6 +127,8 @@ interface Oid4vpHolderService {
      * Binding-aware overload. Legacy adapters remain source-compatible and refuse non-null
      * bindings rather than silently dropping the prepared-recipient constraint.
      */
+    // JavaScript has no overloads; overrides inherit this name.
+    @JsName("submitAuthorizationResponseWithRecipientBinding")
     suspend fun submitAuthorizationResponse(
         resolvedRequest: ResolvedOid4vpRequest,
         response: AuthorizationResponse,

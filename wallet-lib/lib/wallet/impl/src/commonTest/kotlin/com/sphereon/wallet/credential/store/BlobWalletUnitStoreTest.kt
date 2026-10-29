@@ -135,7 +135,7 @@ private class WalletUnitEventService : com.sphereon.core.events.SessionEventServ
             .DefaultEventBuilder(com.sphereon.core.api.context.IdkScope.SESSION)
 }
 
-private fun createWalletUnitBlobService(): DefaultBlobService {
+internal fun createWalletUnitBlobService(store: com.sphereon.data.store.blob.BlobStore? = null): DefaultBlobService {
     val blobBackingStorage = InMemoryBlobBackingStorageImpl()
     val blobFactory = InMemoryBlobStoreFactoryImpl(blobBackingStorage)
     val memoryStore = blobFactory.create(InMemoryBlobStoreConfig(id = "memory"))
@@ -145,7 +145,7 @@ private fun createWalletUnitBlobService(): DefaultBlobService {
     val kvStore = kvFactory.create(InMemoryKvStoreConfig(id = KvBlobMetadataIndex.STORE_ID, scopeBinding = KvStoreScopeBinding.APP))
 
     return DefaultBlobService(
-        blobStoreService = WalletUnitBlobStoreService(memoryStore),
+        blobStoreService = WalletUnitBlobStoreService(store ?: memoryStore),
         metadataIndex = KvBlobMetadataIndex(WalletUnitKvStoreService(kvStore)),
         retentionPolicyService = DefaultRetentionPolicyService(),
         tempUrlPolicy =

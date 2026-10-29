@@ -19,6 +19,7 @@ package com.sphereon.openid.oid4vci.issuer.impl.format
 import com.sphereon.core.api.Err
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
+import com.sphereon.openid.oid4vci.issuer.format.SigningKeyMode
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.crypto.core.KeyInfo
 import com.sphereon.crypto.core.sign.SignatureService
@@ -151,6 +152,11 @@ class VcLdJsonJwtFormatHandler(
             }
         }
         val credentialSubjects = context.credentialSubjects.ifEmpty { listOf(JsonObject(context.attributes)) }
+        // OID4VCI 1.0 §14.4: the Credential Issuer Identifier is always the HTTPS URL, while the
+        // issuer identifier in the credential follows the signing key. A DID-signed credential
+        // names its DID as `issuer`/`iss`, rooted in the same DID as the header `kid`; other modes
+        // keep the HTTPS identifier. Mirrors SdJwtVcFormatHandler.
+        val credentialIssuer = credentialIssuerIdentifier(context).getOrElse { return Err(it) }
 
         // Validate all caller-controlled properties before reserving a status entry. A failed
         // context/schema request must not consume an allocation that can never be bound.
@@ -158,7 +164,7 @@ class VcLdJsonJwtFormatHandler(
             buildVcBody(
                 BuildVcBodyInputs(
                     credentialTypes = credentialTypes,
-                    issuer = context.issuerIdentifier,
+                    issuer = credentialIssuer,
                     credentialSubjects = credentialSubjects,
                     attributes = context.attributes,
                     validFrom = validFrom,
@@ -204,7 +210,7 @@ class VcLdJsonJwtFormatHandler(
             validateAgainstSchema(vcBody, primaryType).getOrElse { return Err(it) }
         }
 
-        val jwtPayload = buildJwtPayload(vcBody, context, nowEpochSeconds, credentialId)
+        val jwtPayload = buildJwtPayload(vcBody, context, credentialIssuer, nowEpochSeconds, credentialId)
         validateVcdm2JwtPayload(jwtPayload).getOrElse { return Err(it) }
         val envelope = signEnvelope(jwtPayload, context).getOrElse { return Err(it) }
         reservedStatus?.let { reserved ->
@@ -271,6 +277,7 @@ class VcLdJsonJwtFormatHandler(
     private fun buildJwtPayload(
         vcBody: JsonObject,
         context: IssuanceContext,
+        credentialIssuer: String,
         nowEpochSeconds: Long,
         credentialId: String?,
     ): JsonObject =
@@ -278,7 +285,7 @@ class VcLdJsonJwtFormatHandler(
             // Spread VC body keys at the root.
             for ((k, v) in vcBody) put(k, v)
 
-            put("iss", context.issuerIdentifier)
+            put("iss", credentialIssuer)
             credentialId?.let { put("jti", it) }
             val didKid = context.holderKeyId?.takeIf { it.startsWith("did:") }
             // iat shifted backward by clock-skew tolerance.
@@ -305,6 +312,21 @@ class VcLdJsonJwtFormatHandler(
                 }
             }
         }
+
+    private suspend fun credentialIssuerIdentifier(context: IssuanceContext): IdkResult<String, IdkError> {
+        if (context.signingKeyMode !is SigningKeyMode.Did) return Ok(context.issuerIdentifier)
+        val keyAlias = context.requireSigningKeyName().getOrElse { return Err(it) }
+        val selected =
+            context.signingVerificationMethodId
+                ?: return Err(
+                    IdkError.fromString(
+                        code = "invalid_signing_verification_method",
+                        message = "DID signing requires an exact assertionMethod verification method",
+                    ),
+                )
+        val verificationMethodId = issuerKeyIdResolver.validateDidVerificationMethodId(keyAlias, selected).getOrElse { return Err(it) }
+        return didOfVerificationMethod(verificationMethodId)
+    }
 
     private suspend fun signEnvelope(
         jwtPayload: JsonObject,

@@ -64,7 +64,7 @@ import dev.zacsweers.metro.ExposeImplBinding
 class HandleTokenRequestCommandImpl(
     execution: SessionExecution,
     private val parseTokenRequestCommand: ParseTokenRequestCommand,
-    private val verifyClientAuthenticationCommand: VerifyClientAuthenticationCommand,
+    private val verifyClientAuthenticationCommand: Lazy<VerifyClientAuthenticationCommand>,
     private val serversConfigProvider: OAuth2ServersConfigProvider,
     private val verifyDpopProofCommand: Lazy<VerifyDpopProofCommand>,
     private val dpopProofJtiCache: Lazy<DpopProofJtiCache>,
@@ -113,17 +113,38 @@ class HandleTokenRequestCommandImpl(
         timings: TokenPathStageTimings,
     ): IdkResult<TokenResponse, IdkError> {
         val applied = applyDuring(args)
-        val tokenRequest = authenticator.parse(applied, timings).getOrElse { error -> return Err(error) }
+        val tokenRequest = authenticator.parse(applied, timings).getOrElse { error ->
+            // Nothing is parsed yet, so the identifiers come from the raw form and are only
+            // logged after the shape check in [tokenRefusalLine].
+            refuse(
+                stage = "request-parse",
+                clientId = applied.requestBody["client_id"]?.firstOrNull(),
+                grantType = applied.requestBody["grant_type"]?.firstOrNull(),
+                error = error,
+            )
+            return Err(error)
+        }
         val grantType = tokenRequest.grantType.value
+        val requestClientId = tokenRequest.clientId.takeIf(String::isNotBlank)
 
         // RFC 8693 exchanges run as one journey that authenticates the client itself. Route the
         // raw request before any proof or client-assertion replay state is consumed here.
         if (tokenRequest.grantType == GrantType.TOKEN_EXCHANGE) {
             val handler =
                 grantHandlers[grantType]?.value
-                    ?: return errOf(AuthorizationServerError.UnsupportedGrantType(grantType = grantType))
+                    ?: return refused(
+                        stage = "grant-selection",
+                        clientId = requestClientId,
+                        grantType = grantType,
+                        error = AuthorizationServerError.UnsupportedGrantType(grantType = grantType),
+                    )
             if (handler !is TokenExchangeGrantHandlerImpl || !handler.supports(tokenRequest.grantParameters)) {
-                return errOf(AuthorizationServerError.ServerError(details = "Grant handler binding mismatch for '$grantType'"))
+                return refused(
+                    stage = "grant-binding",
+                    clientId = requestClientId,
+                    grantType = grantType,
+                    error = AuthorizationServerError.ServerError(details = "Grant handler binding mismatch for '$grantType'"),
+                )
             }
             return timings.record(TokenPathStage.GRANT_DISPATCH) { handler.handleRawRequest(applied) }
         }
@@ -131,16 +152,29 @@ class HandleTokenRequestCommandImpl(
         val authenticated =
             authenticator
                 .authenticate(applied, tokenRequest, execution.tenantId, timings)
-                .getOrElse { error -> return Err(error) }
+                .getOrElse { error ->
+                    refuse(stage = "request-authentication", clientId = requestClientId, grantType = grantType, error = error)
+                    return Err(error)
+                }
+        val clientId = requestClientId ?: authenticated.clientAuthorization?.clientId
 
         val handler =
             grantHandlers[grantType]?.value
-                ?: return errOf(AuthorizationServerError.UnsupportedGrantType(grantType = grantType))
+                ?: return refused(
+                    stage = "grant-selection",
+                    clientId = clientId,
+                    grantType = grantType,
+                    error = AuthorizationServerError.UnsupportedGrantType(grantType = grantType),
+                )
         if (handler.grantType != grantType || !handler.supports(tokenRequest.grantParameters)) {
-            return errOf(
-                AuthorizationServerError.ServerError(
-                    details = "Grant handler binding mismatch for '$grantType'",
-                ),
+            return refused(
+                stage = "grant-binding",
+                clientId = clientId,
+                grantType = grantType,
+                error =
+                    AuthorizationServerError.ServerError(
+                        details = "Grant handler binding mismatch for '$grantType'",
+                    ),
             )
         }
 
@@ -150,7 +184,39 @@ class HandleTokenRequestCommandImpl(
                 params = tokenRequest.grantParameters,
                 context = authenticated.context,
                 clientAuthorization = authenticated.clientAuthorization,
-            )
+            ).also { result ->
+                if (result.isErr) {
+                    refuse(stage = "grant-dispatch", clientId = clientId, grantType = grantType, error = result.error)
+                }
+            }
         }
     }
+
+    /** Emits the single refusal WARN for this request. */
+    private suspend fun refuse(
+        stage: String,
+        clientId: String?,
+        grantType: String?,
+        error: IdkError,
+    ) {
+        logTokenRefusal(
+            log,
+            tokenRefusalLine(
+                commandId = commandId,
+                stage = stage,
+                clientId = clientId,
+                tenantId = execution.tenantId,
+                grantType = grantType,
+                error = error,
+            ),
+        )
+    }
+
+    private suspend fun refused(
+        stage: String,
+        clientId: String?,
+        grantType: String,
+        error: AuthorizationServerError,
+    ): IdkResult<TokenResponse, IdkError> =
+        errOf(error).also { refuse(stage = stage, clientId = clientId, grantType = grantType, error = it.error) }
 }

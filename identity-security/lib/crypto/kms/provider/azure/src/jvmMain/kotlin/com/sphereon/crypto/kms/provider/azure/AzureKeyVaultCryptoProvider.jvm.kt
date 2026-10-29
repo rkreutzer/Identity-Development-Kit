@@ -416,6 +416,9 @@ actual class AzureKeyVaultCryptoProvider actual constructor(
      * @return The raw signature bytes
      * @throws SignClientException if the key cannot be found or signature creation fails
      */
+    override fun rawSignatureEncoding(algorithm: SignatureAlgorithm): com.sphereon.crypto.core.kms.command.SignatureEncoding? =
+        com.sphereon.crypto.core.kms.command.SignatureEncoding.RAW
+
     override suspend fun createRawSignature(
         keyInfo: KeyInfoType<*>,
         input: ByteArray,

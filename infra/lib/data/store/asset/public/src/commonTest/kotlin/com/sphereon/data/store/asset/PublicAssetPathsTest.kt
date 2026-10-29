@@ -19,7 +19,9 @@ package com.sphereon.data.store.asset
 import com.sphereon.data.store.asset.model.AssetNamespace
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class PublicAssetPathsTest {
     private val tenantId = "acme"
@@ -56,6 +58,26 @@ class PublicAssetPathsTest {
 
         val withoutExt = PublicAssetPaths.assetPath(tenantId, AssetNamespace.DESIGN, hash)
         assertEquals(hash, PublicAssetPaths.hashFromLeaf(withoutExt.substringAfterLast('/')))
+    }
+
+    @Test
+    fun shouldAcceptOnlyLowercaseHexOfARegisteredDigestLengthAsCanonicalHash() {
+        assertTrue(PublicAssetPaths.isCanonicalHash(hash))
+        assertTrue(PublicAssetPaths.isCanonicalHash("a".repeat(64)))
+        assertTrue(PublicAssetPaths.isCanonicalHash("0".repeat(64)))
+        assertTrue(PublicAssetPaths.isCanonicalHash("a".repeat(96)))
+        assertTrue(PublicAssetPaths.isCanonicalHash("f".repeat(128)))
+        assertFalse(PublicAssetPaths.isCanonicalHash(""))
+        assertFalse(PublicAssetPaths.isCanonicalHash("a".repeat(32)))
+        assertFalse(PublicAssetPaths.isCanonicalHash("a".repeat(40)))
+        assertFalse(PublicAssetPaths.isCanonicalHash("a".repeat(129)))
+        assertFalse(PublicAssetPaths.isCanonicalHash(hash.dropLast(1)))
+        assertFalse(PublicAssetPaths.isCanonicalHash("${hash}0"))
+        assertFalse(PublicAssetPaths.isCanonicalHash(hash.uppercase()))
+        assertFalse(PublicAssetPaths.isCanonicalHash("g" + hash.drop(1)))
+        assertFalse(PublicAssetPaths.isCanonicalHash("$hash\n"))
+        assertFalse(PublicAssetPaths.isCanonicalHash(" $hash"))
+        assertFalse(PublicAssetPaths.isCanonicalHash("$hash.png"))
     }
 
     @Test

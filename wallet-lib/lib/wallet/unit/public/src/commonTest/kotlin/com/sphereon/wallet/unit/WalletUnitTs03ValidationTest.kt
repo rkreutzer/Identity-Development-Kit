@@ -11,10 +11,12 @@ package com.sphereon.wallet.unit
 
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
+import com.sphereon.core.api.decodeFromBase64Url
 import com.sphereon.core.api.encodeToBase64Url
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.wallet.unit.attestation.KeyAttestationValidationRequest
 import com.sphereon.wallet.unit.attestation.LocalEvaluationWalletAttestationSigner
+import com.sphereon.wallet.unit.attestation.Oid4vciKeyAttestationClaims
 import com.sphereon.wallet.unit.attestation.Ts03JoseVerificationEvidence
 import com.sphereon.wallet.unit.attestation.Ts03JoseVerificationRequest
 import com.sphereon.wallet.unit.attestation.Ts03JoseVerifier
@@ -37,6 +39,9 @@ import com.sphereon.wallet.unit.attestation.WalletUnitAttestationTrustInput
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -48,6 +53,42 @@ class WalletUnitTs03ValidationTest {
             explicitNulls = false
         }
     private val validator = Ts03WalletAttestationValidator(joseVerifier = AcceptingJoseVerifier)
+
+    @Test
+    fun encodesOid4vciKeyAttestationWithPublicClaimsSerializer() =
+        runTest {
+            val claims =
+                Oid4vciKeyAttestationClaims(
+                    iss = ISSUER,
+                    iat = 1_800_000_000L,
+                    exp = 1_800_000_300L,
+                    nonce = NONCE,
+                    attestedKeys =
+                        listOf(
+                            JsonObject(
+                                mapOf(
+                                    "kty" to JsonPrimitive("EC"),
+                                    "crv" to JsonPrimitive("P-256"),
+                                    "x" to JsonPrimitive("x"),
+                                    "y" to JsonPrimitive("y"),
+                                ),
+                            ),
+                        ),
+                )
+            val encoded =
+                Ts03WalletAttestationEncoder()
+                    .encodeOid4vciKeyAttestation(
+                        claims = claims,
+                        signer = LocalEvaluationWalletAttestationSigner(signerId = "signer-a"),
+                        signingRequest = signingRequest(listOf("certificate-chain-a")),
+                    ).value
+
+            val header =
+                json
+                    .parseToJsonElement(encoded.compact.substringBefore('.').decodeFromBase64Url().decodeToString())
+                    .jsonObject
+            assertTrue(header["typ"]?.toString() == "\"key-attestation+jwt\"")
+        }
 
     @Test
     fun validatesWiaFixtureWithTrustEvidence() =

@@ -5,6 +5,7 @@
 
 package com.sphereon.wallet.runner.oidf
 
+import com.sphereon.core.api.conf.DefaultPrincipalMapPropertySource
 import com.sphereon.oidf.conformance.JvmTrustStoreScope
 import com.sphereon.oidf.conformance.OidfConformanceSuiteClient
 import com.sphereon.oidf.conformance.OidfPlan
@@ -54,6 +55,8 @@ class OidfWalletPlanConformanceTest {
     private var executor: OidfWalletModuleExecutor? = null
     private var haipAttestationFixture: OidfHaipWalletAttestationFixture? = null
     private var startedAtEpochMs: Long = 0
+    private var previousVerifierTrustAnchors: String? = null
+    private var verifierTrustConfigured = false
 
     @BeforeAll
     fun startPlanRow() {
@@ -70,23 +73,39 @@ class OidfWalletPlanConformanceTest {
                 .resolve(planName)
         Files.createDirectories(evidenceDirectory)
         lock = OidfSuiteLock.load()
-        val runningEnvironment =
-            OidfSuiteEnvironment.start(
-                lock = lock,
-                startupEvidenceDirectory = evidenceDirectory.resolve("containers-startup"),
-            )
-        environment = runningEnvironment
-        trustScope = runningEnvironment.installJvmTrustStore()
-        val runningSuite = runningEnvironment.client()
-        suite = runningSuite
-        val runningPreprocessor =
-            OidfSuiteConfigPreprocessor(
-                suiteDir = runningEnvironment.suiteSourceDirectory,
-                baseUrl = runningEnvironment.advertisedBaseUrl,
-                localBaseUrl = runningEnvironment.apiBaseUrl,
-                mtlsBaseUrl = runningEnvironment.advertisedMtlsBaseUrl,
-            )
-        preprocessor = runningPreprocessor
+        val existingSuite = existingOidfWalletSuite()
+        if (existingSuite != null) {
+            suite = existingSuite.client
+            preprocessor = existingSuite.preprocessor
+        } else {
+            val runningEnvironment =
+                OidfSuiteEnvironment.start(
+                    lock = lock,
+                    startupEvidenceDirectory = evidenceDirectory.resolve("containers-startup"),
+                )
+            environment = runningEnvironment
+            trustScope = runningEnvironment.installJvmTrustStore()
+            val runningSuite = runningEnvironment.client()
+            suite = runningSuite
+            val runningPreprocessor =
+                OidfSuiteConfigPreprocessor(
+                    suiteDir = runningEnvironment.suiteSourceDirectory,
+                    baseUrl = runningEnvironment.advertisedBaseUrl,
+                    localBaseUrl = runningEnvironment.apiBaseUrl,
+                    mtlsBaseUrl = runningEnvironment.advertisedMtlsBaseUrl,
+                )
+            preprocessor = runningPreprocessor
+        }
+        val runningSuite = checkNotNull(suite)
+        val runningPreprocessor = checkNotNull(preprocessor)
+        // Request-object trust is separate from HTTPS transport trust. Anchor only the
+        // locked suite's dedicated verifier CA, never the x5c leaf from a request.
+        previousVerifierTrustAnchors = DefaultPrincipalMapPropertySource.getPropertyAsString(VERIFIER_TRUST_ANCHORS)
+        DefaultPrincipalMapPropertySource.addProperty(
+            VERIFIER_TRUST_ANCHORS,
+            runningPreprocessor.sourceText("scripts/certs-keys/vp-signing-ca.crt"),
+        )
+        verifierTrustConfigured = true
         haipAttestationFixture =
             if (planName == VCI_HAIP_PLAN) OidfHaipWalletAttestationFixture() else null
 
@@ -198,6 +217,11 @@ class OidfWalletPlanConformanceTest {
                 }
             }
         } finally {
+            if (verifierTrustConfigured) {
+                previousVerifierTrustAnchors?.let {
+                    DefaultPrincipalMapPropertySource.addProperty(VERIFIER_TRUST_ANCHORS, it)
+                } ?: DefaultPrincipalMapPropertySource.deleteProperty(VERIFIER_TRUST_ANCHORS)
+            }
             runCatching { runningEnvironment?.exportContainerLogs(evidenceDirectory.resolve("containers")) }
                 .onFailure { cleanupErrors += "container logs: ${it.stackTraceToString()}" }
             runCatching { trustScope?.close() }
@@ -269,6 +293,7 @@ class OidfWalletPlanConformanceTest {
     }
 
     private companion object {
+        const val VERIFIER_TRUST_ANCHORS = "oid4vp.request.trust-anchors"
         const val MODE = "wallet-plan"
         const val VCI_FINAL_PLAN = "oid4vci-1_0-wallet-test-plan"
         const val VCI_HAIP_PLAN = "oid4vci-1_0-wallet-haip-test-plan"

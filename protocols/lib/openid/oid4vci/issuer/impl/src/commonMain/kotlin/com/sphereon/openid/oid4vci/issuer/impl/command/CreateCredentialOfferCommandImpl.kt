@@ -43,6 +43,7 @@ import com.sphereon.openid.oid4vci.issuer.command.CreateCredentialOfferArgs
 import com.sphereon.openid.oid4vci.issuer.command.CreateCredentialOfferCommand
 import com.sphereon.openid.oid4vci.issuer.command.CreatedCredentialOffer
 import com.sphereon.openid.oid4vci.issuer.command.OfferUriLifecycle
+import com.sphereon.openid.oid4vci.issuer.command.markNothingWritten
 import com.sphereon.openid.oid4vci.issuer.config.Oid4vciIssuerConfigProvider
 import com.sphereon.openid.oid4vci.issuer.config.Oid4vciIssuerProtocolConfig
 import com.sphereon.openid.oid4vci.issuer.config.requireCanonicalOid4vciIssuerInstanceId
@@ -140,19 +141,20 @@ class CreateCredentialOfferCommandImpl(
     private suspend fun doExecuteInternal(
         args: CreateCredentialOfferArgs,
     ): IdkResult<CreatedCredentialOffer, IdkError> {
-        validateRequestShape(args).getOrElse { return Err(it) }
-        validateCredentialConfigurationIds(args).getOrElse { return Err(it) }
+        // A refusal up to here wrote nothing, and says so, because the generic codes below also follow a write.
+        validateRequestShape(args).getOrElse { return Err(it.markNothingWritten()) }
+        validateCredentialConfigurationIds(args).getOrElse { return Err(it.markNothingWritten()) }
 
         val now = clock.now()
         if (now.epochSeconds > Long.MAX_VALUE - args.offerTtlSeconds) {
-            return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "offer_ttl_seconds overflows the expiry boundary"))
+            return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "offer_ttl_seconds overflows the expiry boundary").markNothingWritten())
         }
         val candidateExpiryEpochSeconds = now.epochSeconds + args.offerTtlSeconds
         val expiresAtEpochSeconds =
             validatePreAuthorizedCodeExpiry(candidateExpiryEpochSeconds, now)
-                .getOrElse { return Err(it) }
+                .getOrElse { return Err(it.markNothingWritten()) }
                 .epochSeconds
-        lifecycleInitializer.validateGrants(args).getOrElse { return Err(it) }
+        lifecycleInitializer.validateGrants(args).getOrElse { return Err(it.markNothingWritten()) }
         val offerId = Uuid.random().toString()
         val sessionId = Uuid.random().toString()
 

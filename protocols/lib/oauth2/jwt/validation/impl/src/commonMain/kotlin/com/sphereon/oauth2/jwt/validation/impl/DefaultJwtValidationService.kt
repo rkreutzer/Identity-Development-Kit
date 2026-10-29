@@ -22,6 +22,7 @@ import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
 import com.sphereon.core.api.decodeFromBase64Url
 import com.sphereon.core.api.error.IdkError
+import com.sphereon.core.api.log.Log
 import com.sphereon.di.session.SessionScope
 import com.sphereon.oauth2.jwt.validation.AccessTokenValidationOptions
 import com.sphereon.oauth2.jwt.validation.AsIssuerTrustMaterial
@@ -299,6 +300,9 @@ class DefaultJwtValidationService(
                 )
             },
             failure = { error ->
+                val code = error.code.takeIf { it.matches(Regex("[A-Za-z0-9_.:-]{1,160}")) } ?: "unavailable"
+                Log.app().withTag("DefaultJwtValidationService")
+                    .warn("JWT_VALIDATION_REFUSED stage=access-token-verification code=$code")
                 Err(mapVerifyJwtError(error, idpConfig, expectedAudience))
             },
         )

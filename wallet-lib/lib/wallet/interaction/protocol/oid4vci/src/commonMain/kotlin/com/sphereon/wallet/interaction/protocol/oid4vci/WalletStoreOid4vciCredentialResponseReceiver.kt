@@ -46,6 +46,9 @@ import com.sphereon.wallet.interaction.WalletCredentialBranding
 import com.sphereon.wallet.interaction.WalletInteractionContext
 import com.sphereon.wallet.interaction.WalletInteractionFailureCodes
 import com.sphereon.wallet.interaction.WalletInteractionState
+import com.sphereon.wallet.interaction.admitForIssuer
+import com.sphereon.wallet.interaction.WalletProtocol
+import com.sphereon.wallet.interaction.WalletIssuerAuthenticationRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -203,7 +206,13 @@ class WalletStoreOid4vciCredentialResponseReceiver(
                                 kid = holderVerificationMethods.getOrNull(index)?.value,
                             ),
                         lifecycleState = CredentialLifecycleState.ACTIVE,
-                        validity = CredentialValidityWindow(),
+                        validity =
+                            if (credentialFormat.isMdoc) {
+                                acceptance.mdocValidityWindow(raw)
+                                    ?: error("OID4VCI mso_mdoc credential has no decodable MSO validity window")
+                            } else {
+                                CredentialValidityWindow()
+                            },
                         issuedAt = now,
                         storedAt = now,
                         updatedAt = now,
@@ -214,13 +223,32 @@ class WalletStoreOid4vciCredentialResponseReceiver(
             // instance before storing anything; a failed verification rejects the whole store
             // operation.
             stage = "credential-signature-verification"
+            // OID4VCI 1.0 §14.4: the Credential Issuer Identifier is the HTTPS URL, but a VCDM
+            // credential signed with a DID key names that DID as its issuer. Its keys are then
+            // resolved for that DID through the deployment's issuer-authentication resolver, which
+            // establishes the DID's admission; the verified issuer must still equal it.
+            val claimedDidIssuer =
+                acceptance.claimedJwtVcIssuer(credentialFormat, newInstances)
+                    ?.takeIf { it != resolvedOffer.offer.credentialIssuer && it.startsWith("did:") }
+            val issuerAuthentication =
+                if (claimedDidIssuer == null) {
+                    state.issuerAuthentication
+                } else {
+                    context.issuerAuthenticationResolver
+                        .resolve(
+                            WalletIssuerAuthenticationRequest(
+                                counterparty = WalletCounterpartySummary(role = WalletCounterpartyRole.ISSUER, identifier = claimedDidIssuer),
+                                protocol = WalletProtocol.OID4VCI,
+                            ),
+                        )?.admitForIssuer(claimedDidIssuer)
+                }
             val verifyResult =
                 acceptance.verify(
                     credentialConfigurationId = credentialConfigurationId,
                     credentialFormat = credentialFormat,
                     instances = newInstances,
-                    issuerAuthentication = state.issuerAuthentication,
-                    expectedIssuer = resolvedOffer.offer.credentialIssuer,
+                    issuerAuthentication = issuerAuthentication,
+                    expectedIssuer = claimedDidIssuer ?: resolvedOffer.offer.credentialIssuer,
                 )
             if (verifyResult.isErr) {
                 providerError = verifyResult.error
@@ -380,6 +408,8 @@ class WalletStoreOid4vciCredentialResponseReceiver(
                     put("stage", stage)
                     put("reason", (providerError as? IssuedCredentialVerificationError)?.reason?.diagnosticCode ?: reason)
                     put("causeType", failure::class.simpleName ?: "Exception")
+                    // Closed throw site (class.method only, never the message) for failures that carry no provider error.
+                    failureSite(failure)?.let { put("failureSite", it) }
                     var cause = failure.cause
                     var depth = 1
                     while (cause != null && depth <= 4) {
@@ -597,4 +627,11 @@ class WalletStoreOid4vciCredentialResponseReceiver(
         credentialRecordId: String,
         credentialInstanceId: String,
     ): String = "wallet-units/$walletUnitId/credentials/$credentialRecordId/instances/$credentialInstanceId/body"
+
+    private fun failureSite(failure: Throwable): String? =
+        FAILURE_SITE_FRAME.find(failure.stackTraceToString())?.let { "${it.groupValues[1]}.${it.groupValues[2]}" }
+
+    private companion object {
+        val FAILURE_SITE_FRAME = Regex("""at com\.sphereon\.(?:[\w$]+\.)*?([A-Z][\w$]*)\.([\w$<>-]+)\(""")
+    }
 }

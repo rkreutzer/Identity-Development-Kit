@@ -22,6 +22,26 @@ class VicalCborCodecImplTest {
     private val codec = VicalCborCodecImpl()
 
     @Test
+    fun vical_accepts_zero_issue_id_and_empty_certificate_list() {
+        // Annex C permits uint (including zero) and zero CertificateInfo entries.
+        val payload = CborMap(
+            mutableMapOf(
+                CborString("version") to CborString("1.0"),
+                CborString("vicalProvider") to CborString("provider"),
+                CborString("vicalIssueID") to CborUInt(0),
+                CborString("date") to CborTDate("2026-08-27T10:00:00Z"),
+                CborString("certificateInfos") to CborArray(mutableListOf()),
+            ),
+        )
+
+        val decoded = codec.decode(Cbor.encode(payload))
+
+        assertEquals(0uL, decoded.vicalIssueId)
+        assertEquals(emptyList(), decoded.certificateInfos)
+        assertEquals(decoded, codec.decode(codec.encode(decoded)))
+    }
+
+    @Test
     fun vical_round_trips_optional_fields_and_large_serial_number() {
         val expected =
             Vical(
@@ -37,7 +57,7 @@ class VicalCborCodecImplTest {
                             serialNumber = byteArrayOf(0x80.toByte(), 0, 0, 0, 0, 0, 0, 1),
                             ski = ByteArray(20) { it.toByte() },
                             docTypes = listOf("org.iso.18013.5.1.mDL", "org.example.mDL"),
-                            certificateProfiles = listOf("IACA", "DS"),
+                            certificateProfiles = listOf("urn:example:IACA", "urn:example:DS"),
                             issuingAuthority = "Example authority",
                             issuingCountry = "NL",
                             stateOrProvinceName = "North Holland",
@@ -115,4 +135,15 @@ class VicalCborCodecImplTest {
     }
 
     private fun Vical.docTypes(): List<String> = certificateInfos.flatMap { it.docTypes }
+
+    @Test
+    fun certificateProfilesRequireUrnSyntax() {
+        val entry = VicalCertificateInfo(byteArrayOf(1), byteArrayOf(1), byteArrayOf(1), listOf("org.example.mdoc"))
+        for (profile in listOf("IACA", "https://example.test/profile", "urn:x:a", "urn:example:", "urn:example:bad value", "urn:example:bad%2")) {
+            assertFailsWith<IllegalArgumentException>(profile) { entry.copy(certificateProfiles = listOf(profile)) }
+        }
+        for (profile in listOf("urn:example:iaca", "URN:example:with%20encoding", "urn:example:profile/path?+resolve?=query#fragment")) {
+            assertEquals(listOf(profile), entry.copy(certificateProfiles = listOf(profile)).certificateProfiles)
+        }
+    }
 }

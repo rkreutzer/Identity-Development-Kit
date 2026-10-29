@@ -19,22 +19,19 @@ package com.sphereon.openid.oid4vp.universal.impl.command
 import com.sphereon.core.api.Err
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
-import com.sphereon.core.api.binary.TypeToken
 import com.sphereon.core.api.binary.typeToken
 import com.sphereon.core.api.context.SessionExecution
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.core.api.service.TypedServiceCommandAdapter
 import com.sphereon.core.events.SessionEventService
-import com.sphereon.di.session.SessionContext
 import com.sphereon.di.session.SessionScope
-import com.sphereon.openid.oid4vc.common.SessionError
 import com.sphereon.openid.oid4vp.universal.GetAuthRequestStatusInput
 import com.sphereon.openid.oid4vp.universal.GetAuthRequestStatusServiceCommand
-import com.sphereon.openid.oid4vp.universal.AuthorizationValidationSummary
 import com.sphereon.openid.oid4vp.universal.GetAuthorizationRequestStatusOutput
 import com.sphereon.openid.oid4vp.universal.UniversalOid4vpEventTypes
+import com.sphereon.openid.oid4vp.universal.VerifiedDataMode
+import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionStatusResponseMapper
 import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSession
-import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSessionStatus
 import com.sphereon.openid.oid4vp.verifier.store.AuthorizationSessionStore
 import com.sphereon.openid.oid4vp.universal.impl.event.putSessionEventIdentity
 import dev.zacsweers.metro.Inject
@@ -63,6 +60,7 @@ class GetAuthRequestStatusServiceCommandImpl(
     execution: SessionExecution,
     private val authorizationSessionStore: AuthorizationSessionStore,
     private val sessionEventService: SessionEventService,
+    private val statusResponseMapper: AuthorizationSessionStatusResponseMapper,
 ) : TypedServiceCommandAdapter<GetAuthRequestStatusInput, GetAuthorizationRequestStatusOutput, IdkError>(
         commandId = GetAuthRequestStatusServiceCommand.COMMAND_ID,
         execution = execution,
@@ -88,38 +86,12 @@ class GetAuthRequestStatusServiceCommandImpl(
                     ),
                 )
 
-        // 2. Build verified data if session is verified
-        val verifiedData =
-            if (session.status == AuthorizationSessionStatus.AUTHORIZATION_RESPONSE_VERIFIED) {
-                buildVerifiedData(session)
-            } else {
-                null
-            }
-
-        // 3. Emit STATUS_POLLED event
+        // 2. Emit STATUS_POLLED event
         emitStatusPolledEvent(session)
 
-        // 4. Build response
-        val sessionError =
-            session.error?.let { error ->
-                SessionError(code = error.code, message = error.message)
-            }
-
-        val output =
-            GetAuthorizationRequestStatusOutput(
-                correlationId = session.correlationId,
-                queryId = session.queryId,
-                status = session.status,
-                lastUpdated = session.updatedAt,
-                sessionId = session.sessionId,
-                verifierId = session.verifierId,
-                createdAt = session.createdAt,
-                expiresAt = session.expiresAt,
-                error = sessionError,
-                verifiedData = verifiedData,
-                validation = authorizationValidationSummaryOf(session),
-                verificationBinding = com.sphereon.openid.oid4vp.universal.VerificationSessionBinding(session.instanceId, session.templateId, session.templateRevision, session.dcqlQueryId, session.dcqlQueryVersion, session.createdAt, session.expiresAt),
-            )
+        // 3. Build response. Polling always offers every verified data representation; the modes a
+        // callback was configured with only narrow what the callback carries.
+        val output = statusResponseMapper.build(session, VerifiedDataMode.entries.toList())
 
         return Ok(output)
     }
@@ -157,17 +129,3 @@ class GetAuthRequestStatusServiceCommandImpl(
             )
     }
 }
-
-/**
- * Summarizes the validation the verifier stored on [session], or null when none has run.
- *
- * Sourced from the stored validation result rather than from the verified data: a rejected session
- * has no verified data at all, which is precisely the case a relying party needs the summary for.
- */
-internal fun authorizationValidationSummaryOf(session: AuthorizationSession): AuthorizationValidationSummary? =
-    session.validationResult?.let { validationResult ->
-        AuthorizationValidationSummary(
-            valid = validationResult.valid,
-            rejections = validationResult.rejections,
-        )
-    }

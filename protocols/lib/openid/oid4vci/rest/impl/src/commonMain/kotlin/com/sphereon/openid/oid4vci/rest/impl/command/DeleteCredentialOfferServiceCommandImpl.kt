@@ -40,6 +40,13 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlin.time.Clock
 
+/**
+ * Deletes a credential offer and its session.
+ *
+ * A correlation id claimed for the offer is withdrawn by the session store when the session is deleted. A repeat of the same
+ * request is then answered that the offer was deleted, instead of creating a new offer, because deleting an offer withdraws
+ * the intent the key stood for. The key stays withdrawn for as long as the store keeps the claim.
+ */
 @Inject
 @SingleIn(SessionScope::class)
 @ContributesBinding(SessionScope::class, binding = binding<DeleteCredentialOfferServiceCommand>())
@@ -67,6 +74,11 @@ class DeleteCredentialOfferServiceCommandImpl(
             credentialOfferSessionStore.get(input.correlationId).getOrElse { error ->
                 return Err(error)
             } ?: return Err(IdkError.NOT_FOUND_ERROR(message = "Session not found for correlation ID: ${input.correlationId}"))
+
+        // A session of another instance is answered like a missing one, so a caller cannot probe correlation ids across instances.
+        if (input.instanceId != null && session.instanceId != input.instanceId) {
+            return Err(IdkError.NOT_FOUND_ERROR(message = "Session not found for correlation ID: ${input.correlationId}"))
+        }
 
         credentialOfferStore.delete(session.offerId)
         credentialOfferSessionStore.delete(input.correlationId)

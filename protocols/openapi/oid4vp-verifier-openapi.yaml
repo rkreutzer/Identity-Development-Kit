@@ -9,7 +9,9 @@ info:
     when it is no longer needed.
 
     The create call returns everything needed to start the wallet flow: a `request_uri` (and an
-    optional QR code) that the wallet uses to fetch the signed request object, a `status_uri` for
+    optional QR code), which per Universal OID4VP is the wallet invocation (deep)link; the
+    Authorization Request it carries references the signed request object by its own https
+    `request_uri` (RFC 9101), which the wallet retrieves once. It also returns a `status_uri` for
     polling, and a `correlation_id` that keys the session. The status call reports the session state
     and, once a presentation has been received and verified, the verified credential claims. The
     delete call ends the session.

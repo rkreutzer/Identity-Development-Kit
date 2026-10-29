@@ -67,6 +67,34 @@ import kotlin.test.assertTrue
  */
 class RequestObjectVerificationKeyTest {
     @Test
+    fun requestObjectWithoutRequiredTypIsRejectedBeforeVerificationKeySelection() =
+        runTest {
+            assertRequestObjectTypRejected(header = buildJsonObject { put("alg", "ES256") })
+        }
+
+    @Test
+    fun requestObjectWithWrongTypIsRejectedBeforeVerificationKeySelection() =
+        runTest {
+            assertRequestObjectTypRejected(
+                header = buildJsonObject {
+                    put("alg", "ES256")
+                    put("typ", "jwt")
+                },
+            )
+        }
+
+    @Test
+    fun requestObjectWithNonStringTypIsRejectedBeforeVerificationKeySelection() =
+        runTest {
+            assertRequestObjectTypRejected(
+                header = buildJsonObject {
+                    put("alg", "ES256")
+                    put("typ", 42)
+                },
+            )
+        }
+
+    @Test
     fun requestObjectClaimingAnX509ClientIdIsNeverVerifiedWithAClientMetadataKey() =
         runTest {
             val jarService = RecordingJarService()
@@ -131,6 +159,19 @@ class RequestObjectVerificationKeyTest {
             jwtService = UnusedJwtService,
             requestTrustMaterialProvider = UnavailableOid4vpRequestTrustMaterialProvider(),
         )
+    }
+
+    private suspend fun assertRequestObjectTypRejected(header: JsonObject) {
+        val jarService = RecordingJarService()
+        val requestObject = compactJws(header = header, payload = authorizationRequestClaims(clientId = "verifier.example"))
+        val result =
+            parseCommand(jarService).parseAuthorizationRequest(
+                requestUri = "openid4vp://?request=$requestObject",
+                walletConfig = null,
+            )
+
+        assertTrue(result.isErr, "a Request Object without the required typ must be rejected before processing")
+        assertEquals(0, jarService.mergeCalls, "a Request Object with an invalid typ must not be merged or processed")
     }
 
     private fun authorizationRequestClaims(clientId: String): JsonObject =

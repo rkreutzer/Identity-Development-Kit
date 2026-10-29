@@ -17,6 +17,7 @@
 package com.sphereon.data.store.asset
 
 import com.sphereon.data.store.asset.model.AssetNamespace
+import com.sphereon.data.store.blob.digest.MultihashAlgorithm
 
 /**
  * Canonical public-asset path constants for the tenant asset library, shared between the IDK
@@ -41,6 +42,14 @@ import com.sphereon.data.store.asset.model.AssetNamespace
 object PublicAssetPaths {
     /** Root mount for the PUBLIC, unauthenticated tenant-asset hosting surface. */
     const val BASE_PATH = "/public/assets"
+
+    private val LOWERCASE_HEX = Regex("[0-9a-f]+")
+
+    /**
+     * The lengths, in hexadecimal characters, of the digests of the algorithms the blob module registers for content
+     * addressing ([MultihashAlgorithm]). The format check follows that registry instead of one hard-coded width.
+     */
+    private val DIGEST_HEX_LENGTHS: Set<Int> = MultihashAlgorithm.entries.map { it.digestLength * 2 }.toSet()
 
     /**
      * Returns the tenant-and-namespace directory of the public hosting surface,
@@ -121,6 +130,15 @@ object PublicAssetPaths {
      * @return the hash portion, e.g. `"abc123"`
      */
     fun hashFromLeaf(leaf: String): String = leaf.substringBefore('.')
+
+    /**
+     * Whether [hash] is a canonical asset hash: the lowercase hexadecimal digest of the asset bytes, which is what
+     * [assetPath] takes and [hashFromLeaf] recovers. Its length has to be that of a digest algorithm the blob module
+     * registers ([MultihashAlgorithm]). The library computes SHA-256, so its own hashes are 64 characters, but the check
+     * does not fix that width. The whole string has to match, so a trailing newline, surrounding whitespace or an
+     * upper-case digit is refused.
+     */
+    fun isCanonicalHash(hash: String): Boolean = hash.length in DIGEST_HEX_LENGTHS && hash.matches(LOWERCASE_HEX)
 
     /**
      * Resolves a stored asset [uri] to an ABSOLUTE URL using a per-request/per-tenant

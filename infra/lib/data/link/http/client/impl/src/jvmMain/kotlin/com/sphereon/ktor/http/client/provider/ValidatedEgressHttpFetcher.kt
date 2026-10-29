@@ -154,6 +154,14 @@ class EgressGuard(
     private val addressPolicy: (InetAddress) -> Boolean,
     private val resolver: (String) -> List<InetAddress> = { host -> InetAddress.getAllByName(host).toList() },
 ) {
+    private var resolvedPrivateAddressException: ((String, List<InetAddress>) -> Boolean?)? = null
+
+    /** Install an exact private-address exception check before exposing this guard to a client engine. */
+    fun installResolvedPrivateAddressException(policy: (String, List<InetAddress>) -> Boolean?) {
+        check(resolvedPrivateAddressException == null) { "A resolved private-address exception is already installed" }
+        resolvedPrivateAddressException = policy
+    }
+
     val dns: Dns =
         object : Dns {
             override fun lookup(hostname: String): List<InetAddress> = resolveValidated(hostname)
@@ -177,7 +185,12 @@ class EgressGuard(
                 throw UnknownHostException("The host could not be resolved")
             }
         if (addresses.isEmpty()) throw UnknownHostException("The host could not be resolved")
-        if (addresses.any { !addressPolicy(it) }) throw BlockedEgressAddressException("The host resolves to an address that is not allowed")
+        val exceptionResult =
+            resolvedPrivateAddressException?.let { policy ->
+                runCatching { policy(bare.lowercase().removeSuffix("."), addresses) }.getOrDefault(false)
+            }
+        val allowed = exceptionResult ?: addresses.all(addressPolicy)
+        if (!allowed) throw BlockedEgressAddressException("The host resolves to an address that is not allowed")
         return addresses
     }
 

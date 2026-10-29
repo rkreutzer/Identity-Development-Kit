@@ -52,7 +52,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
-import kotlinx.serialization.json.putJsonObject
 import kotlin.time.Clock
 import kotlin.time.Instant
 import kotlin.uuid.ExperimentalUuidApi
@@ -112,7 +111,11 @@ class JwtVcJsonFormatHandler(
                 ),
             )
         }
-        val credentialSubject = credentialSubjects.single()
+        // Cryptographic Holder Binding (OID4VCI 1.0 section 8.1, OID4VP 1.0): VCDM 1.1 JWTs define no
+        // `cnf`; the only binding is the subject identifier, `sub` = `credentialSubject.id`
+        // (VCDM 1.1 section 6.3.1). The proof's key must therefore be a DID verification method
+        // (OID4VCI Appendix A.1.1 binds jwt_vc_json to DIDs), and that DID becomes the subject.
+        val credentialSubject = holderBoundCredentialSubject(credentialSubjects.single(), context).getOrElse { return Err(it) }
 
         val nowEpochSeconds = Clock.System.now().epochSeconds
         val validityStart = context.validFrom ?: Instant.fromEpochSeconds(nowEpochSeconds)
@@ -134,6 +137,34 @@ class JwtVcJsonFormatHandler(
         // jti mapping, and the status-store binding so all three identify the issued credential.
         val credentialId = context.credentialId ?: reservedStatus?.let { "urn:uuid:${Uuid.random()}" }
 
+        // Server-resolved signing key; a credential is never signed under a name derived from a
+        // caller-visible identifier. The signing-key identifier header (kid / x5c) is derived from
+        // `signingKeyMode` so verifiers can discover the public key — mirrors SdJwtVcFormatHandler.
+        val keyAlias = context.requireSigningKeyName().getOrElse { return Err(it) }
+        val issuerKey = ManagedOptsAlias(identifier = keyAlias)
+        val signingVerificationMethodId =
+            if (context.signingKeyMode is SigningKeyMode.Did) {
+                val selected =
+                    context.signingVerificationMethodId
+                        ?: return Err(
+                            IdkError.fromString(
+                                code = "invalid_signing_verification_method",
+                                message = "DID signing requires an exact assertionMethod verification method",
+                            ),
+                        )
+                issuerKeyIdResolver.validateDidVerificationMethodId(keyAlias, selected).getOrElse { return Err(it) }
+            } else {
+                null
+            }
+        // OID4VCI 1.0 §14.4: the Credential Issuer Identifier is always the HTTPS URL, while the
+        // issuer identifier in the credential follows the signing key. A DID-signed credential
+        // names its DID as `issuer`/`iss`, rooted in the same DID as the header `kid`, so the key
+        // resolves through the DID document. Other modes keep the HTTPS identifier (X.509 keys
+        // travel in `x5c`; otherwise issuer metadata). Mirrors SdJwtVcFormatHandler.
+        val credentialIssuer =
+            signingVerificationMethodId?.let { didOfVerificationMethod(it).getOrElse { error -> return Err(error) } }
+                ?: context.issuerIdentifier
+
         // Build the W3C VC payload
         val vcPayload =
             buildJsonObject {
@@ -144,7 +175,7 @@ class JwtVcJsonFormatHandler(
                 putJsonArray("type") {
                     credentialTypes.forEach { add(JsonPrimitive(it)) }
                 }
-                put("issuer", context.issuerIdentifier)
+                put("issuer", credentialIssuer)
                 put("issuanceDate", issuanceInstant.toString())
                 validityEnd?.let { put("expirationDate", it.toString()) }
                 credentialId?.let { put("id", it) }
@@ -169,11 +200,9 @@ class JwtVcJsonFormatHandler(
         val jwtPayload =
             buildJsonObject {
                 put("vc", vcPayload)
-                put("iss", context.issuerIdentifier)
+                put("iss", credentialIssuer)
                 put("nbf", validityStart.epochSeconds)
                 credentialId?.let { put("jti", it) }
-                val holderKid = context.holderKeyId
-                val isDid = holderKid != null && holderKid.startsWith("did:")
                 (credentialSubject["id"] as? JsonPrimitive)
                     ?.takeIf { it.isString }
                     ?.let { put("sub", it.content) }
@@ -183,41 +212,8 @@ class JwtVcJsonFormatHandler(
                 put("iat", iat)
                 // Only emit `exp` when the configuration specifies a validity window.
                 validityEnd?.let { put("exp", it.epochSeconds) }
-                // Holder binding: cnf carries EXACTLY ONE of `kid` (DID VM URL) or `jwk`,
-                // matching the binding method the wallet used in its proof. Wallet libs
-                // like credo-ts pick `jwk` over `kid` when both are present and then fail
-                // to locate their internal key-map entry (keyed by the DID, not by
-                // thumbprint).
-                context.holderBindingKey?.let { key ->
-                    putJsonObject("cnf") {
-                        if (isDid && holderKid != null) {
-                            put("kid", JsonPrimitive(holderKid))
-                        } else {
-                            put("jwk", key)
-                        }
-                    }
-                }
             }
 
-        // Server-resolved signing key; a credential is never signed under a name derived from a
-        // caller-visible identifier. The signing-key identifier header (kid / x5c) is derived from
-        // `signingKeyMode` so verifiers can discover the public key — mirrors SdJwtVcFormatHandler.
-        val keyAlias = context.requireSigningKeyName().getOrElse { return Err(it) }
-        val issuerKey = ManagedOptsAlias(identifier = keyAlias)
-        val signingVerificationMethodId =
-            if (context.signingKeyMode is SigningKeyMode.Did) {
-                val selected =
-                    context.signingVerificationMethodId
-                        ?: return Err(
-                            IdkError.fromString(
-                                code = "invalid_signing_verification_method",
-                                message = "DID signing requires an exact assertionMethod verification method",
-                            ),
-                        )
-                issuerKeyIdResolver.validateDidVerificationMethodId(keyAlias, selected).getOrElse { return Err(it) }
-            } else {
-                null
-            }
         val keyIdentifierHeader =
             resolveIssuerSigningHeader(
                 kms = kms,
@@ -276,4 +272,33 @@ class JwtVcJsonFormatHandler(
         }
     }
 
+}
+
+/**
+ * The credential subject bound to the proof's holder DID, or the supplied subject when the request
+ * carries no key proof. A bare JWK proof cannot be bound by a VCDM 1.1 JWT, and a supplied subject
+ * id for someone other than the holder would leave the credential unbound; both are refused.
+ */
+private fun holderBoundCredentialSubject(subject: JsonObject, context: IssuanceContext): IdkResult<JsonObject, IdkError> {
+    val holderKeyId = context.holderKeyId
+    if (holderKeyId == null && context.holderBindingKey == null) return Ok(subject)
+    if (holderKeyId == null || !holderKeyId.startsWith("did:")) {
+        return Err(
+            IdkError.fromString(
+                code = "invalid_proof",
+                message = "jwt_vc_json holder binding requires a key proof for a DID verification method",
+            ),
+        )
+    }
+    val holderDid = holderKeyId.substringBefore('#')
+    val suppliedId = subject["id"]
+    if (suppliedId != null && (suppliedId as? JsonPrimitive)?.takeIf { it.isString }?.content != holderDid) {
+        return Err(
+            IdkError.fromString(
+                code = "invalid_vcdm_credential",
+                message = "VCDM 1.1 holder binding requires credentialSubject.id to be the holder DID",
+            ),
+        )
+    }
+    return Ok(JsonObject(subject + ("id" to JsonPrimitive(holderDid))))
 }

@@ -22,6 +22,8 @@ import com.sphereon.core.compat.LocalDateTimeKMP
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toInstant
+import kotlinx.datetime.toLocalDateTime as instantToLocalDateTime
 import kotlinx.serialization.json.JsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -126,6 +128,49 @@ class CborDateTest {
         val tdate = TDate("2024-01-15T12:00:00Z")
         val epochSeconds = tdate.tDateToEpochSeconds(timeZoneId = "UTC")
         assertTrue(epochSeconds > 0)
+    }
+
+    @Test
+    fun tdateEpochConversionSupports2038BoundaryAnd2099() {
+        val cases = listOf(
+            "2038-01-19T03:14:07Z" to 2_147_483_647L,
+            "2038-01-19T03:14:08Z" to 2_147_483_648L,
+            "2099-12-31T23:59:59Z" to 4_102_444_799L,
+        )
+
+        cases.forEach { (dateTime, expectedEpochSeconds) ->
+            val expectedUtcDateTime = Instant.parse(dateTime).instantToLocalDateTime(TimeZone.UTC)
+            val tdate = TDate(dateTime)
+            val cborTdate = CborTDate(dateTime)
+
+            assertEquals(expectedEpochSeconds, tdate.tDateToEpochSeconds(timeZoneId = "UTC"))
+            assertEquals(expectedEpochSeconds, cborTdate.cborTDateToEpochSeconds(timeZoneId = "UTC"))
+            assertEquals(expectedUtcDateTime, tdate.tDateToLocalDateTime(timeZoneId = "UTC"))
+            assertEquals(expectedUtcDateTime, cborTdate.cborTDateToLocalDateTime(timeZoneId = "UTC"))
+        }
+    }
+
+    @Test
+    fun tdateConversionPreservesRfc3339OffsetBeyond2038() {
+        val dateTime = "2038-01-19T04:14:08+01:00"
+        val expectedUtcDateTime = LocalDateTime.parse("2038-01-19T03:14:08")
+        val tdate = TDate(dateTime)
+        val cborTdate = CborTDate(dateTime)
+
+        assertEquals("2038-01-19T03:14:08Z", tdate.toString())
+        assertEquals("2038-01-19T03:14:08Z", cborTdate.toValue())
+        assertEquals(2_147_483_648L, tdate.tDateToEpochSeconds(timeZoneId = "UTC"))
+        assertEquals(2_147_483_648L, cborTdate.cborTDateToEpochSeconds(timeZoneId = "UTC"))
+        assertEquals(expectedUtcDateTime, tdate.tDateToLocalDateTime(timeZoneId = "UTC"))
+        assertEquals(expectedUtcDateTime, cborTdate.cborTDateToLocalDateTime(timeZoneId = "UTC"))
+    }
+
+    @Test
+    fun fullDateTagKeepsDateOnlyAtMidnightInRequestedTimezone() {
+        val fullDate = CborFullDate("2024-06-15")
+
+        assertEquals(LocalDateTime(2024, 6, 15, 0, 0), fullDate.cborFullDateToLocalDateTime(timeZoneId = "UTC"))
+        assertEquals(1_718_409_600L, fullDate.cborFullDateToEpochSeconds(timeZoneId = "UTC"))
     }
 
     @Test

@@ -33,6 +33,7 @@ import com.sphereon.wallet.credential.walletDeferredAccessTokenPath
 import com.sphereon.wallet.credential.walletIssuancePrefix
 import com.sphereon.wallet.credential.walletIssuanceSessionPath
 import com.sphereon.wallet.credential.walletPathSegment
+import com.sphereon.wallet.credential.walletRefreshTokenPath
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -158,8 +159,10 @@ class BlobWalletIssuanceSessionStore(
         walletUnitId: String,
         issuanceSessionId: String,
     ): IdkResult<String?, IdkError> {
-        val result = blobService.getBlob(BlobInfo(path = walletDeferredAccessTokenPath(walletUnitId, issuanceSessionId)))
-        return if (result.isOk) Ok(result.value.data.decodeToString()) else Ok(null)
+        return readSecret(
+            walletDeferredAccessTokenPath(walletUnitId, issuanceSessionId),
+            walletIssuanceSessionPath(walletUnitId, issuanceSessionId) + "/access-token",
+        )
     }
 
     override suspend fun storeRefreshToken(
@@ -195,19 +198,37 @@ class BlobWalletIssuanceSessionStore(
         walletUnitId: String,
         credentialRecordId: String,
     ): IdkResult<String?, IdkError> {
-        val result = blobService.getBlob(BlobInfo(path = walletRefreshTokenPath(walletUnitId, credentialRecordId)))
-        return if (result.isOk) Ok(result.value.data.decodeToString()) else Ok(null)
+        return readSecret(
+            walletRefreshTokenPath(walletUnitId, credentialRecordId),
+            walletIssuancePrefix(walletUnitId) + walletPathSegment(credentialRecordId, "credentialRecordId") + "/refresh-token",
+        )
     }
 
     override suspend fun deleteSession(
         walletUnitId: String,
         issuanceSessionId: String,
     ): IdkResult<Boolean, IdkError> {
+        // Failed older filesystem writes left the session path as a directory containing this
+        // secret. Remove that child before deleting the session file or empty legacy directory.
+        val legacySecret = blobService.deleteBlob(BlobInfo(path = walletIssuanceSessionPath(walletUnitId, issuanceSessionId) + "/access-token"))
+        if (legacySecret.isErr) return Err(legacySecret.error)
         val sessionResult = blobService.deleteBlob(sessionBlobInfoRef(walletUnitId, issuanceSessionId))
         if (sessionResult.isErr) return Err(sessionResult.error)
         val secretResult = blobService.deleteBlob(BlobInfo(path = walletDeferredAccessTokenPath(walletUnitId, issuanceSessionId)))
         if (secretResult.isErr) return Err(secretResult.error)
-        return Ok(sessionResult.value || secretResult.value)
+        return Ok(sessionResult.value || secretResult.value || legacySecret.value)
+    }
+
+    private suspend fun readSecret(path: String, legacyPath: String): IdkResult<String?, IdkError> {
+        val current = blobService.getBlob(BlobInfo(path = path))
+        if (current.isOk) return Ok(current.value.data.decodeToString())
+        if (current.error.code != "BLOB_NOT_FOUND") return Err(current.error)
+        val legacy = blobService.getBlob(BlobInfo(path = legacyPath))
+        return when {
+            legacy.isOk -> Ok(legacy.value.data.decodeToString())
+            legacy.error.code == "BLOB_NOT_FOUND" -> Ok(null)
+            else -> Err(legacy.error)
+        }
     }
 
     private fun sessionBlobInfo(
@@ -230,9 +251,4 @@ class BlobWalletIssuanceSessionStore(
         walletUnitId: String,
         issuanceSessionId: String,
     ): BlobInfo = BlobInfo(path = walletIssuanceSessionPath(walletUnitId, issuanceSessionId))
-
-    private fun walletRefreshTokenPath(
-        walletUnitId: String,
-        credentialRecordId: String,
-    ): String = walletIssuancePrefix(walletUnitId) + walletPathSegment(credentialRecordId, "credentialRecordId") + "/refresh-token"
 }

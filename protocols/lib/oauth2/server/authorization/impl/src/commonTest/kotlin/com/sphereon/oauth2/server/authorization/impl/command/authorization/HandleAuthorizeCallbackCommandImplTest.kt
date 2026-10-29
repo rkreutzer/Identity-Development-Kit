@@ -57,6 +57,33 @@ import kotlin.time.Duration.Companion.minutes
 class HandleAuthorizeCallbackCommandImplTest {
     private val ctx = OAuth2ServerTestContext("handle-authorize-callback-test", this)
 
+    @Test
+    fun atomicConsumeFailureStopsCodeIssuanceEvenWhenLegacyPeekSucceeds() = runTest {
+        val pending = session("atomic-consume-failure")
+        var issuanceCalls = 0
+        var consumeCalls = 0
+        val store = object : PendingAuthorizationSessionStore {
+            override suspend fun create(session: AuthorizationSession) = Ok(session)
+            override suspend fun findById(sessionId: String) = Ok(pending)
+            override suspend fun remove(sessionId: String) = Ok(Unit)
+            override suspend fun consume(sessionId: String): IdkResult<AuthorizationSession?, IdkError> {
+                consumeCalls++
+                return Err(IdkError.fromString(code = "storage_error", message = "atomic write unavailable"))
+            }
+        }
+        val service = service(
+            stubCreateAuthorizationCode { issuanceCalls++; Ok(StringResult(value = "must-not-be-issued")) },
+            stubCreateAuthorizationResponse { args -> Ok(AuthorizationResponseData(args.code, args.state, args.redirectUri)) },
+        )
+        val auth = FakeUserAuthenticationProvider(AuthenticatedUser(userId = "user-1", authenticatedAt = Clock.System.now(), authenticationMethod = AuthenticationMethod.PASSWORD))
+        val command = HandleAuthorizeCallbackCommandImpl(ctx.execution, service, store, auth, DefaultOidcLoginSessionIdProvider(), InMemoryOidcLoginSessionStore(Clock.System))
+        val result = command.execute(HandleAuthorizeCallbackArgs(sessionId = pending.sessionId))
+        assertTrue(result.isErr)
+        assertEquals("storage_error", result.error.code)
+        assertEquals(1, consumeCalls)
+        assertEquals(0, issuanceCalls)
+    }
+
     private fun stubCreateAuthorizationCode(handler: suspend (CreateAuthorizationCodeArgs) -> IdkResult<StringResult, IdkError>): CreateAuthorizationCodeCommand =
         object : CreateAuthorizationCodeCommand {
             override val inputTypeToken = typeToken<CreateAuthorizationCodeArgs>()
@@ -133,6 +160,11 @@ class HandleAuthorizeCallbackCommandImplTest {
         }
 
         override suspend fun findById(sessionId: String): IdkResult<AuthorizationSession?, IdkError> = Ok(map[sessionId])
+
+        override suspend fun consume(sessionId: String): IdkResult<AuthorizationSession?, IdkError> {
+            removeCalls += 1
+            return Ok(map.remove(sessionId))
+        }
 
         override suspend fun remove(sessionId: String): IdkResult<Unit, IdkError> {
             removeCalls += 1

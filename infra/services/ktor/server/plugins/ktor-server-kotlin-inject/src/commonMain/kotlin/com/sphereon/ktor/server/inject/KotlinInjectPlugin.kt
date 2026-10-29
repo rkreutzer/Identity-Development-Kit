@@ -108,6 +108,7 @@ class KotlinInjectPlugin(
     val tenantResolver: TenantResolver = configuration.tenantResolver
     val principalResolver: PrincipalResolver = configuration.principalResolver
     val ignoredPathPrefixes: List<String> = configuration.ignoredPathPrefixes
+    val validatedSecureDetailsFactory: ValidatedRequestSecureDetailsFactory? = configuration.validatedSecureDetailsFactory
 
     // Get the app-scoped logger from the graph
     private val logger: LogService by lazy {
@@ -135,6 +136,7 @@ class KotlinInjectPlugin(
                     appGraph = plugin.appGraph,
                     tenantResolver = plugin.tenantResolver,
                     principalResolver = plugin.principalResolver,
+                    validatedSecureDetailsFactory = plugin.validatedSecureDetailsFactory,
                 )
 
             val requestScopePlugin =

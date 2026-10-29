@@ -30,6 +30,9 @@ import com.sphereon.crypto.core.generic.SignatureAlgorithm
 import com.sphereon.crypto.core.jose.JwkUse
 import com.sphereon.crypto.core.kms.KeyManagerService
 import com.sphereon.crypto.core.kms.asKeyManagerServiceGraph
+import com.sphereon.crypto.jose.jwe.DecryptJweArgs
+import com.sphereon.crypto.jose.jwe.JweCompact
+import com.sphereon.crypto.jose.jwe.JweServiceImpl
 import com.sphereon.crypto.resolution.extern.ExternalIdentifierJwkOpts
 import com.sphereon.crypto.resolution.IdentifierContext
 import com.sphereon.crypto.resolution.managed.ManagedOptsKeyInfo
@@ -70,11 +73,15 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.test.assertFalse
+import kotlin.test.assertIs
 
 private suspend fun HttpAdapterDispatcher.dispatchSelected(
     appGraph: Any,
@@ -878,17 +885,10 @@ class UniversalOid4vpE2ETest {
             // ====== CREATE JARM ENCRYPTED RESPONSE ======
             // For DCQL, vp_token must be a JSON object
             val vpToken = vpTokenOf("pid_credential", vpPresentation)
-            val vpTokenJson =
-                json.encodeToString(
-                    kotlinx.serialization.json.JsonElement
-                        .serializer(),
-                    vpToken.toJson(),
-                )
-
             // Build response parameters as JSON object for JARM
             val responseParameters =
                 kotlinx.serialization.json.buildJsonObject {
-                    put("vp_token", kotlinx.serialization.json.JsonPrimitive(vpTokenJson))
+                    put("vp_token", vpToken.toJson())
                 }
 
             // Create JARM encrypted response using the verifier's public encryption key
@@ -906,22 +906,21 @@ class UniversalOid4vpE2ETest {
                         ),
                 )
 
-            val jarmResult =
-                createJarmCommand.execute(
-                    CreateJarmResponseArgs(
-                        responseParameters = responseParameters,
-                        state = "test-state-jarm",
-                        issuer = "https://holder.example.com",
-                        audience = "https://verifier.example.com",
-                        encryptionRecipient = encryptionRecipient,
-                        jarmConfig =
-                            JarmConfig(
-                                encryptionAlgorithm = "RSA-OAEP",
-                                contentEncryptionAlgorithm = "A256GCM",
-                                mode = JarmMode.ENCRYPTED,
-                            ),
+            val jarmArgs = CreateJarmResponseArgs(
+                responseParameters = responseParameters,
+                state = "test-state-jarm",
+                issuer = "https://holder.example.com",
+                audience = "https://verifier.example.com",
+                encryptionRecipient = encryptionRecipient,
+                jarmConfig =
+                    JarmConfig(
+                        encryptionAlgorithm = "RSA-OAEP",
+                        contentEncryptionAlgorithm = "A256GCM",
+                        mode = JarmMode.ENCRYPTED,
                     ),
-                )
+                appendStandardJwtClaims = false,
+            )
+            val jarmResult = createJarmCommand.execute(jarmArgs)
 
             assertTrue(jarmResult.isOk, "JARM creation should succeed: $jarmResult")
             val jarmJwt = jarmResult.value.jarmJwt
@@ -939,6 +938,30 @@ class UniversalOid4vpE2ETest {
                             clientIdScheme = "pre-registered",
                         ),
                 )
+
+            val jweService = (verifierGraph as JweServiceImpl.Graph).jweService
+            suspend fun decryptPayload(token: String): JsonObject {
+                val decrypted = jweService.decryptJwe(DecryptJweArgs(JweCompact.parse(token), verifierDecryptionKey)).getOrThrow()
+                return json.parseToJsonElement(requireNotNull(decrypted.plaintext).decodeToString()).jsonObject
+            }
+            val payload = decryptPayload(jarmJwt)
+            assertIs<JsonObject>(payload["vp_token"], "Final encrypted responses contain the DCQL map, not a serialized JSON string")
+            assertEquals(vpToken.toJson(), payload["vp_token"])
+            assertEquals("test-state-jarm", payload["state"]?.jsonPrimitive?.content)
+            for (claim in listOf("iss", "aud", "exp", "iat")) {
+                assertFalse(payload.containsKey(claim), "Response-parameter envelopes must not synthesize $claim")
+            }
+            val oauthJarm = createJarmCommand.execute(jarmArgs.copy(appendStandardJwtClaims = true)).getOrThrow()
+            val oauthPayload = decryptPayload(oauthJarm.jarmJwt)
+            assertEquals("https://holder.example.com", oauthPayload["iss"]?.jsonPrimitive?.content)
+            assertEquals("https://verifier.example.com", oauthPayload["aud"]?.jsonPrimitive?.content)
+            assertTrue(oauthPayload.containsKey("exp"))
+            assertTrue(oauthPayload.containsKey("iat"))
+            for (mode in listOf(JarmMode.SIGNED, JarmMode.SIGNED_ENCRYPTED)) {
+                val invalid = createJarmCommand.execute(jarmArgs.copy(jarmConfig = jarmArgs.jarmConfig.copy(mode = mode)))
+                assertTrue(invalid.isErr, "Signed OAuth JARM cannot disable its standard JWT claims")
+                assertEquals("Signed JARM responses require standard JWT claims", invalid.error.message.defaultMessage)
+            }
 
             val parseResult =
                 rpService.parseAuthorizationResponse(

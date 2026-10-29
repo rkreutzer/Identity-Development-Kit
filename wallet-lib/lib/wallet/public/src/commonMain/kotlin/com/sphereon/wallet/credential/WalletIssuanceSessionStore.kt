@@ -90,9 +90,10 @@ interface WalletIssuanceSessionStore {
     ): IdkResult<String?, IdkError>
 
     /**
-     * Persists the OAuth2 refresh token for a credential record and returns a [SecretRef] to it (for
-     * later silent replenishment, ARF ISSU_45/65). Default is a no-op-unsupported: stores that do not
-     * yet persist refresh tokens (e.g. remote/EDK stores) inherit this and the caller degrades gracefully.
+     * Persists the OAuth2 refresh token for a credential record and returns a [SecretRef] to it for
+     * later silent replenishment (ARF ISSU_45/65). The default returns
+     * `WALLET_REFRESH_TOKEN_PERSISTENCE_UNSUPPORTED`; callers must handle that error rather than
+     * assuming a token was stored.
      */
     suspend fun storeRefreshToken(
         walletUnitId: String,

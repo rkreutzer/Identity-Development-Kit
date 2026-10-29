@@ -186,6 +186,8 @@ data class DeviceAuthentication(
         /** Build DeviceAuthentication from mode-specific, validated OID4VP request context. */
         @JsStatic
         @JvmStatic
+        // JavaScript has no overloads: this one would clash with fromOid4vp(clientId, ...) above.
+        @JsName("fromOid4vpContext")
         fun fromOid4vp(
             context: Oid4vpDeviceAuthenticationContext,
             docType: DocType,

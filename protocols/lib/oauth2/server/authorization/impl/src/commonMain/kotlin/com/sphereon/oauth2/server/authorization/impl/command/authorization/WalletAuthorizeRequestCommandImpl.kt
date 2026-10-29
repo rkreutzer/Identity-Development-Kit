@@ -51,15 +51,14 @@ import kotlin.time.Clock
  * the authorization response inline. Returns [AuthorizationRequestOutcome.WalletCompleted] so
  * the HTTP layer renders the authorization response directly.
  */
-@Inject
 @SingleIn(SessionScope::class)
 @ContributesIntoSet(SessionScope::class, binding = binding<HandleAuthorizeRequestCommand>())
-class WalletAuthorizeRequestCommandImpl(
+class WalletAuthorizeRequestCommandImpl @Inject constructor(
     execution: SessionExecution,
     private val authorizationServerService: AuthorizationServerService,
     private val clientRegistry: ClientRegistry,
     private val serversConfigProvider: OAuth2ServersConfigProvider,
-    private val userAuthProvider: UserAuthenticationProvider,
+    userAuthProviderFactory: () -> UserAuthenticationProvider,
     private val credentialIssuerAudienceResolver: CredentialIssuerAudienceResolver,
     private val unregisteredClientAdmissionRule: UnregisteredClientAdmissionRule,
 ) : TypedServiceCommandAdapter<HandleAuthorizeRequestArgs, AuthorizationRequestOutcome, IdkError>(
@@ -69,6 +68,27 @@ class WalletAuthorizeRequestCommandImpl(
         outputTypeToken = typeToken<AuthorizationRequestOutcome>(),
     ),
     HandleAuthorizeRequestCommand {
+    private val userAuthProvider: UserAuthenticationProvider by lazy(userAuthProviderFactory)
+
+    /** Source-compatible constructor for callers that already own these dependencies. */
+    constructor(
+        execution: SessionExecution,
+        authorizationServerService: AuthorizationServerService,
+        clientRegistry: ClientRegistry,
+        serversConfigProvider: OAuth2ServersConfigProvider,
+        userAuthProvider: UserAuthenticationProvider,
+        credentialIssuerAudienceResolver: CredentialIssuerAudienceResolver,
+        unregisteredClientAdmissionRule: UnregisteredClientAdmissionRule,
+    ) : this(
+        execution = execution,
+        authorizationServerService = authorizationServerService,
+        clientRegistry = clientRegistry,
+        serversConfigProvider = serversConfigProvider,
+        userAuthProviderFactory = { userAuthProvider },
+        credentialIssuerAudienceResolver = credentialIssuerAudienceResolver,
+        unregisteredClientAdmissionRule = unregisteredClientAdmissionRule,
+    )
+
     override val commandId: String get() = COMMAND_ID
 
     private val commands get() = authorizationServerService.commands

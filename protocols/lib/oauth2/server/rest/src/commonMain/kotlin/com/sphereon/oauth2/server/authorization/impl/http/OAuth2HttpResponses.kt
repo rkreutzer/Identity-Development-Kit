@@ -866,9 +866,11 @@ internal fun mapOAuth2ErrorToResponse(
     val response = oauth2ErrorResponse(status, wireError, errorDescription, jsonFormat)
     if (execution != null) {
         val log = execution.log.logManager.withTag("OAuth2HttpResponses")
+        // The reason names the refused check (for example which token-exchange rule failed); the wire
+        // response keeps it out of error_description, so this log line is the only place it surfaces.
         log.warn(
             "OAuth2 error response status=${response.statusCode} oauth2_error=$wireError idk_code=${error.code} " +
-                "error_key=${error.message.i18nKey}",
+                "error_key=${error.message.i18nKey} reason=${error.message.defaultMessage}",
         )
     }
     if (error.code == "use_dpop_nonce") {

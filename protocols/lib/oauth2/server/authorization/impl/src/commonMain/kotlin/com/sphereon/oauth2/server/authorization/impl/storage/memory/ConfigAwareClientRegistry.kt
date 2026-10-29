@@ -72,10 +72,10 @@ class ConfigAwareClientRegistry(
     private val configBinder: OAuth2ClientsConfigBinder,
     private val asInstanceIdProvider: OAuth2ServerInstanceIdProvider,
     private val serversConfigProvider: OAuth2ServersConfigProvider,
-    private val opaqueInternalClientSecretVerifier: OpaqueInternalClientSecretVerifier,
+    private val opaqueInternalClientSecretVerifier: Lazy<OpaqueInternalClientSecretVerifier>,
     private val clientRegistrationStore: ClientRegistrationStore,
     private val clientSecretHasher: ClientSecretHasher,
-    private val externalClientSources: Set<ExternalClientSource>,
+    private val externalClientSources: Lazy<Set<ExternalClientSource>>,
     private val clock: Clock = Clock.System,
     private val configuredClientSetMemoizer: ConfiguredClientSetMemoizer = ConfiguredClientSetMemoizer(),
 ) : ClientRegistry {
@@ -310,7 +310,7 @@ class ConfigAwareClientRegistry(
      */
     private suspend fun externalClient(clientId: String): IdkResult<ClientRegistration?, AuthorizationServerError.StorageError> {
         var found: ClientRegistration? = null
-        for (source in externalClientSources) {
+        for (source in externalClientSources.value) {
             val resolved = source.resolve(clientId)
             if (resolved.isErr) return Err(resolved.error)
             val client = resolved.value ?: continue
@@ -805,7 +805,7 @@ private class ConfigAwareClientRegistryRequestView(
     private val localClients: Map<String, ClientRegistration>,
     private val sourcePrecedence: ClientRegistrySourcePrecedence,
     private val opaqueInternalClients: Map<String, OpaqueInternalClientRegistration>,
-    private val opaqueInternalClientSecretVerifier: OpaqueInternalClientSecretVerifier,
+    private val opaqueInternalClientSecretVerifier: Lazy<OpaqueInternalClientSecretVerifier>,
     private val dynamicLookup: suspend (String) -> DurableClientLookup,
     private val externalLookup: suspend (String) -> IdkResult<ClientRegistration?, AuthorizationServerError.StorageError>,
     private val dynamicSecretVerifier: suspend (String, String) -> DurableClientSecretVerification,
@@ -845,7 +845,7 @@ private class ConfigAwareClientRegistryRequestView(
         // Opaque internal clients are a deployment-internal mechanism with their own credential
         // resolution, and keep absolute priority under either precedence.
         opaqueInternalClients[clientId]?.let { configured ->
-            return opaqueInternalClientSecretVerifier.verify(configured.credential, clientSecret)
+            return opaqueInternalClientSecretVerifier.value.verify(configured.credential, clientSecret)
         }
         // Configured secrets compare constant-time; the durable-hash verifier fails closed for
         // absent registrations, so an unknown client id authenticates under neither order.

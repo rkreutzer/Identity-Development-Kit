@@ -124,7 +124,7 @@ class DefaultTenantAssetService(
         namespace: AssetNamespace,
         hash: String,
     ): IdkResult<AssetInfo, IdkError> {
-        if (!hash.matches(HASH_PATTERN)) {
+        if (!PublicAssetPaths.isCanonicalHash(hash)) {
             return Err(IdkError.NOT_FOUND_ERROR(message = "Asset not found"))
         }
         val blobPath = assetBlobPath(tenantId, namespace, hash)
@@ -150,7 +150,7 @@ class DefaultTenantAssetService(
         namespace: AssetNamespace,
         hash: String,
     ): IdkResult<ResolvedAsset, IdkError> {
-        if (!hash.matches(HASH_PATTERN)) {
+        if (!PublicAssetPaths.isCanonicalHash(hash)) {
             return Err(IdkError.NOT_FOUND_ERROR(message = "Asset not found"))
         }
         val blobPath = assetBlobPath(tenantId, namespace, hash)
@@ -181,7 +181,7 @@ class DefaultTenantAssetService(
         namespace: AssetNamespace,
         hash: String,
     ): IdkResult<Unit, IdkError> {
-        if (!hash.matches(HASH_PATTERN)) {
+        if (!PublicAssetPaths.isCanonicalHash(hash)) {
             return Err(IdkError.NOT_FOUND_ERROR(message = "Asset not found"))
         }
         val blobPath = assetBlobPath(tenantId, namespace, hash)
@@ -213,7 +213,7 @@ class DefaultTenantAssetService(
         namespace: AssetNamespace,
     ): AssetInfo? {
         val hashLeaf = PublicAssetPaths.hashFromLeaf(path.substringAfterLast('/'))
-        if (!hashLeaf.matches(HASH_PATTERN)) return null
+        if (!PublicAssetPaths.isCanonicalHash(hashLeaf)) return null
         return AssetInfo(
             uri = PublicAssetPaths.assetPath(tenantId, namespace, hashLeaf, contentType),
             contentType = contentType ?: "application/octet-stream",
@@ -235,9 +235,5 @@ class DefaultTenantAssetService(
                 .trim()
                 .lowercase()
         return mediaType.startsWith(contentTypeFilter.substringBefore(';').trim().lowercase())
-    }
-
-    private companion object {
-        val HASH_PATTERN = Regex("^[0-9a-f]{64}$")
     }
 }

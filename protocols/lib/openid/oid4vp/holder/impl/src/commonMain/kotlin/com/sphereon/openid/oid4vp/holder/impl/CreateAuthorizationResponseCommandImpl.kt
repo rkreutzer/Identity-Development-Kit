@@ -34,10 +34,12 @@ import com.sphereon.crypto.core.jose.tryGenerateJwkThumbprint
 import com.sphereon.crypto.dataintegrity.command.AddProofServiceCommand
 import com.sphereon.crypto.jose.jws.StrictCompactJws
 import com.sphereon.di.session.SessionScope
+import com.sphereon.mdoc.data.device.DataElementIdentifier
 import com.sphereon.mdoc.data.device.DeviceResponseCborCodec
 import com.sphereon.mdoc.data.device.Document
 import com.sphereon.mdoc.data.device.IssuerSigned
 import com.sphereon.mdoc.data.device.IssuerSignedCborCodec
+import com.sphereon.mdoc.data.device.NameSpace
 import com.sphereon.mdoc.data.mso.MobileSecurityObjectCborCodec
 import com.sphereon.mdoc.oid4vp.MdocOid4vpService
 import com.sphereon.mdoc.oid4vp.PreparedMdocDeviceResponseSigning
@@ -205,6 +207,9 @@ class CreateAuthorizationResponseCommandImpl(
         request: ResolvedOid4vpRequest,
         selectedCredentials: List<SelectedCredential>,
     ): IdkResult<List<PreparedMdocCredentialSigning>, IdkError> = withCounterpartyEgress {
+        if (request.authorizationError != null) {
+            return@withCounterpartyEgress Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "An invalid authorization request cannot prepare credential signatures"))
+        }
         validateSelectedCredentialFormats(request, selectedCredentials).getOrElse { return@withCounterpartyEgress Err(it) }
         if (selectedCredentials.map { it.credentialId }.toSet().size != selectedCredentials.size) {
             return@withCounterpartyEgress Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Selected credential IDs must be unique"))
@@ -234,6 +239,9 @@ class CreateAuthorizationResponseCommandImpl(
         applyDuring: (CreateAuthorizationResponseArgs) -> CreateAuthorizationResponseArgs,
     ): IdkResult<AuthorizationResponse, IdkError> {
         val processedArgs = applyDuring(args)
+        if (processedArgs.request.authorizationError != null) {
+            return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "An invalid authorization request cannot receive a credential presentation"))
+        }
         val request = processedArgs.request
         val selectedCredentials = processedArgs.selectedCredentials
         val preparedPresentations = processedArgs.preparedPresentations
@@ -742,6 +750,9 @@ class CreateAuthorizationResponseCommandImpl(
         request: ResolvedOid4vpRequest,
         credentials: List<SelectedCredential>,
     ): IdkResult<HolderPreparedJwtVpResponse, IdkError> {
+        if (request.authorizationError != null) {
+            return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "An invalid authorization request cannot prepare credential signatures"))
+        }
         if (credentials.isEmpty() || credentials.map { it.credentialId }.distinct().size != credentials.size ||
             parsePresentationDefinition(request) != null || credentials.any {
                 it.credentialFormat != CredentialFormat.JWT_VC_JSON && it.credentialFormat != CredentialFormat.JWT_VC_JSON_LD
@@ -1165,7 +1176,8 @@ class CreateAuthorizationResponseCommandImpl(
 
         // Preserve the exact requested elements. For the ISO Presentation Definition profile we
         // reuse its constraints directly. For DCQL, translate namespace/element claim paths to
-        // the ISO JSONPath form. A DCQL query without claim constraints requests the full mdoc.
+        // the ISO JSONPath form. In DCQL, absent claims means no selectively-disclosable mdoc
+        // elements; only the legacy Presentation Definition path defaults to the full document.
         val presentationDescriptor =
             parsePresentationDefinition(request)
                 ?.input_descriptors
@@ -1176,36 +1188,72 @@ class CreateAuthorizationResponseCommandImpl(
                 ?.credentials
                 ?.firstOrNull { it.id == credential.credentialQueryId }
         val requestedDcqlFields =
-            dcqlCredentialQuery
-                ?.let { query ->
-                    request.credentialDisclosurePathOptions(credential.credentialQueryId).first().map { path ->
-                        require(path.size == 2 && path.all { component -> component is JsonPrimitive && component.isString }) {
-                            "mso_mdoc Claims Path Pointer must contain exactly two string components"
-                        }
-                        val namespace = path[0].jsonPrimitive.content
-                        val elementIdentifier = path[1].jsonPrimitive.content
-                        Oid4VPConstraintField(
-                            path = arrayOf("$['$namespace']['$elementIdentifier']"),
-                            intent_to_retain =
-                                query.claims
-                                    ?.firstOrNull { it.path.components == path }
-                                    ?.intent_to_retain
-                                    ?: false,
+            dcqlCredentialQuery?.let { query ->
+                val options =
+                    try {
+                        request.credentialDisclosurePathOptions(credential.credentialQueryId)
+                    } catch (expected: IllegalArgumentException) {
+                        return Err(
+                            IdkError.ILLEGAL_ARGUMENT_ERROR(
+                                message = "Invalid mso_mdoc claim selection for query '${credential.credentialQueryId}': ${expected.message}",
+                            ),
                         )
                     }
-                }.orEmpty()
-        val constraintFields =
-            presentationDescriptor?.constraints?.fields?.toList()
-                ?: requestedDcqlFields.takeIf { it.isNotEmpty() }
-                ?: (issuerSigned.nameSpaces ?: emptyMap()).flatMap { (nameSpace, items) ->
-                    items.map { encoded ->
-                        Oid4VPConstraintField(
-                            path = arrayOf("$['$nameSpace']['${encoded.data().elementIdentifier}']"),
-                            intent_to_retain = false,
-                        )
+                var selectedFields: List<Oid4VPConstraintField>? = null
+                for (option in options) {
+                    val fields = mutableListOf<Oid4VPConstraintField>()
+                    var satisfiable = true
+                    for (path in option) {
+                        if (path.size != 2 || path.any { component -> component !is JsonPrimitive || !component.isString }) {
+                            return Err(
+                                IdkError.ILLEGAL_ARGUMENT_ERROR(
+                                    message = "mso_mdoc Claims Path Pointer must contain exactly two string components",
+                                ),
+                            )
+                        }
+                        val namespace = (path[0] as JsonPrimitive).content
+                        val elementIdentifier = (path[1] as JsonPrimitive).content
+                        if (issuerSigned.getIssuerSignedItem(NameSpace(namespace), DataElementIdentifier(elementIdentifier)) == null) {
+                            satisfiable = false
+                        }
+                        fields +=
+                            Oid4VPConstraintField(
+                                path = arrayOf("$['$namespace']['$elementIdentifier']"),
+                                intent_to_retain =
+                                    query.claims
+                                        ?.firstOrNull { it.path.components == path }
+                                        ?.intent_to_retain
+                                        ?: false,
+                            )
+                    }
+                    if (satisfiable) {
+                        selectedFields = fields
+                        break
                     }
                 }
-        if (constraintFields.isEmpty()) {
+                selectedFields
+                    ?: return Err(
+                        IdkError.ILLEGAL_ARGUMENT_ERROR(
+                            message = "Stored mso_mdoc credential for query '${credential.credentialQueryId}' does not satisfy any requested DCQL claim set",
+                        ),
+                    )
+            }.orEmpty()
+        val constraintFields =
+            presentationDescriptor?.constraints?.fields?.toList()
+                ?: if (dcqlCredentialQuery != null) {
+                    requestedDcqlFields
+                } else {
+                    (issuerSigned.nameSpaces ?: emptyMap()).flatMap { (nameSpace, items) ->
+                        items.map { encoded ->
+                            Oid4VPConstraintField(
+                                path = arrayOf("$['$nameSpace']['${encoded.data().elementIdentifier}']"),
+                                intent_to_retain = false,
+                            )
+                        }
+                    }
+                }
+        val dcqlRequestsNoSelectiveClaims = dcqlCredentialQuery != null && dcqlCredentialQuery.claims == null
+        if (constraintFields.isEmpty() && !dcqlRequestsNoSelectiveClaims) {
             return Err(
                 IdkError.ILLEGAL_ARGUMENT_ERROR(
                     message = "Stored mso_mdoc credential for query '${credential.credentialQueryId}' discloses no elements",

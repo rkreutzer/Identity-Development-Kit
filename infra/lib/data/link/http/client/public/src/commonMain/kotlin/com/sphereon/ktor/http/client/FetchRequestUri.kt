@@ -43,7 +43,7 @@ enum class RequestUriMethod {
 /**
  * Arguments for fetching a request object from a remote URI.
  *
- * Per OpenID4VP 1.0 Section 5.2, when `request_uri_method=post`, the wallet can send
+ * Per OpenID4VP 1.0 Section 5.10, when `request_uri_method=post`, the wallet can send
  * its metadata and a nonce in the POST request body. This allows the verifier to
  * tailor the authorization request based on the wallet's capabilities.
  *

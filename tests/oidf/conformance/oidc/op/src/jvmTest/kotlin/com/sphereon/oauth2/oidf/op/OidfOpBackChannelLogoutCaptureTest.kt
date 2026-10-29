@@ -93,6 +93,8 @@ class OidfOpBackChannelLogoutCaptureTest {
         capture = BackChannelCaptureServer.start()
         overrides.publish(overrideKey, capture.url)
         fixture = OidfOpServerFixture()
+        // Register the actual owning AS issuer before minting any logout token.
+        overrides.publish("oauth2.servers.default.issuer", fixture.baseUrl)
         client = HttpClient(CIO) { followRedirects = false }
     }
 

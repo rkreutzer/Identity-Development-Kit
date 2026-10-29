@@ -21,7 +21,9 @@ import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
 import com.sphereon.core.api.binary.typeToken
 import com.sphereon.core.api.context.SessionExecution
+import com.sphereon.core.api.error.ErrorCategory
 import com.sphereon.core.api.error.IdkError
+import com.sphereon.core.api.log.Log
 import com.sphereon.core.api.service.TypedServiceCommandAdapter
 import com.sphereon.core.events.SessionEventService
 import com.sphereon.di.session.SessionScope
@@ -35,6 +37,7 @@ import com.sphereon.openid.oid4vci.rest.GetCredentialOfferStatusInput
 import com.sphereon.openid.oid4vci.rest.GetCredentialOfferStatusOutput
 import com.sphereon.openid.oid4vci.rest.GetCredentialOfferStatusServiceCommand
 import com.sphereon.openid.oid4vci.rest.IssuanceData
+import com.sphereon.openid.oid4vci.rest.Oid4vciRestErrorCodes
 import com.sphereon.openid.oid4vci.rest.Oid4vciRestEventTypes
 import com.sphereon.openid.oid4vci.rest.impl.event.putSessionEventIdentity
 import dev.zacsweers.metro.ContributesBinding
@@ -45,6 +48,14 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlin.time.Clock
 
+/**
+ * Reads the status of a credential offer from its protocol session.
+ *
+ * Despite the name this command also writes: when the protocol session's status moved, the stored offer session is
+ * refreshed so that it follows the last read. The refresh is best effort, a failure to store it is logged and is not part
+ * of the answer. It is also what lets a poll after the protocol session expired still learn how the offer ended: the
+ * stored session keeps the terminal status the last read recorded.
+ */
 @Inject
 @SingleIn(SessionScope::class)
 @ContributesBinding(SessionScope::class, binding = binding<GetCredentialOfferStatusServiceCommand>())
@@ -73,7 +84,12 @@ class GetCredentialOfferStatusServiceCommandImpl(
                 return Err(error)
             } ?: return Err(IdkError.NOT_FOUND_ERROR(message = "Session not found for correlation ID: ${input.correlationId}"))
 
-        val currentStatus = resolveCurrentStatus(session)
+        // A session of another instance is answered like a missing one, so a caller cannot probe correlation ids across instances.
+        if (input.instanceId != null && session.instanceId != input.instanceId) {
+            return Err(IdkError.NOT_FOUND_ERROR(message = "Session not found for correlation ID: ${input.correlationId}"))
+        }
+
+        val currentStatus = resolveCurrentStatus(session).getOrElse { return Err(it) }
         val now = Clock.System.now().toEpochMilliseconds()
 
         if (currentStatus != session.status) {
@@ -82,7 +98,12 @@ class GetCredentialOfferStatusServiceCommandImpl(
                     status = currentStatus,
                     lastUpdatedAt = now,
                 )
-            credentialOfferSessionStore.update(updatedSession)
+            credentialOfferSessionStore.update(updatedSession).fold(
+                success = { },
+                failure = { failure ->
+                    log.warn("The stored status of '${session.correlationId}' was not refreshed to ${currentStatus.name}: ${failure.message.defaultMessage}")
+                },
+            )
         }
 
         val error =
@@ -117,15 +138,32 @@ class GetCredentialOfferStatusServiceCommandImpl(
         )
     }
 
-    private suspend fun resolveCurrentStatus(session: CredentialOfferSession): CredentialOfferSessionStatus {
-        val internalSessionId = session.issuanceSessionId
-
-        val internalSession =
-            issuanceSessionStore.get(internalSessionId).getOrElse {
-                return session.status
-            } ?: return session.status
-
-        return mapInternalStatus(internalSession.status)
+    /**
+     * The protocol session's status. A protocol session that cannot be read is an error, never the stored status, because a
+     * stale status would be reported as if it were current. The protocol session is written before the offer session, so
+     * one that is missing for a stored offer session has expired or been removed.
+     *
+     * Then only a terminal status that an earlier read stored is evidence of how the offer ended, and it is answered. Any
+     * other stored status proves nothing, so the outcome is unknown, and is reported as such with a code of its own: it is
+     * not the answer for a correlation id that never existed.
+     */
+    private suspend fun resolveCurrentStatus(session: CredentialOfferSession): IdkResult<CredentialOfferSessionStatus, IdkError> {
+        val internalSession = issuanceSessionStore.get(session.issuanceSessionId).getOrElse { return Err(it) }
+        if (internalSession != null) {
+            return Ok(mapInternalStatus(internalSession.status))
+        }
+        if (session.status in TERMINAL_STATUSES) {
+            return Ok(session.status)
+        }
+        return Err(
+            IdkError.fromString(
+                code = Oid4vciRestErrorCodes.OFFER_OUTCOME_UNKNOWN,
+                message =
+                    "The protocol session of correlation ID '${session.correlationId}' no longer exists, " +
+                        "so what became of its offer is unknown",
+                category = ErrorCategory.CONFLICT,
+            ),
+        )
     }
 
     private suspend fun buildIssuanceData(session: CredentialOfferSession): IssuanceData? {
@@ -176,6 +214,11 @@ class GetCredentialOfferStatusServiceCommandImpl(
     }
 
     companion object {
+        private val log = Log.app().withTag("Oid4vciRestGetCredentialOfferStatus")
+
+        /** The stored statuses that no later protocol state can change. */
+        private val TERMINAL_STATUSES = setOf(CredentialOfferSessionStatus.CREDENTIAL_ISSUED, CredentialOfferSessionStatus.ERROR)
+
         fun mapInternalStatus(status: IssuanceSessionStatus): CredentialOfferSessionStatus =
             when (status) {
                 IssuanceSessionStatus.OFFER_CREATED -> CredentialOfferSessionStatus.CREDENTIAL_OFFER_CREATED

@@ -50,6 +50,8 @@ sealed class Oid4vpPresentationPreparation {
     /** One approval of these holder-key signatures, on this wallet unit, before anything is signed. */
     data class ApprovalRequired(
         val operations: List<WalletApprovalOperation>,
+        /** The wallet account owning the prepared holder keys, when the prepared signings name it. */
+        val walletAccountId: String? = null,
     ) : Oid4vpPresentationPreparation() {
         init {
             require(operations.isNotEmpty()) { "oid4vp_presentation_approval_operations_empty" }

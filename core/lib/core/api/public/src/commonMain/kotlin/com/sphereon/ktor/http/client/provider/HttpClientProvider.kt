@@ -17,6 +17,7 @@
 package com.sphereon.ktor.http.client.provider
 
 import com.sphereon.core.api.error.IdkError
+import com.sphereon.core.api.log.Log
 import com.sphereon.core.api.session.CommandId
 import com.sphereon.di.session.SessionScope
 import com.sphereon.ktor.http.client.config.HttpClientConfigResolver
@@ -26,6 +27,7 @@ import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import io.ktor.client.HttpClient
+import kotlinx.coroutines.CancellationException
 import kotlin.experimental.ExperimentalObjCName
 import kotlin.native.ObjCName
 
@@ -123,8 +125,16 @@ class HttpClientProviderImpl(
     private val factory: HttpClientFactory,
     private val configResolver: HttpClientConfigResolver,
 ) : HttpClientProvider {
-    override fun createClient(context: HttpClientRequestContext): HttpClient =
+    override fun createClient(context: HttpClientRequestContext): HttpClient = try {
         factory.createClient(context.toHttpClientOptions())
+    } catch (failure: Throwable) {
+        if (failure is CancellationException) throw failure
+        val type = failure::class.simpleName?.takeIf { it.matches(Regex("[A-Za-z][A-Za-z0-9_]{0,79}")) } ?: "unavailable"
+        Log.app().withTag("GovernedHttpClient").warn(
+            "Governed HTTP client creation failed stage=create error_type=$type",
+        )
+        throw failure
+    }
 
     override fun createClient(
         commandId: String,

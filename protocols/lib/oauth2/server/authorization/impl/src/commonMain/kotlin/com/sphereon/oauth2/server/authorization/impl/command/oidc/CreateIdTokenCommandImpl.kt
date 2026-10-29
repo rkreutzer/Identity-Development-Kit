@@ -42,6 +42,7 @@ import com.sphereon.oauth2.server.authorization.impl.command.putClaims
 import com.sphereon.oauth2.server.authorization.provider.SessionParticipationRecorder
 import com.sphereon.oauth2.server.authorization.signing.AsServerSigningIdentifierResolver
 import com.sphereon.oauth2.server.authorization.signing.AsSigningRequirement
+import com.sphereon.oauth2.server.authorization.signing.AsServerJwsSigner
 import com.sphereon.oauth2.server.authorization.signing.CapturedAsServerConfig
 import com.sphereon.oauth2.server.authorization.storage.ClientRegistry
 import com.sphereon.oauth2.server.authorization.storage.OidcLoginSessionIdProvider
@@ -79,6 +80,8 @@ class CreateIdTokenCommandImpl(
     private val clientRegistry: ClientRegistry,
     private val sessionParticipationRecorders: Set<SessionParticipationRecorder>,
     private val loginSessionIdProvider: OidcLoginSessionIdProvider,
+    private val asServerJwsSigner: AsServerJwsSigner =
+        AsServerJwsSigner { _, args -> jwtService.createJwsCompact(args) },
 ) : TypedServiceCommandAdapter<CreateIdTokenArgs, StringResult, IdkError>(
         commandId = CreateIdTokenCommand.COMMAND_ID,
         execution = execution,
@@ -104,8 +107,10 @@ class CreateIdTokenCommandImpl(
             try {
                 CapturedAsServerConfig.select(root, asInstanceIdProvider.currentAsInstanceId())
             } catch (expected: IllegalArgumentException) {
+                log.error("OAuth2 token issuance failed command=$commandId stage=server-selection error_type=IllegalArgumentException")
                 return Err(AuthorizationServerError.ServerError(details = expected.message ?: "Invalid authorization server selection"))
             } catch (expected: IllegalStateException) {
+                log.error("OAuth2 token issuance failed command=$commandId stage=server-selection error_type=IllegalStateException")
                 return Err(AuthorizationServerError.ServerError(details = expected.message ?: "Authorization server selection failed"))
             }
         val config = captured.server
@@ -172,6 +177,12 @@ class CreateIdTokenCommandImpl(
             keyAlgorithmToJwsAlg(selectedAlgorithm)
         } catch (expected: IllegalStateException) {
             return Err(AuthorizationServerError.ServerError(details = expected.message ?: "Unsupported ID-token signing algorithm"))
+        }
+
+        if (requestedAlg != null && requestedAlg != idTokenSigningAlg) {
+            return Err(AuthorizationServerError.ServerError(
+                details = "Selected ID-token signing algorithm '$idTokenSigningAlg' does not match the client's requested '$requestedAlg'",
+            ))
         }
 
         // OIDC Back-Channel Logout 1.0 §4.1: emit `sid` so RPs can correlate logout_token.sid
@@ -250,10 +261,11 @@ class CreateIdTokenCommandImpl(
                         ),
                 )
 
-            jwtService
-                .createJwsCompact(jwsArgs)
+            asServerJwsSigner
+                .sign(captured, jwsArgs)
                 .map { it.jwt }
                 .mapError { error ->
+                    log.error("OAuth2 token issuance failed command=$commandId stage=id-token-signing idk_code=${error.code}")
                     AuthorizationServerError.ServerError(
                         details = "Failed to sign ID token: ${error.message.defaultMessage}",
                         exception = error.exception,
@@ -290,6 +302,7 @@ class CreateIdTokenCommandImpl(
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (expected: Exception) {
+            log.error("OAuth2 token issuance failed command=$commandId stage=id-token-mint error_type=${expected::class.simpleName}")
             Err(
                 AuthorizationServerError.ServerError(
                     details = "ID token creation failed: ${expected.message}",

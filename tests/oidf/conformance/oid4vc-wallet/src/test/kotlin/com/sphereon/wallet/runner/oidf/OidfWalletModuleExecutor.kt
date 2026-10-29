@@ -10,6 +10,8 @@ import com.sphereon.oidf.conformance.OidfPlan
 import com.sphereon.oidf.conformance.OidfPlanModule
 import com.sphereon.oidf.conformance.OidfPlanScenario
 import com.sphereon.oidf.conformance.OidfSuiteConfigPreprocessor
+import com.sphereon.wallet.interaction.WalletInteractionFailureCodes
+import com.sphereon.wallet.interaction.WalletInteractionStatus
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.nio.file.Files
@@ -51,7 +53,6 @@ internal class OidfWalletModuleExecutor(
             suite = suite,
             configPreprocessor = configPreprocessor,
             profileId = "default",
-            walletUnitId = "oidf-wallet-conformance",
             haipAttestationFixture = haipAttestationFixture,
         )
 
@@ -73,7 +74,7 @@ internal class OidfWalletModuleExecutor(
         var walletErrorCode: String? = null
         var walletErrorArguments: Map<String, String> = emptyMap()
         var executionError: String? = null
-        val expectsRejection = module.testModule in EXPECTED_REJECTION_MODULES
+        val expectsRejection = OidfWalletModuleOutcomePolicy.expectsRejection(module.testModule)
 
         try {
             val harnessResult =
@@ -96,6 +97,16 @@ internal class OidfWalletModuleExecutor(
                     .orEmpty()
         } catch (error: Throwable) {
             executionError = error.stackTraceToString()
+            if (error is OidfWalletSuiteCompletionException) {
+                walletStatus = error.walletOutcome.status.name
+                walletTerminal = error.walletOutcome.terminal
+                walletSucceeded = error.walletOutcome.succeeded
+                walletErrorCode = error.walletOutcome.error?.code
+                walletErrorArguments =
+                    error.walletOutcome.error
+                        ?.arguments
+                        .orEmpty()
+            }
             testId?.let { id ->
                 runCatching { suite.info(id) }
                     .getOrNull()
@@ -107,11 +118,15 @@ internal class OidfWalletModuleExecutor(
         }
 
         val walletOutcomeMatched =
-            if (expectsRejection) {
-                walletTerminal == true && walletSucceeded == false && !walletErrorCode.isNullOrBlank()
-            } else {
-                walletSucceeded == true
-            }
+            OidfWalletModuleOutcomePolicy.matches(
+                module.testModule,
+                walletStatus,
+                walletTerminal,
+                walletSucceeded,
+                walletErrorCode,
+            )
+        executionError =
+            OidfWalletModuleOutcomePolicy.executionDiagnostic(module.testModule, status, walletOutcomeMatched, executionError)
         val execution =
             OidfWalletModuleExecution(
                 scenarioId = scenario.id,
@@ -132,10 +147,7 @@ internal class OidfWalletModuleExecutor(
                 startedAtEpochMs = startedAt,
                 durationMs = System.currentTimeMillis() - startedAt,
                 passed =
-                    executionError == null &&
-                        status == "FINISHED" &&
-                        result == "PASSED" &&
-                        walletOutcomeMatched,
+                    OidfWalletModuleOutcomePolicy.passed(status, result, walletOutcomeMatched, executionError),
                 error = executionError,
             )
         Files.writeString(
@@ -146,22 +158,109 @@ internal class OidfWalletModuleExecutor(
     }
 
     fun close() = harness.close()
+}
 
-    private companion object {
-        /**
-         * These pinned OIDF client modules pass only when the client refuses the manipulated
-         * response and does not continue the flow. A terminal typed wallet rejection is therefore
-         * the required SUT outcome; treating only successful issuance as passing inverts the tests.
-         */
-        val EXPECTED_REJECTION_MODULES =
+/** Explicit pinned suite behavior: a negative-looking name alone never changes acceptance. */
+internal object OidfWalletModuleOutcomePolicy {
+    private val stateRejections =
+        setOf(
+            "fapi2-security-profile-final-client-test-ensure-authorization-response-with-invalid-missing-state-fails",
+            "fapi2-security-profile-final-client-test-ensure-authorization-response-with-invalid-state-fails",
+        )
+    private val fapiRejections =
+        stateRejections +
             setOf(
                 "fapi2-security-profile-final-client-test-discovery-issuer-mismatch",
-                "fapi2-security-profile-final-client-test-ensure-authorization-response-with-invalid-missing-state-fails",
-                "fapi2-security-profile-final-client-test-ensure-authorization-response-with-invalid-state-fails",
                 "fapi2-security-profile-final-client-test-invalid-authorization-response-iss",
                 "fapi2-security-profile-final-client-test-remove-authorization-response-iss",
             )
+
+    // VP1FinalWalletTestPlan and the modules' rejection/error-response contracts. In particular,
+    // multisigned-one-invalid-signature retains another valid signature and MUST complete.
+    private val vpRequestRejections =
+        setOf(
+            "oid4vp-1final-wallet-negative-test-response-uri-not-client-id",
+            "oid4vp-1final-wallet-negative-test-invalid-request-object-signature",
+            "oid4vp-1final-wallet-negative-test-invalid-request-object-typ",
+            "oid4vp-1final-wallet-negative-test-missing-request-object-typ",
+            "oid4vp-1final-wallet-negative-test-mismatched-client-id",
+            "oid4vp-1final-wallet-negative-test-redirect-uri-with-direct-post",
+            "oid4vp-1final-wallet-negative-test-missing-nonce",
+            "oid4vp-1final-wallet-negative-test-wrong-expected-origins",
+            "oid4vp-1final-wallet-negative-test-invalid-client-id-prefix",
+            "oid4vp-1final-wallet-negative-test-unknown-transaction-data-type",
+        )
+    private val vpSelectionRejections =
+        setOf(
+            "oid4vp-1final-wallet-negative-test-required-non-matching-credential",
+            "oid4vp-1final-wallet-negative-test-claim-not-in-credential",
+        )
+    private val vpRejections = vpRequestRejections + vpSelectionRejections
+
+    fun expectsRejection(moduleName: String): Boolean = moduleName in fapiRejections || moduleName in vpRejections
+
+    fun matches(
+        moduleName: String,
+        walletStatus: String?,
+        terminal: Boolean?,
+        succeeded: Boolean?,
+        errorCode: String?,
+    ): Boolean {
+        if (!expectsRejection(moduleName)) return succeeded == true
+        if (moduleName in stateRejections &&
+            walletStatus == WalletInteractionStatus.AuthorizationRequired.name &&
+            terminal == false && succeeded == false &&
+            errorCode == WalletInteractionFailureCodes.OID4VCI_AUTHORIZATION_STATE_MISMATCH
+        ) {
+            return true
+        }
+        if (terminal != true || succeeded != false || errorCode.isNullOrBlank()) return false
+        return when (moduleName) {
+            in vpRequestRejections -> {
+                errorCode == WalletInteractionFailureCodes.OID4VP_REQUEST_PARSE_FAILED ||
+                    errorCode == WalletInteractionFailureCodes.OID4VP_REQUEST_RESOLVE_FAILED
+            }
+
+            in vpSelectionRejections -> {
+                errorCode == WalletInteractionFailureCodes.OID4VP_SELECTION_UNSATISFIABLE
+            }
+
+            else -> {
+                true
+            }
+        }
     }
+
+    fun passed(
+        suiteStatus: String?,
+        suiteResult: String?,
+        walletOutcomeMatched: Boolean,
+        executionError: String?,
+    ): Boolean = executionError == null && suiteStatus == "FINISHED" && suiteResult == "PASSED" && walletOutcomeMatched
+
+    fun executionDiagnostic(
+        moduleName: String,
+        suiteStatus: String?,
+        walletOutcomeMatched: Boolean,
+        originalError: String?,
+    ): String? {
+        val review = pendingReviewDiagnostic(moduleName, suiteStatus, walletOutcomeMatched)
+        return listOfNotNull(originalError, review).takeIf { it.isNotEmpty() }?.joinToString("\n\n")
+    }
+
+    fun pendingReviewDiagnostic(
+        moduleName: String,
+        suiteStatus: String?,
+        walletOutcomeMatched: Boolean,
+    ): String? =
+        if (moduleName in vpRejections && walletOutcomeMatched && suiteStatus != "FINISHED") {
+            "Wallet rejected the VP request, but the official suite is still $suiteStatus. " +
+                "Inspect the test's outstanding requirements: rejection without a protocol error response can require " +
+                "a genuine wallet error-screen screenshot and official upload/review. A headless result cannot supply " +
+                "that UI evidence; this module remains unpassed."
+        } else {
+            null
+        }
 }
 
 internal fun OidfPlanModule.displayName(): String =

@@ -113,6 +113,9 @@ object WalletInteractionFailureCodes {
     const val OID4VP_COUNTERPARTY_ASSOCIATION_MISSING: String = "oid4vp.counterparty_association_missing"
     const val OID4VP_SECURITY_DENIED: String = "oid4vp.security_denied"
     const val OID4VP_DIGITAL_CREDENTIAL_PROTOCOL_MISSING: String = "oid4vp.digital_credential_protocol_missing"
+    const val OID4VP_DCA_SELECTION_INVALID: String = "oid4vp.digital_credentials_selection_invalid"
+    const val OID4VP_DCA_SELECTION_UNAVAILABLE: String = "oid4vp.digital_credentials_selection_unavailable"
+    const val OID4VP_DCA_SELECTION_MISMATCH: String = "oid4vp.digital_credentials_selection_mismatch"
     const val OID4VP_SELECTION_UNSATISFIABLE: String = "oid4vp.selection_unsatisfiable"
     const val OID4VP_SELECTION_UNKNOWN_REQUIREMENT: String = "oid4vp.selection_unknown_requirement"
     const val OID4VP_SELECTION_MISSING_REQUIREMENT: String = "oid4vp.selection_missing_requirement"
@@ -247,6 +250,9 @@ val DISPOSITIONS: Map<String, WalletFailureDisposition> =
         WalletInteractionFailureCodes.OID4VP_COUNTERPARTY_ASSOCIATION_MISSING to WalletFailureDisposition.RESUMABLE,
         WalletInteractionFailureCodes.OID4VP_SECURITY_DENIED to WalletFailureDisposition.TERMINAL,
         WalletInteractionFailureCodes.OID4VP_DIGITAL_CREDENTIAL_PROTOCOL_MISSING to WalletFailureDisposition.TERMINAL,
+        WalletInteractionFailureCodes.OID4VP_DCA_SELECTION_INVALID to WalletFailureDisposition.TERMINAL,
+        WalletInteractionFailureCodes.OID4VP_DCA_SELECTION_UNAVAILABLE to WalletFailureDisposition.TERMINAL,
+        WalletInteractionFailureCodes.OID4VP_DCA_SELECTION_MISMATCH to WalletFailureDisposition.RESUMABLE,
         WalletInteractionFailureCodes.OID4VP_SELECTION_UNSATISFIABLE to WalletFailureDisposition.RESUMABLE,
         WalletInteractionFailureCodes.OID4VP_SELECTION_UNKNOWN_REQUIREMENT to WalletFailureDisposition.RESUMABLE,
         WalletInteractionFailureCodes.OID4VP_SELECTION_MISSING_REQUIREMENT to WalletFailureDisposition.RESUMABLE,

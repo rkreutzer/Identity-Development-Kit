@@ -237,7 +237,7 @@ class SdJwtVctDesignMapperTest {
         assertEquals(1, claim.display!!.size)
         assertEquals("Email", claim.display!![0].label)
         assertEquals("Email address", claim.display!![0].description)
-        assertFalse(claim.mandatory)
+        assertTrue(claim.mandatory)
         assertEquals(ClaimSdMetadata.ALWAYS, claim.sd)
         assertEquals("email_svg", claim.svgId)
     }
@@ -540,7 +540,7 @@ class SdJwtVctDesignMapperTest {
         assertEquals(listOf("given_name"), first.path)
         assertEquals("Given Name", first.display!![0].label)
         assertEquals("First name", first.display!![0].description)
-        assertFalse(first.mandatory)
+        assertTrue(first.mandatory)
         assertEquals(ClaimSdMetadata.ALWAYS, first.sd)
         assertEquals("given_name_svg", first.svgId)
 
@@ -553,7 +553,7 @@ class SdJwtVctDesignMapperTest {
         val third = roundTripped.claims!![2]
         assertEquals(listOf("iss"), third.path)
         assertEquals(null, third.display)
-        assertFalse(third.mandatory)
+        assertTrue(third.mandatory)
         assertEquals(ClaimSdMetadata.NEVER, third.sd)
     }
 
@@ -882,7 +882,7 @@ class SdJwtVctDesignMapperTest {
             val original = metadata.claims!![i]
             val result = roundTripped.claims!![i]
             assertEquals(original.path, result.path)
-            assertFalse(result.mandatory)
+            assertEquals(original.mandatory, result.mandatory)
             assertEquals(original.sd, result.sd)
             assertEquals(original.svgId, result.svgId)
 
@@ -952,6 +952,40 @@ class SdJwtVctDesignMapperTest {
     }
 
     // ---- fromCanonical(ResolvedCredentialDesign) rendering tests ----
+
+    @Test
+    fun fromCanonicalResolvedPreservesMandatoryIndependentlyOfDisclosureAndOtherClaimFields() {
+        val expected = listOf(
+            ClaimInformation(
+                path = listOf("address", null, "street"),
+                display = listOf(ClaimDisplayMetadata("en", "Street", "Street address")),
+                mandatory = true,
+                sd = ClaimSdMetadata.NEVER,
+                svgId = "required_street",
+            ),
+            ClaimInformation(
+                path = listOf("nickname"),
+                display = listOf(ClaimDisplayMetadata("nl", "Roepnaam", "Optionele naam")),
+                mandatory = false,
+                sd = ClaimSdMetadata.ALWAYS,
+                svgId = "optional_nickname",
+            ),
+        )
+        val design = mapper.toCanonical(
+            SdJwtVcTypeMetadata(vct = "https://example.com/identity", claims = expected),
+            listOf(DesignBinding(vct = "https://example.com/identity")),
+        )
+        val resolved = ResolvedCredentialDesign(
+            design = design,
+            renderVariants = emptyList(),
+            appliedLayers = emptyList(),
+            lockedFields = emptyMap(),
+            resolvedAt = Instant.parse("2025-01-01T00:00:00Z"),
+        )
+
+        // Complete value equality covers path, display, mandatory, sd and svgId together.
+        assertEquals(expected, mapper.fromCanonical(resolved).claims)
+    }
 
     @Test
     fun fromCanonicalResolvedEmitsRenderingSimpleFromVariant() {

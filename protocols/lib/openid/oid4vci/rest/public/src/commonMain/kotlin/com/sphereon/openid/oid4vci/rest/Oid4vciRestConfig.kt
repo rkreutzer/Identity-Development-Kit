@@ -30,6 +30,12 @@ data class Oid4vciRestConfig(
      * E.g., "https://issuer.example.com"
      */
     val externalBaseUrl: String? = null,
+    /**
+     * Whether a single process serves the deployment. Correlation ids that make a call idempotent are claimed on the KV store `oid4vci.rest.sessions`, and
+     * a claim on a process-local backend (`memory`, `kottage`) is refused unless this is set, because two replicas could
+     * each claim the same key. Read from `oid4vci.rest.requests.allowProcessLocalStore`.
+     */
+    val allowProcessLocalRequestStore: Boolean = false,
 ) {
     companion object {
         const val CONFIG_PREFIX = "oid4vci.rest"

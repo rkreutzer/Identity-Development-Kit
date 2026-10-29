@@ -12,6 +12,7 @@ import com.sphereon.openid.oid4vp.dcql.DcqlCredentialQuery
 import com.sphereon.openid.oid4vp.holder.ResolvedOid4vpRequest
 import com.sphereon.openid.oid4vp.holder.SelectedCredential
 import com.sphereon.openid.oid4vp.holder.HolderJwtVpSigningIdentifier
+import com.sphereon.openid.oid4vp.holder.credentialDisclosurePathOptions
 import com.sphereon.wallet.credential.CredentialBindingRef
 import com.sphereon.wallet.credential.CredentialFormat
 import com.sphereon.wallet.credential.CredentialLifecycleState
@@ -32,14 +33,17 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlin.time.Clock
 
 class WalletStoreOid4vpCredentialResolver(
     private val credentialStore: WalletCredentialStore,
     private val holderIdentityResolver: WalletHolderIdentityResolver = WalletHolderIdentityResolver.none,
     private val holderVerificationMethodResolver: WalletHolderVerificationMethodResolver? = null,
+    private val credentialClaimValuesResolver: WalletCredentialClaimValuesResolver? = null,
 ) : Oid4vpCredentialCandidateResolver,
     Oid4vpSelectedCredentialResolver,
     Oid4vpPresentationSecurityContextResolver {
@@ -51,7 +55,7 @@ class WalletStoreOid4vpCredentialResolver(
             ?.credentials
             .orEmpty()
             .associate { query ->
-                query.id to candidateMetadata(context.walletUnitId, query).map { it.credentialRecordId }
+                query.id to candidateMetadata(context.walletUnitId, resolvedRequest, query).map { it.credentialRecordId }
             }
 
     override suspend fun resolveSelectedCredentials(
@@ -68,7 +72,7 @@ class WalletStoreOid4vpCredentialResolver(
             for (credentialRecordId in selectedCredentialIdsByRequirement[query.id].orEmpty().distinct()) {
                 val record = credentialStore.requireCredential(context.walletUnitId, credentialRecordId)
                 val instance =
-                    record.presentableInstance(now)
+                    record.presentableOid4vpInstance(now)
                         ?: error("Credential record '$credentialRecordId' has no presentable instance")
                 val holderVerificationMethod =
                     if (
@@ -143,50 +147,57 @@ class WalletStoreOid4vpCredentialResolver(
             selectedCredentials
                 .groupBy { it.credentialQueryId }
                 .mapValues { (_, credentials) -> credentials.map { it.credentialId }.toSet() }
-        val verifierRef = resolvedRequest.verifierInfo.clientId.toVerifierRef()
-        val boundAt = Clock.System.now()
-        val updates = linkedMapOf<String, CredentialRecord>()
-
+        val selectedRequirementIdsByRecordAndInstance = linkedMapOf<String, MutableMap<String, MutableSet<String>>>()
         for ((requirementId, credentialRecordIds) in selectedCredentialIdsByRequirement) {
             val selectedInstanceIds = selectedInstanceIdsByRequirement[requirementId].orEmpty()
             if (selectedInstanceIds.isEmpty()) continue
-
             for (credentialRecordId in credentialRecordIds.distinct()) {
-                val record = credentialStore.requireCredential(context.walletUnitId, credentialRecordId)
-                val updated =
+                val requirementIdsByInstance = selectedRequirementIdsByRecordAndInstance.getOrPut(credentialRecordId) { linkedMapOf() }
+                for (instanceId in selectedInstanceIds) {
+                    requirementIdsByInstance.getOrPut(instanceId) { linkedSetOf() }.add(requirementId)
+                }
+            }
+        }
+        if (selectedRequirementIdsByRecordAndInstance.isEmpty()) return
+        val verifierRef = resolvedRequest.verifierInfo.clientId.toVerifierRef()
+        val boundAt = Clock.System.now()
+        for ((credentialRecordId, requirementIdsByInstance) in selectedRequirementIdsByRecordAndInstance) {
+            val updateResult =
+                credentialStore.updateCredentialEnvelope(context.walletUnitId, credentialRecordId) { record ->
+                    if (record.instances.none { it.id in requirementIdsByInstance }) return@updateCredentialEnvelope record
                     record.copy(
                         instances =
                             record.instances.map { instance ->
-                                if (instance.id in selectedInstanceIds) {
+                                val presentationIds = requirementIdsByInstance[instance.id].orEmpty()
+                                if (presentationIds.isEmpty()) {
+                                    instance
+                                } else {
                                     instance.copy(
                                         bindingRefs =
                                             instance.bindingRefs +
-                                                CredentialBindingRef(
-                                                    verifierRef = verifierRef,
-                                                    boundAt = boundAt,
-                                                    presentationId = requirementId,
-                                                ),
+                                                presentationIds.map { presentationId ->
+                                                    CredentialBindingRef(
+                                                        verifierRef = verifierRef,
+                                                        boundAt = boundAt,
+                                                        presentationId = presentationId,
+                                                    )
+                                                },
                                         updatedAt = boundAt,
                                     )
-                                } else {
-                                    instance
                                 }
                             },
                         updatedAt = boundAt,
                         syncState = record.syncState.copy(localRevision = record.syncState.localRevision + 1),
                     )
-                if (updated != record) updates[updated.id] = updated
-            }
-        }
-
-        for (record in updates.values) {
-            val putResult = credentialStore.putCredential(context.walletUnitId, record)
-            if (putResult.isErr) error("Failed to update wallet presentation history: ${putResult.error.code}")
+                }
+            if (updateResult.isErr) error("Failed to update wallet presentation history: ${updateResult.error.code}")
+            if (updateResult.value == null) error("Failed to update wallet presentation history: credential record is unavailable")
         }
     }
 
     private suspend fun candidateMetadata(
         walletUnitId: String,
+        resolvedRequest: ResolvedOid4vpRequest,
         query: DcqlCredentialQuery,
     ): List<CredentialMetadata> {
         val requestedTypeRefs = query.credentialTypeRefs()
@@ -216,7 +227,32 @@ class WalletStoreOid4vpCredentialResolver(
                 result.value
             }
 
-        return metadata.filter { it.isPresentationCandidate() }
+        val now = Clock.System.now()
+        val candidates = mutableListOf<CredentialMetadata>()
+        for (candidate in metadata) {
+            if (!candidate.isPresentationCandidate()) continue
+            val record = if (candidate.format.isMdoc || query.claims != null) {
+                credentialStore.requireCredential(walletUnitId, candidate.credentialRecordId)
+            } else {
+                null
+            }
+            val presentableInstance = record?.presentableOid4vpInstance(now)
+            if (candidate.format.isMdoc) {
+                if (presentableInstance == null) continue
+            }
+            if (query.claims != null) {
+                val claimResolver = credentialClaimValuesResolver ?: continue
+                val recordValue = requireNotNull(record)
+                val instance = presentableInstance ?: recordValue.presentableOid4vpInstance(now) ?: continue
+                val matchesOption =
+                    resolvedRequest.credentialDisclosurePathOptionsOrEmpty(query.id).any { option ->
+                        option.all { path -> claimResolver.containsDisclosurePath(recordValue, instance.id, path) }
+                    }
+                if (!matchesOption) continue
+            }
+            candidates += candidate
+        }
+        return candidates
     }
 
     private suspend fun WalletCredentialStore.requireCredential(
@@ -242,7 +278,7 @@ class WalletStoreOid4vpCredentialResolver(
             val record = credentialStore.requireCredential(context.walletUnitId, credentialRecordId)
             val alias =
                 record
-                    .presentableInstance(now)
+                    .presentableOid4vpInstance(now)
                     ?.holderKeyRef
                     ?.alias
             if (!alias.isNullOrBlank()) return alias
@@ -261,6 +297,52 @@ class WalletStoreOid4vpCredentialResolver(
             ?.takeIf { it.isNotBlank() }
             ?: error("VCDM credential '${instance.id}' holder identifier is missing")
     }
+}
+
+/**
+ * Candidate matching uses the same ordered DCQL claim options as holder response creation. The
+ * existing format-specific claim resolver provides namespace/element paths for mdoc and flattened
+ * paths for SD-JWT; claim values are compared only in memory and are never placed in interaction
+ * state or candidate projections.
+ */
+private fun ResolvedOid4vpRequest.credentialDisclosurePathOptionsOrEmpty(credentialQueryId: String): List<List<List<JsonElement>>> =
+    runCatching { credentialDisclosurePathOptions(credentialQueryId) }.getOrNull().orEmpty()
+
+internal fun Map<String, JsonElement>.containsDisclosurePath(
+    path: List<JsonElement>,
+): Boolean {
+    val first = path.firstOrNull() as? JsonPrimitive ?: return false
+    if (!first.isString) return false
+    val firstValue = this[first.content] ?: return false
+    return firstValue.containsDisclosurePath(path.drop(1))
+}
+
+private fun JsonElement.containsDisclosurePath(path: List<JsonElement>): Boolean {
+    var selected = listOf(this)
+    for (component in path) {
+        val next = mutableListOf<JsonElement>()
+        for (value in selected) {
+            when {
+                component == JsonNull -> {
+                    val array = value as? JsonArray ?: return false
+                    next.addAll(array)
+                }
+                component is JsonPrimitive && component.isString -> {
+                    val objectValue = value as? JsonObject ?: return false
+                    objectValue[component.content]?.let(next::add)
+                }
+                component is JsonPrimitive -> {
+                    val index = component.intOrNull?.takeIf { it >= 0 } ?: return false
+                    val array = value as? JsonArray ?: return false
+                    array.getOrNull(index)?.let(next::add)
+                }
+                else -> return false
+            }
+        }
+        selected = next
+        if (selected.isEmpty()) return false
+    }
+    return selected.isNotEmpty()
 }
 
 private fun selectDataIntegrityCryptosuite(

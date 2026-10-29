@@ -29,6 +29,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -248,6 +249,100 @@ class CredentialProofPreparationTest {
             forEach { (key, element) -> if (key != name) put(key, element) }
         }
 
+    // OID4VCI 1.0 Appendix F.1: a DID-bound proof's kid is a DID URL of the key. did:jwk encodes the
+    // public JWK itself and its only verification method is #0; private JWKs must be rejected.
+    @Test
+    fun didJwkVerificationMethodOfTheSigningKeyBecomesTheProofKid() = runTest {
+        val signer = PreparationRecordingSigner()
+        val preparation = CredentialRequestProofPreparationImpl(signer)
+        val request = proofRequest(keyInclusionMode = JwsIdentifierMode.DID.name, holderDidVerificationMethod = SIGNING_KEY_DID_JWK_VM)
+
+        val prepared = preparation.prepare(request).getOrElse { error("prepare failed: $it") }
+        val header = prepared.proofs.single().headerObject()
+        val result = preparation.finalize(Json.decodeFromString<PreparedCredentialRequestProofBatch>(Json.encodeToString(prepared)))
+
+        assertTrue(result.isOk, "finalize failed: ${if (result.isErr) result.error.message.defaultMessage else ""}")
+        assertEquals(SIGNING_KEY_DID_JWK_VM, header["kid"]?.jsonPrimitive?.content)
+        assertFalse(header.containsKey("jwk"), "kid and jwk are mutually exclusive (Appendix F.1)")
+        assertEquals(SIGNING_KEY_DID_JWK_VM, prepared.proofs.single().holderDidVerificationMethod)
+        assertEquals(1, signer.signCalls)
+    }
+
+    // RFC 7638: the same key may be serialized with optional members (kid/alg/use) or in another
+    // member order; the did:jwk names the signing key whenever the thumbprints agree.
+    @Test
+    fun aDidJwkOfTheSameKeyWithOtherOptionalMembersOrOrderStillNamesTheSigningKey() = runTest {
+        val signer = PreparationRecordingSigner(
+            publicKeyJwk = """{"kty":"EC","crv":"P-256","x":"AQ","y":"Ag","kid":"wsca-key-1","alg":"ES256","use":"sig"}""",
+        )
+        listOf(
+            SIGNING_KEY_DID_JWK_VM,
+            didJwk("""{"y":"Ag","x":"AQ","crv":"P-256","kty":"EC"}""") + "#0",
+            didJwk("""{"kty":"EC","crv":"P-256","x":"AQ","y":"Ag","use":"sig"}""") + "#0",
+        ).forEach { verificationMethod ->
+            val prepared = CredentialRequestProofPreparationImpl(signer)
+                .prepare(proofRequest(keyInclusionMode = JwsIdentifierMode.DID.name, holderDidVerificationMethod = verificationMethod))
+
+            assertTrue(prepared.isOk, "$verificationMethod names the same key")
+            assertEquals(verificationMethod, prepared.value.proofs.single().headerObject()["kid"]?.jsonPrimitive?.content)
+        }
+    }
+
+    @Test
+    fun prepareRefusesADidVerificationMethodThatIsNotTheSigningKeysDidJwk() = runTest {
+        val otherKey = didJwk("""{"kty":"EC","crv":"P-256","x":"Aw","y":"BA"}""")
+        val privateKey = didJwk("""{"kty":"EC","crv":"P-256","x":"AQ","y":"Ag","d":"BQ"}""")
+        listOf(
+            "$otherKey#0",
+            "${SIGNING_KEY_DID_JWK_VM.substringBefore('#')}#1",
+            SIGNING_KEY_DID_JWK_VM.substringBefore('#'),
+            "did:example:holder#0",
+            "$privateKey#0",
+        ).forEach { verificationMethod ->
+            val signer = PreparationRecordingSigner()
+            val result = CredentialRequestProofPreparationImpl(signer)
+                .prepare(proofRequest(keyInclusionMode = JwsIdentifierMode.DID.name, holderDidVerificationMethod = verificationMethod))
+
+            assertTrue(result.isErr, "$verificationMethod must be refused")
+            assertEquals(0, signer.prepareCalls)
+            assertEquals(0, signer.signCalls)
+        }
+    }
+
+    @Test
+    fun anExplicitDidVerificationMethodRequiresDidModeAndOneSigningKey() {
+        assertFailsWith<IllegalArgumentException> {
+            proofRequest(keyInclusionMode = JwsIdentifierMode.JWK.name, holderDidVerificationMethod = SIGNING_KEY_DID_JWK_VM)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            proofRequest(
+                keyInclusionMode = JwsIdentifierMode.DID.name,
+                signingKeyIds = listOf("key-a", "key-b"),
+                holderDidVerificationMethod = SIGNING_KEY_DID_JWK_VM,
+            )
+        }
+    }
+
+    @Test
+    fun finalizeRejectsASnapshotWhoseDidVerificationMethodNamesAnotherKey() = runTest {
+        val signer = PreparationRecordingSigner()
+        val preparation = CredentialRequestProofPreparationImpl(signer)
+        val prepared = preparation
+            .prepare(proofRequest(keyInclusionMode = JwsIdentifierMode.DID.name, holderDidVerificationMethod = SIGNING_KEY_DID_JWK_VM))
+            .getOrElse { error("prepare failed: $it") }
+        val original = prepared.proofs.single()
+        val swapped = "${didJwk("""{"kty":"EC","crv":"P-256","x":"Aw","y":"BA"}""")}#0"
+        val mutation = original
+            .copy(holderDidVerificationMethod = swapped)
+            .withJose(header = original.headerObject().withMember("kid", JsonPrimitive(swapped)))
+
+        val result = preparation.finalize(prepared.copy(proofs = listOf(mutation)))
+
+        assertTrue(result.isErr)
+        assertEquals("ILLEGAL_ARGUMENT_ERROR", result.error.code)
+        assertEquals(0, signer.signCalls)
+    }
+
     private fun proofRequest(
         iatEpochSeconds: Long = 1_700_000_001L,
         signingKeyIds: List<String> = listOf("holder-key-1"),
@@ -255,6 +350,7 @@ class CredentialProofPreparationTest {
         keyAttestationJwt: String? = null,
         cNonce: String? = "c_nonce-1",
         clientId: String? = "client-1",
+        holderDidVerificationMethod: String? = null,
     ) =
         CredentialRequestProofPreparationRequest(
             walletUnitId = "wallet-unit-1",
@@ -267,10 +363,19 @@ class CredentialProofPreparationTest {
             keyInclusionMode = keyInclusionMode,
             keyAttestationJwt = keyAttestationJwt,
             iatEpochSeconds = iatEpochSeconds,
+            holderDidVerificationMethod = holderDidVerificationMethod,
         )
 }
 
-private class PreparationRecordingSigner : HolderCredentialProofSigner {
+/** did:jwk method-specific id: base64url of the UTF-8 JWK JSON. */
+private fun didJwk(publicJwkJson: String): String = "did:jwk:" + publicJwkJson.encodeToByteArray().encodeToBase64Url()
+
+/** The #0 verification method of the recording signer's public JWK. */
+private val SIGNING_KEY_DID_JWK_VM = didJwk("""{"kty":"EC","crv":"P-256","x":"AQ","y":"Ag"}""") + "#0"
+
+private class PreparationRecordingSigner(
+    private val publicKeyJwk: String = "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"AQ\",\"y\":\"Ag\"}",
+) : HolderCredentialProofSigner {
     var signCalls = 0
     var prepareCalls = 0
     val signedKeyIds = mutableListOf<String>()
@@ -281,7 +386,7 @@ private class PreparationRecordingSigner : HolderCredentialProofSigner {
             WalletAttestedKeyRef(
                 keyAlias ?: "key",
                 "ES256",
-                publicKeyJwk = "{\"kty\":\"EC\",\"crv\":\"P-256\",\"x\":\"AQ\",\"y\":\"Ag\"}",
+                publicKeyJwk = publicKeyJwk,
                 keyRef = keyAlias,
                 walletUnitId = walletUnitId,
             ),

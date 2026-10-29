@@ -43,7 +43,7 @@ import com.sphereon.di.session.SessionContext
 import com.sphereon.di.session.SessionContextManager
 import com.sphereon.di.session.SessionInstance
 import com.sphereon.oauth2.common.config.OAuth2ServerInstanceConfig
-import com.sphereon.oauth2.common.config.OAuth2ServerInstanceIdProvider
+import com.sphereon.oauth2.common.config.MutableOAuth2ServerInstanceIdProvider
 import com.sphereon.oauth2.common.config.OAuth2ServersConfig
 import com.sphereon.oauth2.common.config.OAuth2ServersConfigProvider
 import com.sphereon.oauth2.common.jarm.CreateJarmResponseArgs
@@ -143,9 +143,12 @@ fun fixedSigningIdentifierResolver(identifier: ManagedOptsKeyInfo? = null,): AsS
         }
     }
 
-fun fixedAsInstanceIdProvider(key: String = "default"): OAuth2ServerInstanceIdProvider =
-    object : OAuth2ServerInstanceIdProvider {
-        override fun currentAsInstanceId(): String = key
+fun fixedAsInstanceIdProvider(key: String = "default"): MutableOAuth2ServerInstanceIdProvider =
+    object : MutableOAuth2ServerInstanceIdProvider {
+        private var selected: String? = key
+        override fun currentAsInstanceId(): String? = selected
+        override fun setCurrentAsInstanceId(asInstanceId: String) { selected = asInstanceId }
+        override fun clearCurrentAsInstanceId() { selected = null }
     }
 
 /**

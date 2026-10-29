@@ -24,9 +24,6 @@ import com.sphereon.di.session.SessionScope
 import com.sphereon.openid.oid4vp.universal.UniversalOid4vpCategories
 import com.sphereon.openid.oid4vp.universal.UniversalOid4vpEventTypes
 import com.sphereon.openid.oid4vp.universal.UniversalOid4vpSubsystems
-import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionCallbackDispatcher
-import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionCallbackSigning
-import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionStatusUpdate
 import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSession
 import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSessionStatus
 import dev.zacsweers.metro.ContributesBinding
@@ -39,18 +36,17 @@ import kotlinx.serialization.json.put
 import kotlin.time.Clock
 
 /**
- * Service for emitting events and dispatching callbacks when authorization session status changes.
+ * Service for emitting events when authorization session status changes.
  *
- * This service:
- * 1. Emits Universal OID4VP events via the SessionEventService
- * 2. Dispatches webhook callbacks when configured on the session
+ * Webhook callbacks are not sent from here: the authorization session store dispatches exactly one
+ * per persisted status change.
  *
  * Designed to be called by components that modify session status (e.g., store implementations,
  * HTTP command handlers).
  */
 interface SessionStatusEventEmitter {
     /**
-     * Emit an event and optionally dispatch a callback for a session status change.
+     * Emit an event for a session status change.
      *
      * @param session The session that changed
      * @param previousStatus The status before the change (null for newly created sessions)
@@ -92,7 +88,6 @@ interface SessionStatusEventEmitter {
 @ContributesBinding(SessionScope::class, binding = binding<SessionStatusEventEmitter>())
 class SessionStatusEventEmitterImpl(
     private val sessionEventService: SessionEventService,
-    private val callbackDispatcher: AuthorizationSessionCallbackDispatcher,
 ) : SessionStatusEventEmitter {
     override suspend fun onStatusChange(
         session: AuthorizationSession,
@@ -149,91 +144,6 @@ class SessionStatusEventEmitterImpl(
                 ).build()
 
         sessionEventService.emit(event)
-
-        // 2. Dispatch webhook callback if configured
-        val callback = session.callback
-        if (callback != null) {
-            val shouldDispatch = callback.statuses.isEmpty() || session.status in callback.statuses
-
-            if (shouldDispatch) {
-                val update =
-                    AuthorizationSessionStatusUpdate(
-                        correlationId = session.correlationId,
-                        status = session.status,
-                        updatedAt = session.updatedAt,
-                        errorCode = session.error?.code,
-                        errorMessage = session.error?.message,
-                    )
-
-                sessionEventService.emit(
-                    sessionEventService
-                        .eventBuilder()
-                        .type(UniversalOid4vpEventTypes.CALLBACK_ATTEMPTED)
-                        .origin("universal-oid4vp")
-                        .subsystem(UniversalOid4vpSubsystems.UNIVERSAL_OID4VP)
-                        .category(UniversalOid4vpCategories.CALLBACK)
-                        .correlationId(session.correlationId)
-                        .payload(
-                            buildJsonObject {
-                                put("correlationId", session.correlationId)
-                                put("status", session.status.name)
-                                put("stage", "CALLBACK")
-                                put("outcome", "ATTEMPTED")
-                                putSessionEventIdentity(
-                                    protocolSessionId = session.sessionId,
-                                    instanceId = session.instanceId,
-                                    oldState = session.status.name,
-                                    newState = session.status.name,
-                                )
-                            },
-                        ).build(),
-                )
-
-                val dispatchResult = callbackDispatcher.dispatch(
-                    callback.url,
-                    update,
-                    AuthorizationSessionCallbackSigning(
-                        secretRef = callback.secretRef,
-                        algorithm = callback.signing,
-                    ).takeUnless { callback.secretRef == null && callback.signing == null },
-                )
-
-                // Emit callback event (success or failure)
-                val callbackEventType =
-                    if (dispatchResult.isOk) {
-                        UniversalOid4vpEventTypes.CALLBACK_DISPATCHED
-                    } else {
-                        UniversalOid4vpEventTypes.CALLBACK_FAILED
-                    }
-
-                val callbackPayload =
-                    buildJsonObject {
-                        put("correlationId", session.correlationId)
-                        put("status", session.status.name)
-                        put("stage", "CALLBACK")
-                        put("outcome", if (dispatchResult.isOk) "SUCCEEDED" else "FAILED")
-                        putSessionEventIdentity(
-                            protocolSessionId = session.sessionId,
-                            instanceId = session.instanceId,
-                            newState = session.status.name,
-                        )
-                        if (dispatchResult.isErr) put("errorCode", "callback_dispatch_failed")
-                    }
-
-                val callbackEvent =
-                    sessionEventService
-                        .eventBuilder()
-                        .type(callbackEventType)
-                        .origin("universal-oid4vp")
-                        .subsystem(UniversalOid4vpSubsystems.UNIVERSAL_OID4VP)
-                        .category(UniversalOid4vpCategories.CALLBACK)
-                        .correlationId(session.correlationId)
-                        .payload(callbackPayload)
-                        .build()
-
-                sessionEventService.emit(callbackEvent)
-            }
-        }
 
         return Ok(Unit)
     }

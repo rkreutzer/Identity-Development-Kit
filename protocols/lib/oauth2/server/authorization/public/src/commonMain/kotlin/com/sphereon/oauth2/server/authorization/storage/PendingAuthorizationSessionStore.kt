@@ -17,6 +17,7 @@
 package com.sphereon.oauth2.server.authorization.storage
 
 import com.sphereon.core.api.IdkResult
+import com.sphereon.core.api.Err
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.oauth2.server.authorization.model.AuthorizationSession
 
@@ -27,10 +28,14 @@ import com.sphereon.oauth2.server.authorization.model.AuthorizationSession
  *
  * The store must be reachable across [com.sphereon.di.session.SessionScope] instances because each
  * inbound HTTP request creates its own session: the redirect flow spans at least two requests
- * (`/authorize` writes; `/authorize/callback` reads + removes), so the binding lives at
- * [dev.zacsweers.metro.AppScope].
+ * (`/authorize` writes; `/authorize/callback` atomically consumes). An in-process map needs
+ * AppScope; a durable adapter can live at SessionScope because its database outlives requests.
  */
 interface PendingAuthorizationSessionStore {
+    /** Atomically obtain and remove an unexpired pending session. Never emulate with find/remove. */
+    suspend fun consume(sessionId: String): IdkResult<AuthorizationSession?, IdkError> =
+        Err(IdkError.fromString(code = "storage_error", message = "Atomic pending-session consumption is unavailable"))
+
     /**
      * Persist [session] keyed by [AuthorizationSession.sessionId]. Writes are last-write-wins to
      * mirror the static-map semantics the in-memory implementation replaces; the EDK overlay can

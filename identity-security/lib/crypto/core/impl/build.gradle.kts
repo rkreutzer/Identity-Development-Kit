@@ -58,6 +58,8 @@ kotlin {
                 api(if (rootProject.findProperty("idk.consumeIdentitySecurityAsArtifacts") == "true") "com.sphereon.idk:lib-crypto-core-public:$version" else project(":lib-crypto-core-public"))
                 api(if (rootProject.findProperty("idk.consumeIdentitySecurityAsArtifacts") == "true") "com.sphereon.idk:lib-crypto-key-persistence-api:$version" else project(":lib-crypto-key-persistence-api"))
 
+                implementation(sphereonlib.org.jetbrains.kotlinx.atomicfu)
+
                 // DI dependencies
                 implementation(libs.bundles.app.platform.di)
                 api(if (rootProject.findProperty("idk.consumeCoreAsArtifacts") == "true") "com.sphereon.idk:lib-core-api-default:$version" else project(":lib-core-api-default"))

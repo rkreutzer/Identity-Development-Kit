@@ -96,20 +96,33 @@ class OidfOpTokenExchangeTest {
                     principalType = com.sphereon.di.context.PrincipalType.USER,
                 )
             try {
+                val diagnosticGraph = session.graph as TokenExchangeDiagnosticGraph
+                val asInstanceIdProvider = diagnosticGraph.mutableAsInstanceIdProvider
+                val previousAsInstanceId = asInstanceIdProvider.currentAsInstanceId()
                 val result =
-                    (session.graph as TokenExchangeDiagnosticGraph).handleTokenRequest.execute(
-                        com.sphereon.oauth2.server.authorization.command.token.HandleTokenRequestArgs(
-                            requestBody =
-                                mapOf(
-                                    "grant_type" to listOf("urn:ietf:params:oauth:grant-type:token-exchange"),
-                                    "subject_token" to listOf(subjectAccessToken),
-                                    "subject_token_type" to listOf("urn:ietf:params:oauth:token-type:access_token"),
-                                ),
-                            requestHeaders = mapOf("Authorization" to "Basic ${basicAuth()}"),
-                            httpUrl = "${fixture.baseUrl}/token",
-                            baseUrlOverride = fixture.baseUrl,
-                        ),
-                    )
+                    try {
+                        // Direct command entry owns the trusted AS selection normally supplied by HTTP.
+                        asInstanceIdProvider.setCurrentAsInstanceId("default")
+                        diagnosticGraph.handleTokenRequest.execute(
+                            com.sphereon.oauth2.server.authorization.command.token.HandleTokenRequestArgs(
+                                requestBody =
+                                    mapOf(
+                                        "grant_type" to listOf("urn:ietf:params:oauth:grant-type:token-exchange"),
+                                        "subject_token" to listOf(subjectAccessToken),
+                                        "subject_token_type" to listOf("urn:ietf:params:oauth:token-type:access_token"),
+                                    ),
+                                requestHeaders = mapOf("Authorization" to "Basic ${basicAuth()}"),
+                                httpUrl = "${fixture.baseUrl}/token",
+                                baseUrlOverride = fixture.baseUrl,
+                            ),
+                        )
+                    } finally {
+                        if (previousAsInstanceId == null) {
+                            asInstanceIdProvider.clearCurrentAsInstanceId()
+                        } else {
+                            asInstanceIdProvider.setCurrentAsInstanceId(previousAsInstanceId)
+                        }
+                    }
                 // Report only the typed category and safe static branch description, never token data.
                 val safeBranches =
                     listOf(
@@ -406,4 +419,5 @@ private class TxPkceFixture {
 @dev.zacsweers.metro.ContributesTo(com.sphereon.di.session.SessionScope::class)
 internal interface TokenExchangeDiagnosticGraph {
     val handleTokenRequest: com.sphereon.oauth2.server.authorization.command.token.HandleTokenRequestCommand
+    val mutableAsInstanceIdProvider: com.sphereon.oauth2.common.config.MutableOAuth2ServerInstanceIdProvider
 }

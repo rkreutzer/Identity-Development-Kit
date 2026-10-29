@@ -36,20 +36,16 @@ fun openableAuthorizationUri(value: String?): String? {
 }
 
 /**
- * Validate-then-spend for an authorization handoff. Peeks, refuses an unopenable URL without
- * consuming, then spends only an admitted URL. Every consume path that can reach a holder-openable
- * sink must go through this, not [WalletInteractionSensitiveInputAuthority.consume] directly.
+ * Validate-then-spend for an authorization handoff in its owning runtime. Local authorities peek
+ * before spending; remote authorities execute their backend's typed command with the same rule.
+ * Every consume path that can reach a holder-openable sink must go through this rather than
+ * [WalletInteractionSensitiveInputAuthority.consume] directly.
  */
 suspend fun WalletInteractionSensitiveInputAuthority.consumeOpenableAuthorizationHandoff(
     sessionId: WalletInteractionSessionId,
     ref: WalletInteractionSensitiveInputRef,
 ): String? {
-    val pending =
-        peek(sessionId, WalletInteractionSensitiveInputPurpose.OID4VCI_AUTHORIZATION_HANDOFF, ref) ?: return null
-    if (openableAuthorizationUri(pending) == null) {
-        throw IllegalArgumentException("wallet_interaction_authorization_handoff_unopenable")
-    }
-    return consume(sessionId, WalletInteractionSensitiveInputPurpose.OID4VCI_AUTHORIZATION_HANDOFF, ref)
+    return consumeAuthorizationHandoff(sessionId, ref)
 }
 
 private fun hostOf(url: String): String? {

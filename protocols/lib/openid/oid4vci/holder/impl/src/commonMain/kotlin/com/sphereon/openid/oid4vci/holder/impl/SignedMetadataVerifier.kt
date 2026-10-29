@@ -63,12 +63,11 @@ class SignedMetadataVerifier(
                 )
             }
 
-        val normalizedExpected = expectedIssuer.trimEnd('/')
-        val normalizedActual = metadata.credentialIssuer.trimEnd('/')
-        if (normalizedExpected != normalizedActual) {
+        // OID4VCI 12.2.4 requires simple string comparison without normalization.
+        if (metadata.credentialIssuer != expectedIssuer) {
             return Err(
                 IdkError.fromString(
-                    message = "Signed metadata credential_issuer ($normalizedActual) does not match expected ($normalizedExpected)",
+                    message = "Signed metadata credential_issuer (${metadata.credentialIssuer}) does not match expected ($expectedIssuer)",
                     code = "SIGNED_METADATA_ISSUER_MISMATCH",
                 ),
             )

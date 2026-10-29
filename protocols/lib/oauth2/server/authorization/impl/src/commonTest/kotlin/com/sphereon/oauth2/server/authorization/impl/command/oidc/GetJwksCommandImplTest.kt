@@ -16,6 +16,7 @@
 
 package com.sphereon.oauth2.server.authorization.impl.command.oidc
 
+import com.sphereon.core.api.context.SessionExecution
 import com.sphereon.crypto.core.KeyInfo
 import com.sphereon.crypto.core.KeyType
 import com.sphereon.crypto.core.generic.SignatureAlgorithm
@@ -23,6 +24,7 @@ import com.sphereon.crypto.core.jose.JwkUse
 import com.sphereon.crypto.kms.provider.software.SoftwareKmsProviderConfig
 import com.sphereon.crypto.kms.provider.software.SoftwareKmsProviderFactoryImpl
 import com.sphereon.oauth2.server.authorization.command.GetJwksArgs
+import com.sphereon.oauth2.server.authorization.impl.signing.DefaultAsPublishableSigningKeySource
 import com.sphereon.oauth2.server.authorization.impl.storage.memory.InMemorySigningKeyStore
 import com.sphereon.oauth2.server.authorization.impl.testutil.OAuth2ServerTestContext
 import com.sphereon.oauth2.server.authorization.impl.testutil.TenantOverrideSessionExecution
@@ -58,7 +60,7 @@ class GetJwksCommandImplTest {
             // RPs interpret that as "no public verification key available" rather than treating
             // the endpoint as broken.
             val store: SigningKeyStore = InMemorySigningKeyStore()
-            val command = GetJwksCommandImpl(TenantOverrideSessionExecution(ctx.execution, tenant), store, ctx.identifierService)
+            val command = ctx.defaultSourceJwksCommand(TenantOverrideSessionExecution(ctx.execution, tenant), store)
 
             val result = command.execute(GetJwksArgs())
 
@@ -79,7 +81,7 @@ class GetJwksCommandImplTest {
             val legacyKey = generateAndRegister(store, kid = "kid-legacy", state = OAuth2SigningKeyState.LEGACY, priority = 5)
             val activeKey = generateAndRegister(store, kid = "kid-active", state = OAuth2SigningKeyState.ACTIVE, priority = 10)
 
-            val command = GetJwksCommandImpl(TenantOverrideSessionExecution(ctx.execution, tenant), store, ctx.identifierService)
+            val command = ctx.defaultSourceJwksCommand(TenantOverrideSessionExecution(ctx.execution, tenant), store)
             val result = command.execute(GetJwksArgs())
 
             assertTrue(result.isOk, "GetJwks must succeed when two real keys are registered")
@@ -115,7 +117,7 @@ class GetJwksCommandImplTest {
             generateAndRegister(store, kid = "kid-active", state = OAuth2SigningKeyState.ACTIVE, priority = 10)
             generateAndRegister(store, kid = "kid-disabled", state = OAuth2SigningKeyState.DISABLED, priority = 1)
 
-            val command = GetJwksCommandImpl(TenantOverrideSessionExecution(ctx.execution, tenant), store, ctx.identifierService)
+            val command = ctx.defaultSourceJwksCommand(TenantOverrideSessionExecution(ctx.execution, tenant), store)
             val result = command.execute(GetJwksArgs())
 
             assertTrue(result.isOk)
@@ -137,8 +139,9 @@ class GetJwksCommandImplTest {
             val command =
                 GetJwksCommandImpl(
                     execution = TenantOverrideSessionExecution(ctx.execution, tenant),
-                    signingKeyStore = store,
-                    multiManagedIdentifierService = ctx.identifierService,
+                    publishableSigningKeySource =
+                        DefaultAsPublishableSigningKeySource(TenantOverrideSessionExecution(ctx.execution, tenant), store),
+                    multiManagedIdentifierService = lazyOf(ctx.identifierService),
                     signingKeyPublicJwkResolver = routedResolver,
                 )
 
@@ -198,7 +201,7 @@ class GetJwksCommandImplTest {
                 )
             assertTrue(registerResult.isOk, "store.register($kid) must succeed: ${if (registerResult.isErr) registerResult.error else ""}")
 
-            val command = GetJwksCommandImpl(TenantOverrideSessionExecution(ctx.execution, tenant), store, ctx.identifierService)
+            val command = ctx.defaultSourceJwksCommand(TenantOverrideSessionExecution(ctx.execution, tenant), store)
             val result = command.execute(GetJwksArgs())
 
             assertTrue(result.isOk, "GetJwks must resolve keys by the stored provider binding")
@@ -265,3 +268,14 @@ class GetJwksCommandImplTest {
         ctx.keyManagerService.registerProvider(provider, makeDefaultKms = false)
     }
 }
+
+/** Builds the command with the default publishable-key source over [store], as the IDK graph binds it. */
+internal fun OAuth2ServerTestContext.defaultSourceJwksCommand(
+    execution: SessionExecution,
+    store: SigningKeyStore,
+): GetJwksCommandImpl =
+    GetJwksCommandImpl(
+        execution = execution,
+        publishableSigningKeySource = DefaultAsPublishableSigningKeySource(execution, store),
+        multiManagedIdentifierService = lazyOf(identifierService),
+    )

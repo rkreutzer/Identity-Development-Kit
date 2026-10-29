@@ -14,6 +14,20 @@ class MdocStatusTrustAnchorsTest {
         TrustedAuthenticationResolution(controller, ExternalIdentifierX5cOpts(x5c.toList()), purpose = TrustedAuthenticationPurpose.CREDENTIAL_ISSUER)
 
     @Test
+    fun documentTypeRestrictionsRemainSeparateBetweenDocuments() {
+        val sources = listOf(
+            issuer("mdl", "root-mdl").copy(documentTypes = setOf("org.iso.18013.5.1.mDL")),
+            issuer("pid", "root-pid").copy(documentTypes = setOf("eu.europa.ec.eudi.pid.1")),
+            issuer("removed", "root-removed").copy(documentTypes = emptySet()),
+        )
+        assertEquals(listOf("root-mdl"), mdocStatusTrustAnchors(sources, "org.iso.18013.5.1.mDL"))
+        assertEquals(listOf("root-pid"), mdocStatusTrustAnchors(sources, "eu.europa.ec.eudi.pid.1"))
+        assertEquals(emptyList(), mdocStatusTrustAnchors(sources, "unknown"))
+        assertEquals(emptyList(), mdocStatusTrustAnchors(sources))
+        assertEquals(listOf("static"), mdocStatusTrustAnchors(sources + issuer("static", "static"), "unknown"))
+    }
+
+    @Test
     fun onlyCredentialIssuerX509EvidenceSuppliesStatusRoots() {
         val anchors = mdocStatusTrustAnchors(
             listOf(

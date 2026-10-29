@@ -114,11 +114,16 @@ class JwksUrlExternalIdentifierResolutionServiceImpl private constructor(
         val opts = asSupportedOpts(args).value
         val url = opts.identifier.trim()
         if (url.isBlank()) {
+            log.warn("JWKS_RESOLUTION_REFUSED stage=input reason=empty_url")
             return IdkError.ILLEGAL_ARGUMENT_ERROR(message = "JWKS URL is blank").asErrorResult()
         }
 
         val requestedKid = opts.lookup.kid
-        val jwkSet = resolveJwkSetCached(url, requestedKid).getOrElse { return it.asErrorResult() }
+        val jwkSet = resolveJwkSetCached(url, requestedKid).getOrElse {
+            val code = it.code.takeIf { value -> value.matches(Regex("[A-Za-z0-9_.:-]{1,160}")) } ?: "unavailable"
+            log.warn("JWKS_RESOLUTION_REFUSED stage=document-resolution code=$code")
+            return it.asErrorResult()
+        }
 
         @Suppress("UNCHECKED_CAST")
         val resolvedKeys =
@@ -127,7 +132,7 @@ class JwksUrlExternalIdentifierResolutionServiceImpl private constructor(
                     try {
                         ResolvedKeyInfo.fromKey(it) as ResolvedKeyInfoType<JwkType>
                     } catch (expected: Exception) {
-                        log.debug("Skipping unsupported key in JWKS: ${expected.message}")
+                        log.debug("JWKS key skipped stage=key-admission exception_type=${expected::class.simpleName}")
                         null
                     }
                 }.toTypedArray()
@@ -190,6 +195,12 @@ class JwksUrlExternalIdentifierResolutionServiceImpl private constructor(
             ).asOkResult()
     }
 
+    private fun logDocumentFailure(stage: String, exception: Exception) {
+        val type = exception::class.simpleName
+            ?.takeIf { it.matches(Regex("[A-Za-z0-9_]{1,160}")) } ?: "Exception"
+        log.warn("JWKS_RESOLUTION_REFUSED stage=$stage exception_type=$type")
+    }
+
     /**
      * Fetch the raw JWKS JSON. Bounded retry for transport errors and HTTP 5xx is configured
      * on the Ktor client via [jwksHttpClientOptions], so this function only maps the final
@@ -204,6 +215,7 @@ class JwksUrlExternalIdentifierResolutionServiceImpl private constructor(
             try {
                 httpClient.get(url)
             } catch (expected: Exception) {
+                logDocumentFailure("transport", expected)
                 return IdkError
                     .UNKNOWN_ERROR(
                         message = "JWKS endpoint $url unavailable after ${MAX_FETCH_RETRIES + 1} attempts (transport error: ${expected.message})",
@@ -212,6 +224,7 @@ class JwksUrlExternalIdentifierResolutionServiceImpl private constructor(
             }
 
         if (response.status != HttpStatusCode.OK) {
+            log.warn("JWKS_RESOLUTION_REFUSED stage=http-status http_status=${response.status.value}")
             val prefix =
                 if (response.status.value in 500..599) {
                     "JWKS endpoint $url unavailable after ${MAX_FETCH_RETRIES + 1} attempts"
@@ -224,6 +237,7 @@ class JwksUrlExternalIdentifierResolutionServiceImpl private constructor(
         return try {
             response.body<String>().asOkResult()
         } catch (expected: Exception) {
+            logDocumentFailure("body-read", expected)
             IdkError
                 .UNKNOWN_ERROR(
                     message = "JWKS endpoint $url returned an unreadable response body: ${expected.message}",
@@ -255,6 +269,7 @@ class JwksUrlExternalIdentifierResolutionServiceImpl private constructor(
             try {
                 httpClientFactory.createClient(jwksHttpClientOptions().counterpartyEgressWhenHolder())
             } catch (expected: Exception) {
+                logDocumentFailure("client-create", expected)
                 return IdkError.UNKNOWN_ERROR(message = "Failed to create HTTP client: ${expected.message}", exception = expected).asErrorResult()
             }
 
@@ -273,6 +288,7 @@ class JwksUrlExternalIdentifierResolutionServiceImpl private constructor(
             try {
                 JwkSet.fromJsonString(jwksJson)
             } catch (expected: Exception) {
+                logDocumentFailure("invalid-json", expected)
                 return IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Invalid JWKS JSON from $url: ${expected.message}", throwable = expected).asErrorResult()
             }
 

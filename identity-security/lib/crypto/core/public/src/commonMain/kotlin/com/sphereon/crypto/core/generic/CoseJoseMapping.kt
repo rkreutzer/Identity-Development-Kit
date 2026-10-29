@@ -430,7 +430,10 @@ internal object SignatureAlgorithmSerializer : KSerializer<SignatureAlgorithm> {
 
     override fun deserialize(decoder: Decoder): SignatureAlgorithm {
         val value = decoder.decodeString()
-        return SignatureAlgorithm.fromValue(value) ?: throw SerializationException("Unknown signature algorithm: $value")
+        // Every algorithm this serializer writes reads back, including the raw and key-agreement
+        // ones a provider reports as capabilities but that have no JOSE/COSE mapping.
+        return SignatureAlgorithm.serialized.find { it::class.simpleName == value }
+            ?: throw SerializationException("Unknown signature algorithm: $value")
     }
 }
 
@@ -1180,6 +1183,13 @@ sealed class SignatureAlgorithm(
         @JsStatic
         @JvmStatic
         fun fromValue(value: String): SignatureAlgorithm? = asList.find { it::class.simpleName == value }
+
+        /**
+         * Every defined algorithm, for the wire format: [asList] plus the raw RSA and key-agreement
+         * algorithms, which carry no JOSE/COSE mapping but are reported as provider capabilities.
+         */
+        internal val serialized: List<SignatureAlgorithm>
+            get() = asList + listOf(RSA_RAW, RSA_SSA_PSS_RAW_MGF1, ECKA_DH_SHA256)
     }
 }
 

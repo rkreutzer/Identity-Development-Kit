@@ -16,6 +16,8 @@ class BoundedRequestBodyTest {
         application {
             routing {
                 put("/bounded") {
+                    assertEquals("chunked", call.request.headers[HttpHeaders.TransferEncoding])
+                    assertEquals(null, call.request.headers[HttpHeaders.ContentLength])
                     try {
                         call.request.toGenericHttpRequest(call, 32)
                         dispatched = true
@@ -30,6 +32,8 @@ class BoundedRequestBodyTest {
             setBody(object : OutgoingContent.WriteChannelContent() {
                 override val contentType = ContentType.Application.OctetStream
                 override val contentLength: Long? = null
+                // TestHost supplies a decoded stream; retain its real HTTP/1 chunked framing.
+                override val headers = io.ktor.http.headersOf(io.ktor.http.HttpHeaders.TransferEncoding, "chunked")
                 override suspend fun writeTo(channel: ByteWriteChannel) {
                     channel.writeFully(ByteArray(33) { 42 })
                 }

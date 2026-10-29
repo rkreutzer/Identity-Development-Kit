@@ -114,14 +114,25 @@ class LoginPageHttpEndpointCommandImpl(
         val errorMessage = if (errorParam == "invalid_credentials") errorParam else null
         val loginHint = params["login_hint"]
         val locale = negotiateLocale(request.headers["accept-language"] ?: request.headers["Accept-Language"])
-        val csrf = csrfTokenizer.mint(sessionId)
         val loginConfig = configProvider.serverConfig.login
         val pending = pendingAuthorizationSessionStore.findById(sessionId)
-        if (pending.isErr || pending.value == null) {
+        if (pending.isErr) {
+            return Ok(oauth2ErrorResponse(503, "temporarily_unavailable", "Authorization transaction could not be checked", json))
+        }
+        if (pending.value == null) {
             return Ok(oauth2ErrorResponse(400, "invalid_request", "Unknown or expired authorization transaction", json))
         }
         val routeDecision = pending.value!!.authenticationRoute
             ?: return Ok(oauth2ErrorResponse(400, "invalid_request", "Authorization transaction has no authentication route", json))
+        val csrf = try {
+            csrfTokenizer.mint(sessionId)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: IllegalArgumentException) {
+            return Ok(oauth2ErrorResponse(400, "invalid_request", "Unknown or expired authorization transaction", json))
+        } catch (e: Exception) {
+            return Ok(oauth2ErrorResponse(503, "temporarily_unavailable", "Login challenge could not be created", json))
+        }
         val federationOptions = routeDecision.eligibleBindings.map {
             FederationLoginOption(id = it.bindingId, displayName = it.displayName)
         }

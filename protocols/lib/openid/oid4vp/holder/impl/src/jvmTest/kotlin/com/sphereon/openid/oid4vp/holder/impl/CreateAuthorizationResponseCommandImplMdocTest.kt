@@ -79,6 +79,10 @@ import com.sphereon.openid.oid4vp.common.ResponseMode
 import com.sphereon.openid.oid4vp.common.responseUri
 import com.sphereon.openid.oid4vp.common.vpToken
 import com.sphereon.openid.oid4vc.common.CredentialFormat
+import com.sphereon.openid.oid4vp.dcql.ClaimsPathPointer
+import com.sphereon.openid.oid4vp.dcql.DcqlClaimQuery
+import com.sphereon.openid.oid4vp.dcql.DcqlCredentialQuery
+import com.sphereon.openid.oid4vp.dcql.DcqlQuery
 import com.sphereon.openid.oid4vp.holder.CreateAuthorizationResponseArgs
 import com.sphereon.openid.oid4vp.holder.MdocCredentialSigningSignature
 import com.sphereon.openid.oid4vp.holder.ResolvedOid4vpRequest
@@ -305,6 +309,67 @@ class CreateAuthorizationResponseCommandImplMdocTest {
             // The disclosed issuer-signed elements survive.
             assertNotNull(doc.issuerSigned.getIssuerSignedItem(docTypeNamespace, DataElementIdentifier("given_name")))
 
+            val noClaimsRequest =
+                resolvedRequest(
+                    dcqlQuery =
+                        DcqlQuery(
+                            credentials =
+                                listOf(
+                                    DcqlCredentialQuery(
+                                        id = "businesscard_mdoc",
+                                        format = "mso_mdoc",
+                                        meta = JsonObject(mapOf("doctype_value" to JsonPrimitive(docType.toString()))),
+                                    ),
+                                ),
+                        ),
+                )
+            val noClaimsResult = command.execute(CreateAuthorizationResponseArgs(noClaimsRequest, selected))
+            if (noClaimsResult.isErr) error("mdoc no-claims request failed: ${noClaimsResult.error.message.defaultMessage}")
+            val noClaimsPresentation = noClaimsResult.getOrThrow().vpToken?.getSinglePresentation("businesscard_mdoc")
+            assertNotNull(noClaimsPresentation)
+            val noClaimsDocument =
+                DeviceResponseCborCodecImpl()
+                    .decode(noClaimsPresentation.decodeFromBase64Url())
+                    .getOrThrow()
+                    .value
+                    .documents
+                    ?.single()
+            assertNotNull(noClaimsDocument)
+            assertNotNull(noClaimsDocument.deviceSigned?.deviceAuth?.deviceSignature)
+            assertTrue(
+                noClaimsDocument.issuerSigned.nameSpaces.orEmpty().values.all { it.isEmpty() },
+                "DCQL with claims absent must not disclose selectively-disclosable mdoc elements",
+            )
+
+            val unsatisfiableRequest =
+                resolvedRequest(
+                    dcqlQuery =
+                        DcqlQuery(
+                            credentials =
+                                listOf(
+                                    DcqlCredentialQuery(
+                                        id = "businesscard_mdoc",
+                                        format = "mso_mdoc",
+                                        meta = JsonObject(mapOf("doctype_value" to JsonPrimitive(docType.toString()))),
+                                        claims =
+                                            listOf(
+                                                DcqlClaimQuery(
+                                                    path =
+                                                        ClaimsPathPointer(
+                                                            listOf(
+                                                                JsonPrimitive(docTypeNamespace.toString()),
+                                                                JsonPrimitive("not_in_credential"),
+                                                            ),
+                                                        ),
+                                                ),
+                                            ),
+                                    ),
+                                ),
+                        ),
+                )
+            val unsatisfiableResult = command.execute(CreateAuthorizationResponseArgs(unsatisfiableRequest, selected))
+            assertTrue(unsatisfiableResult.isErr, "a required mdoc claim absent from the credential must not produce a vp_token")
+
             // Prepare the same credential without signing, then compose using the exact raw
             // DeviceAuth signature from the independent legacy signer. The prepared path must
             // re-derive the transcript and verify the supplied signature before creating the wire
@@ -444,6 +509,7 @@ class CreateAuthorizationResponseCommandImplMdocTest {
         responseMode: ResponseMode = ResponseMode.DIRECT_POST,
         clientMetadata: ClientMetadata? = null,
         callerOrigin: String? = null,
+        dcqlQuery: DcqlQuery? = null,
     ): ResolvedOid4vpRequest {
         val isDigitalCredentialsApi = responseMode == ResponseMode.DC_API || responseMode == ResponseMode.DC_API_JWT
         val isDirectPost = responseMode == ResponseMode.DIRECT_POST || responseMode == ResponseMode.DIRECT_POST_JWT
@@ -468,7 +534,7 @@ class CreateAuthorizationResponseCommandImplMdocTest {
             )
         return ResolvedOid4vpRequest(
             request = authRequest,
-            dcqlQuery = null,
+            dcqlQuery = dcqlQuery,
             clientMetadata = clientMetadata,
             verifierInfo =
                 VerifierInfo(

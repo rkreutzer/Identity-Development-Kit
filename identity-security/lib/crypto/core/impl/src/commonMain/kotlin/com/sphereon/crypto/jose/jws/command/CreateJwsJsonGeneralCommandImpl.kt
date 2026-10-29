@@ -80,6 +80,7 @@ class CreateJwsJsonGeneralCommandImpl(
         // Prepare the JWS object
         val prepareResult = prepareJwsCommand.execute(appliedArgs)
         if (prepareResult.isErr) {
+            log.error("JWS signing failed command=$commandId stage=preparation idk_code=${prepareResult.error.code}")
             return IdkResult.err(prepareResult.error)
         }
 
@@ -96,6 +97,7 @@ class CreateJwsJsonGeneralCommandImpl(
                     }
                 }
             } catch (expected: IllegalArgumentException) {
+                log.warn("JWS signing refused command=$commandId stage=managed-key-selection error_type=IllegalArgumentException")
                 return IdkResult.err(IdkError.fromString("Invalid managed signing selection: ${expected.message}", exception = expected))
             }
 
@@ -113,11 +115,15 @@ class CreateJwsJsonGeneralCommandImpl(
                         requireX5Chain = false,
                     ),
                 )
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (expected: Exception) {
+                log.error("JWS signing failed command=$commandId stage=raw-signing error_type=${expected::class.simpleName}")
                 return IdkResult.err(IdkError.fromString("Failed to create signature: ${expected.message}", exception = expected))
             }
         val signatureBytes =
             signatureResult.getOrElse { error ->
+                log.error("JWS signing failed command=$commandId stage=raw-signing idk_code=${error.code}")
                 return IdkResult.err(
                     IdkError.fromString(
                         "Failed to create signature: ${error.message.defaultMessage}",
@@ -138,10 +144,14 @@ class CreateJwsJsonGeneralCommandImpl(
                         input = prepared.signingInput,
                         signature = signatureBytes,
                     )
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
                 } catch (expected: Exception) {
+                    log.error("JWS signing failed command=$commandId stage=public-key-consistency error_type=${expected::class.simpleName}")
                     return IdkResult.err(IdkError.fromString("Managed signature verification failed: ${expected.message}", exception = expected))
                 }
             if (!matchesPreparedKey) {
+                log.error("JWS signing failed command=$commandId stage=public-key-consistency")
                 return IdkResult.err(IdkError.fromString("Managed signature does not match the prepared public key"))
             }
         }

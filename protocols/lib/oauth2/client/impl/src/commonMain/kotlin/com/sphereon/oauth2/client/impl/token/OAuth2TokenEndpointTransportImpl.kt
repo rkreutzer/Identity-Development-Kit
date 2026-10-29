@@ -9,6 +9,7 @@ package com.sphereon.oauth2.client.impl.token
 import com.sphereon.core.api.Err
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
+import com.sphereon.core.api.log.Log
 import com.sphereon.di.session.SessionScope
 import com.sphereon.ktor.http.client.provider.HttpClientProvider
 import com.sphereon.ktor.http.client.provider.counterpartyEgressIf
@@ -65,6 +66,23 @@ class OAuth2TokenEndpointTransportImpl(
     }
 
     override suspend fun exchange(args: OAuth2TokenEndpointTransportArgs): IdkResult<TokenResponse, Oauth2Error> {
+        var stage = "validation"
+        return try {
+            exchangeAtEndpoint(args) { stage = it }.also { result ->
+                if (result.isErr) logFailure(stage)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            logFailure(stage, failure)
+            throw failure
+        }
+    }
+
+    private suspend fun exchangeAtEndpoint(
+        args: OAuth2TokenEndpointTransportArgs,
+        markStage: (String) -> Unit,
+    ): IdkResult<TokenResponse, Oauth2Error> {
         val explicitlySelectedAuthMethod = args.tokenRequest.tokenEndpointAuthMethod
         val authMethod = explicitlySelectedAuthMethod ?: ClientAuthenticationMethod.CLIENT_SECRET_POST
         val endpointResult = DefaultOAuth2TokenEndpointSelector.select(
@@ -131,6 +149,7 @@ class OAuth2TokenEndpointTransportImpl(
             }
         }
 
+        markStage("client-authentication")
         val authResult = applyClientAuthenticationCommand.execute(ApplyClientAuthenticationArgs(authentication, endpoint))
         if (authResult.isErr) {
             return validationFailure(
@@ -139,11 +158,14 @@ class OAuth2TokenEndpointTransportImpl(
             )
         }
 
+        markStage("request-assembly")
         val auth = authResult.value
         val parameters = buildFormParameters(args.tokenRequest) + auth.bodyParameters.entries.map { it.key to it.value }
 
         return try {
+            markStage("http-client")
             withSelectedClient(args) { client ->
+                markStage("token-request")
                 val response = client.submitForm(
                     url = endpoint,
                     formParameters = Parameters.build {
@@ -157,18 +179,28 @@ class OAuth2TokenEndpointTransportImpl(
                         args.tokenRequest.additionalHeaders.forEach { (name, value) -> append(name, value) }
                     }
                 }
+                markStage("token-response")
                 parseResponse(response)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (expected: Exception) {
+            logFailure("token-exchange", expected)
             Err(
                 Oauth2Error.FetchFailed(
-                    failureMessage = "Failed to exchange token at $endpoint",
+                    failureMessage = "Failed to exchange OAuth2 token",
                     cause = expected,
                 ),
             )
         }
+    }
+
+    private fun logFailure(stage: String, failure: Throwable? = null) {
+        val type = failure?.let { it::class.simpleName }
+            ?.takeIf { it.matches(Regex("[A-Za-z][A-Za-z0-9_]{0,79}")) } ?: "unavailable"
+        Log.app().withTag("OAuth2TokenEndpointTransport").warn(
+            "OAuth2 token exchange refused stage=$stage error_type=$type",
+        )
     }
 
     private suspend fun withSelectedClient(

@@ -16,6 +16,7 @@
 
 package com.sphereon.openid.oid4vp.verifier.impl
 
+import com.sphereon.cbor.CborParser
 import com.sphereon.core.api.Encoding
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Err
@@ -39,6 +40,7 @@ import com.sphereon.crypto.jose.jws.command.VerifyJwsCommand
 import com.sphereon.crypto.dataintegrity.model.ProofPurpose
 import com.sphereon.crypto.dataintegrity.resolution.VerificationMethodResolutionPolicy
 import com.sphereon.crypto.resolution.IdentifierMethodDefaults
+import com.sphereon.crypto.resolution.extern.ExternalIdentifierDidOpts
 import com.sphereon.di.session.SessionScope
 import com.sphereon.jsonld.JsonLdError
 import com.sphereon.jsonld.WellKnownContexts
@@ -51,6 +53,7 @@ import com.sphereon.mdoc.data.device.DeviceResponseCborCodec
 import com.sphereon.mdoc.data.mso.MobileSecurityObjectCborCodec
 import com.sphereon.oauth2.common.model.AuthorizationRequest
 import com.sphereon.openid.oid4vp.common.CredentialFormat
+import com.sphereon.openid.oid4vp.common.ResponseMode
 import com.sphereon.openid.oid4vp.dcql.DcqlCredentialQuery
 import com.sphereon.openid.oid4vp.common.clientMetadata
 import com.sphereon.openid.oid4vp.common.responseUri
@@ -62,12 +65,16 @@ import com.sphereon.openid.oid4vc.common.vcdm.VcdmUris
 import com.sphereon.openid.oid4vc.common.vcdm.VcdmVersion
 import com.sphereon.openid.oid4vc.common.PresentationFormat
 import com.sphereon.openid.oid4vp.verifier.CredentialIssuerRef
+import com.sphereon.openid.oid4vp.verifier.CredentialIssuerControllerClaim
+import com.sphereon.openid.oid4vp.verifier.CredentialTypeMatcher
+import com.sphereon.sdjwt.vc.SdJwtVcClaims
 import com.sphereon.openid.oid4vp.verifier.CredentialTrustValidation
 import com.sphereon.openid.oid4vp.verifier.CredentialTrustValidationMode
 import com.sphereon.openid.oid4vp.verifier.TrustedAuthenticationResolution
 import com.sphereon.crypto.resolution.extern.ExternalIdentifierX5cOpts
 import com.sphereon.openid.oid4vp.verifier.TrustedAuthenticationPurpose
 import com.sphereon.openid.oid4vp.verifier.MatchedCredential
+import com.sphereon.openid.oid4vp.verifier.VerifiedCredentialTemporalFacts
 import com.sphereon.openid.oid4vp.verifier.VerifiedCredentialEvidence
 import com.sphereon.openid.oid4vp.verifier.VerifiedCredentialStatus
 import com.sphereon.openid.oid4vp.verifier.VerifiedCredentialStatusOutcome
@@ -117,6 +124,19 @@ import kotlin.time.Clock
 import kotlin.time.Instant
 
 import dev.zacsweers.metro.ExposeImplBinding
+
+/** Appendix A.4 binds a DC API presentation to the browser Origin, even for a signed request. */
+internal fun holderBindingClientId(request: AuthorizationRequest): String? {
+    if (request.responseMode != ResponseMode.DC_API.value && request.responseMode != ResponseMode.DC_API_JWT.value) {
+        return request.clientId
+    }
+    val origins = request.additionalParameters?.get("expected_origins") as? JsonArray ?: return null
+    if (origins.size != 1) return null
+    val origin = (origins.single() as? JsonPrimitive)?.contentOrNull ?: return null
+    if (!origin.matches(Regex("^https?://[^/?#@\\s]+$"))) return null
+    return "origin:$origin"
+}
+
 /**
  * Implementation of ValidateAuthorizationResponseCommand for OpenID4VP RP (Verifier).
  *
@@ -144,6 +164,7 @@ class ValidateAuthorizationResponseCommandImpl(
     private val jsonLdSchemaValidator: JsonLdSchemaValidator,
     private val deviceResponseCborCodec: DeviceResponseCborCodec,
     private val mobileSecurityObjectCborCodec: MobileSecurityObjectCborCodec,
+    private val cborParser: CborParser,
     private val vcdmDataIntegrityVerifier: VcdmDataIntegrityVerifier,
     /**
      * Optional, possibly-empty set of credential-status mechanisms. Populated only when status-list
@@ -165,6 +186,7 @@ class ValidateAuthorizationResponseCommandImpl(
      */
     private val credentialTrustValidators: Set<Oid4vpCredentialTrustValidator>,
     private val businessAuthorizations: Set<com.sphereon.openid.oid4vp.verifier.Oid4vpBusinessAuthorization>,
+    private val credentialTypeMatcher: CredentialTypeMatcher,
     private val eventService: SessionEventService? = null,
 ) : TypedServiceCommandAdapter<ValidateAuthorizationResponseArgs, ValidationResult, IdkError>(
         commandId = ValidateAuthorizationResponseCommand.COMMAND_ID,
@@ -186,7 +208,7 @@ class ValidateAuthorizationResponseCommandImpl(
         applyDuring: (ValidateAuthorizationResponseArgs) -> ValidateAuthorizationResponseArgs,
     ): IdkResult<ValidationResult, IdkError> {
         val correlationId =
-            args.originalRequest.state?.takeIf(String::isNotBlank)
+            (args.sessionCorrelationId ?: args.originalRequest.state)?.takeIf(String::isNotBlank)
                 ?: return Err(
                     IdkError.ILLEGAL_ARGUMENT_ERROR(
                         message = "OID4VP authorization response has no session correlation state",
@@ -219,7 +241,7 @@ class ValidateAuthorizationResponseCommandImpl(
                 if (authorization.isErr) businessAuthorizationError = authorization.error
             }
         }
-        val correlation = args.originalRequest.state
+        val correlation = args.sessionCorrelationId ?: args.originalRequest.state
         if (!correlation.isNullOrBlank()) {
             val previousSession = pendingHistorySession
             pendingHistorySession = authorizationSessionStore.storeValidationResultDeferred(
@@ -335,6 +357,7 @@ class ValidateAuthorizationResponseCommandImpl(
         matchingQuery: DcqlCredentialQuery,
         processedArgs: ValidateAuthorizationResponseArgs,
         bindingRequest: AuthorizationRequest,
+        holderBindingClientId: String,
         bindingNonce: String,
         effectiveVerifierId: String?,
         effectiveDcqlQueryId: String?,
@@ -342,7 +365,7 @@ class ValidateAuthorizationResponseCommandImpl(
         statusPolicies: Map<String, CredentialStatusPolicy>,
         persistedJwtIssuerAlgorithms: Set<String>?,
         errors: MutableList<String>,
-        matchedCredentials: MutableList<MatchedCredential>,
+        accepted: MutableList<AcceptedCredential>,
         rejections: MutableList<CredentialValidationRejection>,
     ) {
         // OID4VP ldp_vc values are JSON objects. The value can be either a credential or
@@ -381,7 +404,7 @@ class ValidateAuthorizationResponseCommandImpl(
                         ProofPurpose.AUTHENTICATION
                     },
                     expectedController = declaredDataIntegrityController,
-                    expectedDomain = if (documentKind == VcdmDocumentKind.PRESENTATION) bindingRequest.clientId else null,
+                    expectedDomain = if (documentKind == VcdmDocumentKind.PRESENTATION) holderBindingClientId else null,
                     expectedChallenge = if (documentKind == VcdmDocumentKind.PRESENTATION) bindingNonce else null,
                     requireDomainAndChallenge = documentKind == VcdmDocumentKind.PRESENTATION,
                     verificationMethodResolutionPolicy = processedArgs.verificationMethodResolutionPolicy,
@@ -419,13 +442,18 @@ class ValidateAuthorizationResponseCommandImpl(
             val verifiedDocument = diResult.value.verifiedDocument
             val renderedPresentation = JSON_LENIENT.encodeToString(JsonElement.serializer(), presentationElement)
             if (documentKind == VcdmDocumentKind.PRESENTATION) {
-                val dataIntegrityRecursionState = VcdmRecursionState()
+                val dataIntegrityRecursionState = VcdmRecursionState(matchingQuery)
+                if (matchingQuery.require_cryptographic_holder_binding) {
+                    dataIntegrityRecursionState.boundHolder = boundDidHolder(
+                        declaredDataIntegrityController ?: diResult.value.authenticatedControllers.singleOrNull(),
+                    )
+                }
                 val childFailure = verifyDataIntegrityPresentationChildren(
                     document = verifiedDocument,
                     queryId = queryId,
-                    expectedDomain = bindingRequest.clientId,
+                    expectedDomain = holderBindingClientId,
                     expectedChallenge = bindingNonce,
-                    expectedAudience = bindingRequest.clientId,
+                    expectedAudience = holderBindingClientId,
                     verifierEncryptionJwkThumbprint = processedArgs.verifierEncryptionJwkThumbprint,
                     verifierId = effectiveVerifierId,
                     dcqlQueryId = effectiveDcqlQueryId,
@@ -447,18 +475,20 @@ class ValidateAuthorizationResponseCommandImpl(
                     return
                 }
                 // A holder-authenticated ldp_vc presentation is not an issuer credential. Every nested
-                // VC has already had its own proof, trust and status checks applied above.
-                matchedCredentials.add(
-                    MatchedCredential(
-                        credentialQueryId = queryId,
-                        credentialFormat = CredentialFormat.LDP_VC,
-                        presentationFormat = PresentationFormat.LDP_VP,
-                        presentation = renderedPresentation,
-                        disclosedClaims = extractDataIntegrityClaims(verifiedDocument),
-                        issuer = null,
-                        trust = null,
-                    ),
-                )
+                // VC has already had its own proof, trust and status checks applied above, and each one
+                // is reported as its own credential.
+                if (dataIntegrityRecursionState.credentials.isEmpty()) {
+                    errors.add("Data Integrity presentation for query '$queryId' at index $presentationIndex carries no verified credential")
+                    return
+                }
+                dataIntegrityRecursionState.credentials.forEach { child ->
+                    accepted.add(
+                        acceptedVcdmChild(
+                            queryId, child, renderedPresentation, PresentationFormat.LDP_VP,
+                            statusPolicies[queryId] ?: CredentialStatusPolicy(),
+                        ),
+                    )
+                }
                 return
             }
             val objectIssuer = extractDataIntegrityIssuer(verifiedDocument)
@@ -491,15 +521,25 @@ class ValidateAuthorizationResponseCommandImpl(
                     return
                 }
             }
-            matchedCredentials.add(
-                MatchedCredential(
-                    credentialQueryId = queryId,
-                    credentialFormat = CredentialFormat.LDP_VC,
-                    presentation = renderedPresentation,
-                    disclosedClaims = extractDataIntegrityClaims(verifiedDocument),
-                    issuer = objectIssuer,
-                    trust = objectTrust.takeIf { it.enabled || it.trustDomainIds.isNotEmpty() },
-                    verificationEvidence = verificationEvidence(renderedPresentation, objectIssuer, objectTrust, statusPolicy, statusEvaluation, verifiedCredentialTemporalFacts(verifiedDocument, vcdm = true)),
+            credentialTypeFailure(verifiedDocument, matchingQuery)?.let {
+                errors.add("Credential for query '$queryId' at index $presentationIndex rejected: $it")
+                return
+            }
+            val objectType = mostSpecificVcdmType(verifiedDocument)
+            val objectProjection = vcdmClaimProjection(verifiedDocument, objectType, includeSubjectId = true)
+            accepted.add(
+                AcceptedCredential(
+                    MatchedCredential(
+                        credentialQueryId = queryId,
+                        credentialFormat = CredentialFormat.LDP_VC,
+                        presentation = renderedPresentation,
+                        disclosedClaims = objectProjection.claims.toClaimValues(),
+                        issuer = objectIssuer,
+                        trust = objectTrust.takeIf { it.enabled || it.trustDomainIds.isNotEmpty() },
+                        verificationEvidence = verificationEvidence(renderedPresentation, objectIssuer, objectTrust, statusPolicy, statusEvaluation, verifiedCredentialTemporalFacts(verifiedDocument, vcdm = true)),
+                        credentialType = objectType,
+                    ),
+                    objectProjection.queryRoot,
                 ),
             )
             return
@@ -616,7 +656,11 @@ class ValidateAuthorizationResponseCommandImpl(
                 return
             }
 
-            issuer = extractCredentialIssuer(presentation, requireNotNull(detectedCredentialFormat))
+            issuer = withFederationEntity(
+                extractCredentialIssuer(presentation, requireNotNull(detectedCredentialFormat)),
+                presentation,
+                processedArgs.trustedAuthentications,
+            )
             // Cryptographic issuer verification is the first security callback. Trust
             // validators must not receive attacker-controlled claims until the JWS has
             // verified successfully; this also keeps status lookups behind authenticity.
@@ -644,11 +688,13 @@ class ValidateAuthorizationResponseCommandImpl(
                     credentialFormat = if (compactClassification?.document?.kind == VcdmDocumentKind.PRESENTATION) null else detectedCredentialFormat,
                     presentationFormat = compactClassification?.presentationFormat,
                     expectedNonce = bindingNonce,
-                    expectedAudience = bindingRequest.clientId,
+                    expectedAudience = holderBindingClientId,
                     requireCryptographicHolderBinding = matchingQuery.require_cryptographic_holder_binding,
                     trustedAuthentications = processedArgs.trustedAuthentications,
-                    clientId = bindingRequest.clientId,
+                    clientId = holderBindingClientId,
                     responseUri = bindingRequest.responseUri,
+                    responseMode = bindingRequest.responseMode,
+                    callerOrigin = holderBindingClientId.takeIf { it.startsWith("origin:") }?.removePrefix("origin:"),
                     expectedMdocDocumentType =
                         (matchingQuery.meta["doctype_value"] as? JsonPrimitive)
                             ?.takeIf { it.isString }
@@ -725,6 +771,7 @@ class ValidateAuthorizationResponseCommandImpl(
         // every child; outer holder proof never substitutes for child issuer proofs. The
         // returned credential-format set is authoritative for DCQL matching and is only
         // available after holder binding and child authentication have succeeded.
+        var verifiedPresentationChildren: List<VerifiedVcdmCredential> = emptyList()
         if (compactClassification?.document?.kind == VcdmDocumentKind.PRESENTATION) {
             val recursiveResult =
                 verifyVcdmPresentationChildren(
@@ -732,7 +779,7 @@ class ValidateAuthorizationResponseCommandImpl(
                     classification = compactClassification,
                     queryId = queryId,
                     expectedNonce = bindingNonce,
-                    expectedAudience = bindingRequest.clientId,
+                    expectedAudience = holderBindingClientId,
                     verifierEncryptionJwkThumbprint = processedArgs.verifierEncryptionJwkThumbprint,
                     verifierId = effectiveVerifierId,
                     dcqlQueryId = effectiveDcqlQueryId,
@@ -741,6 +788,12 @@ class ValidateAuthorizationResponseCommandImpl(
                     trustedAuthentications = processedArgs.trustedAuthentications,
                     verificationMethodResolutionPolicy = processedArgs.verificationMethodResolutionPolicy,
                     issuerAlgAllowlist = persistedJwtIssuerAlgorithms,
+                    boundHolder = if (matchingQuery.require_cryptographic_holder_binding) {
+                        boundDidHolder(compactPresentationHolder(compactClassification))
+                    } else {
+                        null
+                    },
+                    matchingQuery = matchingQuery,
                 )
             rejections.addAll(recursiveResult.rejections)
             if (recursiveResult.error != null) {
@@ -759,6 +812,7 @@ class ValidateAuthorizationResponseCommandImpl(
                 errors.add("Credential format '$queryFormat' for query '$queryId' does not match any verified presentation child")
                 return
             }
+            verifiedPresentationChildren = recursiveResult.credentials
         }
 
         // VCDM 2.0 + JSON-LD: enforce the same `@context` and JSON
@@ -783,29 +837,32 @@ class ValidateAuthorizationResponseCommandImpl(
         // credential checks against the VP holder or expose that holder as the issuer of
         // an inner credential.
         if (compactClassification?.document?.kind == VcdmDocumentKind.PRESENTATION) {
-            val matchedCredentialFormat = requestedCredentialFormat
-                ?: run {
-                    errors.add("Credential format '$queryFormat' is not supported for query '$queryId'")
-                    return
-                }
-            matchedCredentials.add(
-                MatchedCredential(
-                    credentialQueryId = queryId,
-                    credentialFormat = matchedCredentialFormat,
-                    presentationFormat = compactClassification.presentationFormat,
-                    presentation = presentation,
-                    disclosedClaims = extractDisclosedClaims(
-                        presentation,
-                        matchedCredentialFormat,
+            if (requestedCredentialFormat == null) {
+                errors.add("Credential format '$queryFormat' is not supported for query '$queryId'")
+                return
+            }
+            // The VP's own envelope carries no credential claims; every verified child credential is
+            // reported as its own entry.
+            if (verifiedPresentationChildren.isEmpty()) {
+                errors.add("VCDM presentation for query '$queryId' at index $presentationIndex carries no verified credential")
+                return
+            }
+            verifiedPresentationChildren.forEach { child ->
+                accepted.add(
+                    acceptedVcdmChild(
+                        queryId, child, presentation, compactClassification.presentationFormat,
+                        statusPolicies[queryId] ?: CredentialStatusPolicy(),
                     ),
-                    issuer = null,
-                    trust = null,
-                ),
-            )
+                )
+            }
             return
         }
 
-        val resolvedIssuer = issuer ?: extractCredentialIssuer(presentation, requireNotNull(detectedCredentialFormat))
+        val resolvedIssuer = issuer ?: withFederationEntity(
+            extractCredentialIssuer(presentation, requireNotNull(detectedCredentialFormat)),
+            presentation,
+            processedArgs.trustedAuthentications,
+        )
         val resolvedTrust =
             trust
                 ?: if (detectedCredentialFormat == CredentialFormat.MSO_MDOC) {
@@ -838,13 +895,13 @@ class ValidateAuthorizationResponseCommandImpl(
         }
 
         // Credential status (revocation/suspension) check. Runs only when status verifiers are
-        // wired; otherwise skipped entirely. `extractDisclosedClaims` strips the `status` claim,
+        // wired; otherwise skipped entirely. The reported claims leave out the `status` claim,
         // so we read the full credential payload separately. A REJECT discards the presentation
         // per OID4VP §10, the same as a holder-binding failure.
         val statusInput = credentialStatusInputFor(
             presentation,
             requireNotNull(detectedCredentialFormat),
-            mdocStatusTrustAnchors(processedArgs.trustedAuthentications),
+            processedArgs.trustedAuthentications,
         )
         val statusPolicy = statusPolicies[queryId] ?: CredentialStatusPolicy()
         var statusEvaluation = CredentialStatusEvaluation(CredentialStatusDecision.SKIPPED)
@@ -872,22 +929,116 @@ class ValidateAuthorizationResponseCommandImpl(
             }
         }
 
-        // Extract disclosed claims from the presentation
-        val disclosedClaims = extractDisclosedClaims(presentation, requireNotNull(detectedCredentialFormat))
+        // Extract the claims of every credential in the presentation: one for a compact credential or an
+        // SD-JWT, one per document for an mdoc DeviceResponse.
+        val compactVcdmCredential = compactClassification?.takeIf { it.document.kind == VcdmDocumentKind.CREDENTIAL }?.document?.json
+        val typeCheckedCredential =
+            compactVcdmCredential
+                ?: if (detectedCredentialFormat == CredentialFormat.SD_JWT_VC) {
+                    // vct and vct#integrity are never selectively disclosable, so the issuer-signed JWT alone carries them.
+                    SdJwtCodec.parse(presentation.substringBefore('~') + "~").getOrElse {
+                        errors.add("SD-JWT VC for query '$queryId' at index $presentationIndex could not be parsed for its type check: ${it.message.defaultMessage}")
+                        return
+                    }.payload.fullPayload
+                } else {
+                    null
+                }
+        if (typeCheckedCredential != null) {
+            credentialTypeFailure(typeCheckedCredential, matchingQuery)?.let {
+                errors.add("Credential for query '$queryId' at index $presentationIndex rejected: $it")
+                return
+            }
+        }
+        val projections =
+            if (compactVcdmCredential != null) {
+                listOf(vcdmClaimProjection(compactVcdmCredential, mostSpecificVcdmType(compactVcdmCredential)))
+            } else {
+                extractClaimProjections(presentation, requireNotNull(detectedCredentialFormat)).getOrElse { failure ->
+                    errors.add(
+                        "Claims of the presentation for query '$queryId' at index $presentationIndex could not be read: " +
+                            failure.message.defaultMessage,
+                    )
+                    return
+                }
+            }
+        val documentIssuers = if (detectedCredentialFormat == CredentialFormat.MSO_MDOC) extractMdocIssuers(presentation) else emptyList()
+        val temporalFacts =
+            verifiedCredentialTemporalFacts(
+                statusInput?.claims?.takeIf { detectedCredentialFormat != CredentialFormat.MSO_MDOC },
+                vcdm = detectedCredentialFormat == CredentialFormat.JWT_VC_JSON || detectedCredentialFormat == CredentialFormat.JWT_VC_JSON_LD,
+            )
+        projections.forEachIndexed { index, projection ->
+            val entryIssuer = if (documentIssuers.size == projections.size) documentIssuers[index] else resolvedIssuer
+            accepted.add(
+                AcceptedCredential(
+                    MatchedCredential(
+                        credentialQueryId = queryId,
+                        credentialFormat = requireNotNull(detectedCredentialFormat),
+                        presentationFormat = null,
+                        presentation = presentation,
+                        disclosedClaims = projection.claims.toClaimValues(),
+                        issuer = entryIssuer,
+                        trust = resolvedTrust.takeIf { it.enabled || it.trustDomainIds.isNotEmpty() },
+                        verificationEvidence = verificationEvidence(presentation, entryIssuer, resolvedTrust, statusPolicy, statusEvaluation, temporalFacts),
+                        credentialType = projection.credentialType,
+                    ),
+                    projection.queryRoot,
+                ),
+            )
+        }
+    }
 
-        matchedCredentials.add(
+    /** A verified child credential of a W3C presentation, reported as its own entry. */
+    private fun acceptedVcdmChild(
+        queryId: String,
+        child: VerifiedVcdmCredential,
+        presentation: String,
+        presentationFormat: PresentationFormat?,
+        statusPolicy: CredentialStatusPolicy,
+    ): AcceptedCredential {
+        val type = mostSpecificVcdmType(child.document)
+        val projection = vcdmClaimProjection(child.document, type)
+        return AcceptedCredential(
             MatchedCredential(
                 credentialQueryId = queryId,
-                credentialFormat = requireNotNull(detectedCredentialFormat),
-                presentationFormat = null,
+                credentialFormat = child.format,
+                presentationFormat = presentationFormat,
                 presentation = presentation,
-                disclosedClaims = disclosedClaims,
-                issuer = resolvedIssuer,
-                trust = resolvedTrust.takeIf { it.enabled || it.trustDomainIds.isNotEmpty() },
-                verificationEvidence = verificationEvidence(presentation, resolvedIssuer, resolvedTrust, statusPolicy, statusEvaluation, verifiedCredentialTemporalFacts(statusInput?.claims?.takeIf { detectedCredentialFormat != CredentialFormat.MSO_MDOC }, vcdm = detectedCredentialFormat == CredentialFormat.JWT_VC_JSON || detectedCredentialFormat == CredentialFormat.JWT_VC_JSON_LD)),
+                disclosedClaims = projection.claims.toClaimValues(),
+                issuer = child.issuer,
+                trust = child.trust.takeIf { it.enabled || it.trustDomainIds.isNotEmpty() },
+                verificationEvidence = verificationEvidence(presentation, child.issuer, child.trust, statusPolicy, child.statusEvaluation, child.temporalFacts),
+                credentialType = type,
             ),
+            projection.queryRoot,
         )
     }
+
+    /**
+     * Applies the credential type constraint of [query] to an authenticated credential. Returns the
+     * reason the credential is refused, or null when it satisfies the query. Formats without a type
+     * constraint handled by [CredentialTypeMatcher] are left to their existing checks.
+     */
+    private suspend fun credentialTypeFailure(
+        credential: JsonObject,
+        query: DcqlCredentialQuery,
+    ): String? {
+        if (query.format !in TYPE_CHECKED_FORMATS) return null
+        val matches =
+            credentialTypeMatcher.matches(credential, query)
+                .getOrElse { return "credential type could not be verified: ${it.message.defaultMessage}" }
+        return if (matches) null else "credential type does not match query '${query.id}'"
+    }
+
+    /** The most specific W3C VCDM type: the last `type` entry other than `VerifiableCredential`. */
+    private fun mostSpecificVcdmType(credential: JsonObject): String? =
+        when (val type = credential["type"]) {
+            is JsonPrimitive -> type.takeIf { it.isString }?.content
+            is JsonArray -> type.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }
+                .lastOrNull { it != "VerifiableCredential" }
+                ?: type.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }.lastOrNull()
+            else -> null
+        }
 
     private fun verificationEvidence(
         presentation: String,
@@ -895,7 +1046,7 @@ class ValidateAuthorizationResponseCommandImpl(
         trust: CredentialTrustValidation,
         policy: CredentialStatusPolicy,
         evaluation: CredentialStatusEvaluation,
-        temporalFacts: com.sphereon.openid.oid4vp.verifier.VerifiedCredentialTemporalFacts?,
+        temporalFacts: VerifiedCredentialTemporalFacts?,
     ) = VerifiedCredentialEvidence(
         presentationSha256 = hash(presentation.encodeToByteArray(), DigestAlg.SHA256).encodeToBase64Url(),
         verifiedAtEpochMillis = Clock.System.now().toEpochMilliseconds(),
@@ -923,7 +1074,7 @@ class ValidateAuthorizationResponseCommandImpl(
         val callerExpectedNonce = processedArgs.expectedNonce
 
         val errors = mutableListOf<String>()
-        val matchedCredentials = mutableListOf<MatchedCredential>()
+        val accepted = mutableListOf<AcceptedCredential>()
         val rejections = mutableListOf<CredentialValidationRejection>()
         // Query IDs the wallet actually submitted a presentation for. A required credential that WAS
         // submitted but then discarded (status rejection, holder-binding failure, ...) must not also be
@@ -950,6 +1101,11 @@ class ValidateAuthorizationResponseCommandImpl(
         val persistedRequest = authorizationSession.authorizationRequest
         val bindingRequest = persistedRequest
         val bindingNonce = persistedRequest.nonce ?: callerExpectedNonce
+        val holderBindingClientId = holderBindingClientId(bindingRequest)
+        if (holderBindingClientId == null) {
+            errors.add("Digital Credentials request has no single valid expected browser origin")
+            return Ok(ValidationResult(valid = false, errors = errors))
+        }
         if (persistedRequest.clientId != originalRequest.clientId) {
             errors.add("Authorization request client_id does not match the persisted session")
         }
@@ -981,6 +1137,19 @@ class ValidateAuthorizationResponseCommandImpl(
         // blanket-cast to jsonPrimitive.
         val vpToken = parsedResponse.vpToken
 
+        // Issuers that verifier policy admits but cannot enumerate in advance (for example members of
+        // an admitted OpenID Federation) get their admitted material before any credential is verified.
+        val effectiveArgs =
+            processedArgs.credentialIssuerAuthenticationLookup?.let { lookup ->
+                val resolved =
+                    PresentedCredentialIssuers.resolve(
+                        vpToken.presentationElements.values.flatten(),
+                        processedArgs.trustedAuthentications,
+                        lookup,
+                    )
+                if (resolved.isEmpty()) processedArgs else processedArgs.copy(trustedAuthentications = processedArgs.trustedAuthentications + resolved)
+            } ?: processedArgs
+
         for ((queryId, presentationElements) in vpToken.presentationElements) {
             submittedQueryIds.add(queryId)
             // Validate the credential query ID exists in the DCQL query
@@ -989,6 +1158,12 @@ class ValidateAuthorizationResponseCommandImpl(
 
             if (matchingQuery == null) {
                 errors.add("Credential query ID '$queryId' from vp_token not found in DCQL query")
+                continue
+            }
+            // A query that does not allow `multiple` accepts one presentation, counted before any child
+            // credential of a presentation is expanded. VpToken already refuses an empty presentation list.
+            if (presentationElements.size > 1 && !matchingQuery.multiple) {
+                errors.add("Credential query '$queryId' allows one presentation but ${presentationElements.size} were submitted")
                 continue
             }
             // The persisted verifier metadata is the sole issuer-JWS algorithm authority. Thread
@@ -1002,13 +1177,16 @@ class ValidateAuthorizationResponseCommandImpl(
 
             // Validate each presentation for this query ID
             for ((presentationIndex, presentationElement) in presentationElements.withIndex()) {
+                val errorsBefore = errors.size
+                val presented = mutableListOf<AcceptedCredential>()
                 validateOnePresentation(
                     queryId = queryId,
                     presentationIndex = presentationIndex,
                     presentationElement = presentationElement,
                     matchingQuery = matchingQuery,
-                    processedArgs = processedArgs,
+                    processedArgs = effectiveArgs,
                     bindingRequest = bindingRequest,
+                    holderBindingClientId = holderBindingClientId,
                     bindingNonce = bindingNonce ?: processedArgs.expectedNonce,
                     effectiveVerifierId = effectiveVerifierId,
                     effectiveDcqlQueryId = effectiveDcqlQueryId,
@@ -1016,11 +1194,21 @@ class ValidateAuthorizationResponseCommandImpl(
                     statusPolicies = statusPolicies,
                     persistedJwtIssuerAlgorithms = persistedJwtIssuerAlgorithms,
                     errors = errors,
-                    matchedCredentials = matchedCredentials,
+                    accepted = presented,
                     rejections = rejections,
                 )
+                if (errors.size > errorsBefore) continue
+                // Every credential of the presentation must hold the claims the query asks for on its own,
+                // so one complete credential never hides an incomplete sibling, and none is kept otherwise.
+                if (presented.any { !satisfiesRequestedClaims(matchingQuery, it.queryRoot) }) {
+                    errors.add("Credential for query '$queryId' at index $presentationIndex does not contain the requested claims")
+                    continue
+                }
+                accepted.addAll(presented)
             }
         }
+
+        val matchedCredentials = accepted.map { it.matched }
 
         // Validate all required credentials are present
         val requiredCredentials =
@@ -1134,7 +1322,7 @@ class ValidateAuthorizationResponseCommandImpl(
         verificationMethodResolutionPolicy: VerificationMethodResolutionPolicy,
         issuerAlgAllowlist: Set<String>?,
         depth: Int = 0,
-        state: VcdmRecursionState = VcdmRecursionState(),
+        state: VcdmRecursionState,
     ): String? {
         if (depth > VCDM_MAX_RECURSION_DEPTH) return "maximum nested Data Integrity presentation depth exceeded"
         if (depth == 0 && state.decodedBytes == 0L) {
@@ -1249,7 +1437,8 @@ class ValidateAuthorizationResponseCommandImpl(
             }
             val verifiedChild = childResult.value.verifiedDocument
             if (childKind == VcdmDocumentKind.PRESENTATION) {
-                val nestedFailure = verifyDataIntegrityPresentationChildren(
+                val nestedHolder = childController ?: childResult.value.authenticatedControllers.singleOrNull()
+                val nestedFailure = state.withPresentationHolder(nestedHolder) { verifyDataIntegrityPresentationChildren(
                     document = verifiedChild,
                     queryId = queryId,
                     expectedDomain = expectedDomain,
@@ -1265,9 +1454,10 @@ class ValidateAuthorizationResponseCommandImpl(
                     issuerAlgAllowlist = issuerAlgAllowlist,
                     depth = depth + 1,
                     state = state,
-                )
+                ) }
                 if (nestedFailure != null) return "verifiableCredential child[$index] rejected: $nestedFailure"
             } else {
+                holderSubjectBindingFailure(verifiedChild, state)?.let { return "verifiableCredential child[$index] $it" }
                 val issuer = extractDataIntegrityIssuer(childObject) ?: extractDataIntegrityIssuer(verifiedChild)
                 val trust = validateCredentialTrustForFormat(
                     verifierId = verifierId,
@@ -1281,18 +1471,48 @@ class ValidateAuthorizationResponseCommandImpl(
                 if (trust.enabled && trust.mode == CredentialTrustValidationMode.DEFAULT_ENFORCE && trust.trusted != true) {
                     return "verifiableCredential child[$index] trust validation failed: ${trust.details ?: trust.status ?: "issuer is not trusted"}"
                 }
-                if (credentialStatusVerifiers.isNotEmpty()) {
-                    val evaluation = evaluateCredentialStatus(credentialStatusVerifiers, verifiedChild, statusPolicy)
-                    if (evaluation.decision == CredentialStatusDecision.REJECT) {
-                        state.rejections.add(statusRejection(queryId, evaluation))
-                        emitStatusRejected(queryId, evaluation)
-                        return "verifiableCredential child[$index] status rejected"
-                    }
-                }
+                val statusEvaluation =
+                    evaluateChildStatus(queryId, state) { evaluateCredentialStatus(credentialStatusVerifiers, verifiedChild, statusPolicy) }
+                        ?: return "verifiableCredential child[$index] status rejected"
+                state.credentials += dataIntegrityCredential(verifiedChild, issuer, trust, statusEvaluation)
+                credentialTypeFailure(verifiedChild, state.credentialQuery)?.let { return "verifiableCredential child[$index] $it" }
             }
         }
         return null
     }
+
+    /**
+     * Evaluates the status of one child credential of a W3C presentation. The result is `SKIPPED` when no status
+     * verifier is wired, and `null` after recording the rejection when the credential is rejected.
+     */
+    private suspend fun evaluateChildStatus(
+        queryId: String,
+        state: VcdmRecursionState,
+        evaluate: suspend () -> CredentialStatusEvaluation,
+    ): CredentialStatusEvaluation? {
+        if (credentialStatusVerifiers.isEmpty()) return CredentialStatusEvaluation(CredentialStatusDecision.SKIPPED)
+        val evaluation = evaluate()
+        if (evaluation.decision == CredentialStatusDecision.REJECT) {
+            state.rejections.add(statusRejection(queryId, evaluation))
+            emitStatusRejected(queryId, evaluation)
+            return null
+        }
+        return evaluation
+    }
+
+    private fun dataIntegrityCredential(
+        verifiedDocument: JsonObject,
+        issuer: CredentialIssuerRef?,
+        trust: CredentialTrustValidation,
+        statusEvaluation: CredentialStatusEvaluation,
+    ) = VerifiedVcdmCredential(
+        document = verifiedDocument,
+        format = CredentialFormat.LDP_VC,
+        issuer = issuer,
+        trust = trust,
+        statusEvaluation = statusEvaluation,
+        temporalFacts = verifiedCredentialTemporalFacts(verifiedDocument, vcdm = true),
+    )
 
     private fun dataIntegrityChildren(document: JsonObject): JsonElement? {
         return document["verifiableCredential"]
@@ -1307,6 +1527,52 @@ class ValidateAuthorizationResponseCommandImpl(
         is JsonPrimitive -> element.takeIf { it.isString }?.content
         is JsonObject -> (element["id"] as? JsonPrimitive)?.takeIf { it.isString }?.content
         else -> null
+    }
+
+    /**
+     * OID4VP 1.0 Cryptographic Holder Binding: the presented credential references the key whose
+     * control the holder proves in the presentation. For a DID holder:
+     *  - every VCDM credential may name the holder as a `credentialSubject.id` (VCDM 1.1 section
+     *    6.3.1: `sub` MUST represent that id; VCDM 2.0 section 4.8);
+     *  - a VCDM 2.0 credential secured with JOSE may instead confirm a holder key with `cnf`
+     *    (VC-JOSE-COSE section 4.1.3, RFC 7800), here a `kid` that is a DID URL of the holder
+     *    (VC-JOSE-COSE section 4.2). VCDM 1.1 JWTs define no `cnf`, so the caller passes no
+     *    confirmation for them.
+     * A non-DID holder authenticates only through an exactly admitted source in holder binding
+     * and is not matched here.
+     */
+    private fun boundDidHolder(holder: String?): String? = holder?.takeIf { it.startsWith("did:") }
+
+    /** The VCDM presentation holder; for a compact JWT VP the signed `iss` when `holder` is absent. */
+    private fun compactPresentationHolder(classification: VcdmClassification): String? =
+        identifier(classification.document.json["holder"] ?: classification.rawPayload["iss"])
+
+    private fun holderSubjectBindingFailure(
+        credential: JsonObject,
+        state: VcdmRecursionState,
+        vcJoseConfirmation: List<JsonObject?> = emptyList(),
+    ): String? {
+        val holder = state.boundHolder ?: return null
+        val confirmedKids = vcJoseConfirmation.mapNotNull { (it?.get("cnf") as? JsonObject)?.let { cnf -> identifier(cnf["kid"]) } }
+        if (confirmedKids.any { it.substringBefore('#') == holder }) return null
+        val subjects = when (val subject = credential["credentialSubject"]) {
+            is JsonObject -> listOf(subject)
+            is JsonArray -> subject.filterIsInstance<JsonObject>()
+            else -> emptyList()
+        }
+        if (subjects.any { identifier(it["id"]) == holder }) return null
+        return "credential is not bound to the presentation holder: no credentialSubject.id or VC-JOSE-COSE cnf.kid names it"
+    }
+
+    /** Verifies a nested presentation's children against that presentation's own holder. */
+    private inline fun <T> VcdmRecursionState.withPresentationHolder(holder: String?, block: () -> T): T {
+        val outer = boundHolder
+        boundHolder = outer?.let { boundDidHolder(holder) }
+        try {
+            return block()
+        } finally {
+            boundHolder = outer
+        }
     }
 
     /**
@@ -1325,12 +1591,23 @@ class ValidateAuthorizationResponseCommandImpl(
     ): String? {
         val resolvedClassification = classification ?: return "VCDM credential classification is missing"
         val matchingTrustedAuthentications = trustedAuthentications.filter {
-            it.purpose == TrustedAuthenticationPurpose.CREDENTIAL_ISSUER && it.controller == issuer?.issuer
+            it.purpose == TrustedAuthenticationPurpose.CREDENTIAL_ISSUER &&
+                it.controllerClaim == CredentialIssuerControllerClaim.ISSUER &&
+                it.controller == issuer?.issuer
         }
         if (matchingTrustedAuthentications.size > 1) {
             return "multiple configured issuer-authentication sources match the credential issuer"
         }
-        val configuredIssuerAuthentication = matchingTrustedAuthentications.singleOrNull()
+        // DIIP v5 Appendix B: a credential issued under a DID that names its Issuer's OpenID Federation
+        // entity in an `OpenIDFederation` termsOfUse is admitted with that entity's `vc_issuer` keys,
+        // unless the DID itself is admitted; an entity the verifier does not admit leaves the DID path.
+        val federated = FederatedCredentialIssuer.applicableSources(
+            issuer?.issuer, decodeJwtPayloadOrNull(presentation), trustedAuthentications,
+        )
+        if (federated != null && federated.sources.size > 1) {
+            return "multiple configured issuer-authentication sources match federation entity '${federated.entity}'"
+        }
+        val configuredIssuerAuthentication = federated?.sources?.single() ?: matchingTrustedAuthentications.singleOrNull()
         val header = decodeJwtHeaderOrNull(presentation) ?: return "VCDM credential JWT header is malformed"
         val alg = header.stringClaim("alg")
         if (alg == null || alg.equals("none", ignoreCase = true)) {
@@ -1428,6 +1705,20 @@ class ValidateAuthorizationResponseCommandImpl(
                     null
                 }
             }
+        // VC-JOSE-COSE section 4.2: the issuer kid is the absolute URL of the verification method that
+        // signed. When the admitted source is the issuer's DID itself, verify with exactly that method
+        // (already checked above to be a DID URL of the JWT iss DID), never with the document's
+        // default key: a DID document can list several keys for different purposes.
+        val issuerIdentifier =
+            configuredIssuerAuthentication?.identifier.let { source ->
+                if (source is ExternalIdentifierDidOpts && issuerDid != null && source.identifier == issuerDid &&
+                    kid != null && kid.startsWith("$issuerDid#")
+                ) {
+                    ExternalIdentifierDidOpts(identifier = kid)
+                } else {
+                    source
+                }
+            }
         val verification =
             try {
                 // The configured source is authoritative. In particular, an x5c header is only
@@ -1436,7 +1727,7 @@ class ValidateAuthorizationResponseCommandImpl(
                 verifyJwsCommand.execute(
                     VerifyJwsArgs(
                         jws = JwsCompact(presentation),
-                        identifier = configuredIssuerAuthentication?.identifier,
+                        identifier = issuerIdentifier,
                         // A configured source is authoritative. In particular, never fall back to
                         // a token-supplied x5c-derived key when the verifier has admitted a peer
                         // source for this issuer.
@@ -1478,8 +1769,11 @@ class ValidateAuthorizationResponseCommandImpl(
         trustedAuthentications: List<TrustedAuthenticationResolution>,
         verificationMethodResolutionPolicy: VerificationMethodResolutionPolicy,
         issuerAlgAllowlist: Set<String>?,
+        boundHolder: String?,
+        matchingQuery: DcqlCredentialQuery,
     ): VcdmVerifiedChildren {
-        val state = VcdmRecursionState()
+        val state = VcdmRecursionState(matchingQuery)
+        state.boundHolder = boundHolder
         state.artifacts += artifact
         state.decodedBytes = artifact.encodeToByteArray().size.toLong()
         if (state.decodedBytes > VCDM_MAX_DECODED_BYTES) {
@@ -1490,7 +1784,7 @@ class ValidateAuthorizationResponseCommandImpl(
             verifierId, dcqlQueryId, templateId, statusPolicy, trustedAuthentications,
             verificationMethodResolutionPolicy, issuerAlgAllowlist, depth = 0, state = state,
         )
-        return VcdmVerifiedChildren(state.credentialFormats, error, state.rejections.toList())
+        return VcdmVerifiedChildren(state.credentialFormats, error, state.rejections.toList(), state.credentials.toList())
     }
 
     private suspend fun verifyVcdmPresentationChildrenRecursive(
@@ -1648,6 +1942,7 @@ class ValidateAuthorizationResponseCommandImpl(
         if (verification.isErr) return "VCDM 1.1 JSON child Data Integrity verification failed: ${verification.error.message.defaultMessage}"
         val verifiedDocument = verification.value.verifiedDocument
         validateVerifiedVcdmCredentialProfile(verifiedDocument, VcdmVersion.V1_1)?.let { return it }
+        holderSubjectBindingFailure(verifiedDocument, state)?.let { return "VCDM 1.1 JSON child $it" }
         val issuer = extractDataIntegrityIssuer(child) ?: extractDataIntegrityIssuer(verifiedDocument)
         val trust = validateCredentialTrustForFormat(
             verifierId = verifierId,
@@ -1661,15 +1956,12 @@ class ValidateAuthorizationResponseCommandImpl(
         if (trust.enabled && trust.mode == CredentialTrustValidationMode.DEFAULT_ENFORCE && trust.trusted != true) {
             return "VCDM 1.1 JSON child trust validation failed: ${trust.details ?: trust.status ?: "issuer is not trusted"}"
         }
-        if (credentialStatusVerifiers.isNotEmpty()) {
-            val evaluation = evaluateCredentialStatus(credentialStatusVerifiers, verifiedDocument, statusPolicy)
-            if (evaluation.decision == CredentialStatusDecision.REJECT) {
-                state.rejections.add(statusRejection(queryId, evaluation))
-                emitStatusRejected(queryId, evaluation)
-                return "VCDM 1.1 JSON child status rejected"
-            }
-        }
+        val statusEvaluation =
+            evaluateChildStatus(queryId, state) { evaluateCredentialStatus(credentialStatusVerifiers, verifiedDocument, statusPolicy) }
+                ?: return "VCDM 1.1 JSON child status rejected"
+        credentialTypeFailure(verifiedDocument, state.credentialQuery)?.let { return "VCDM 1.1 JSON child $it" }
         state.credentialFormats += CredentialFormat.LDP_VC
+        state.credentials += dataIntegrityCredential(verifiedDocument, issuer, trust, statusEvaluation)
         return null
     }
 
@@ -1821,8 +2113,12 @@ class ValidateAuthorizationResponseCommandImpl(
             return "direct Data Integrity holderless VCDM 2.0 presentation requires an authenticated controller"
         }
         val verifiedChild = verification.value.verifiedDocument
+        if (classification.kind == VcdmDocumentKind.CREDENTIAL) {
+            holderSubjectBindingFailure(verifiedChild, state)?.let { return "direct Data Integrity child $it" }
+        }
         if (classification.kind == VcdmDocumentKind.PRESENTATION) {
-            return verifyDataIntegrityPresentationChildren(
+            return state.withPresentationHolder(controller ?: verification.value.authenticatedControllers.singleOrNull()) {
+                verifyDataIntegrityPresentationChildren(
                 document = verifiedChild,
                 queryId = queryId,
                 expectedDomain = expectedAudience,
@@ -1839,6 +2135,7 @@ class ValidateAuthorizationResponseCommandImpl(
                 depth = depth + 1,
                 state = state,
             )
+            }
         }
 
         val issuer = extractDataIntegrityIssuer(child) ?: extractDataIntegrityIssuer(verifiedChild)
@@ -1854,16 +2151,13 @@ class ValidateAuthorizationResponseCommandImpl(
         if (trust.enabled && trust.mode == CredentialTrustValidationMode.DEFAULT_ENFORCE && trust.trusted != true) {
             return "direct Data Integrity child trust validation failed: ${trust.details ?: trust.status ?: "issuer is not trusted"}"
         }
-        if (credentialStatusVerifiers.isNotEmpty()) {
-            val evaluation = evaluateCredentialStatus(credentialStatusVerifiers, verifiedChild, statusPolicy)
-            if (evaluation.decision == CredentialStatusDecision.REJECT) {
-                state.rejections.add(statusRejection(queryId, evaluation))
-                emitStatusRejected(queryId, evaluation)
-                return "direct Data Integrity child status rejected"
-            }
-        }
+        val statusEvaluation =
+            evaluateChildStatus(queryId, state) { evaluateCredentialStatus(credentialStatusVerifiers, verifiedChild, statusPolicy) }
+                ?: return "direct Data Integrity child status rejected"
         if (classification.kind == VcdmDocumentKind.CREDENTIAL) {
+            credentialTypeFailure(verifiedChild, state.credentialQuery)?.let { return "direct Data Integrity child $it" }
             state.credentialFormats += CredentialFormat.LDP_VC
+            state.credentials += dataIntegrityCredential(verifiedChild, issuer, trust, statusEvaluation)
         }
         return null
     }
@@ -1926,11 +2220,13 @@ class ValidateAuthorizationResponseCommandImpl(
             }
         if (holderBinding.isErr) return "nested VCDM presentation holder verification failed: ${holderBinding.error.message.defaultMessage}"
         if (!holderBinding.value.verified) return "nested VCDM presentation nonce/audience binding failed"
-        return verifyVcdmPresentationChildrenRecursive(
-            classification, queryId, expectedNonce, expectedAudience, verifierEncryptionJwkThumbprint,
-            verifierId, dcqlQueryId, templateId, statusPolicy, trustedAuthentications,
-            verificationMethodResolutionPolicy, issuerAlgAllowlist, depth, state,
-        )
+        return state.withPresentationHolder(compactPresentationHolder(classification)) {
+            verifyVcdmPresentationChildrenRecursive(
+                classification, queryId, expectedNonce, expectedAudience, verifierEncryptionJwkThumbprint,
+                verifierId, dcqlQueryId, templateId, statusPolicy, trustedAuthentications,
+                verificationMethodResolutionPolicy, issuerAlgAllowlist, depth, state,
+            )
+        }
     }
 
     private suspend fun verifyVcdmChildCredential(
@@ -1946,25 +2242,32 @@ class ValidateAuthorizationResponseCommandImpl(
         state: VcdmRecursionState,
     ): String? {
         val format = requireNotNull(classification.credentialFormat)
-        val issuer = extractCredentialIssuer(compact, format)
+        val issuer = withFederationEntity(extractCredentialIssuer(compact, format), compact, trustedAuthentications)
         // Verify the child issuer proof before invoking trust or status callbacks. The outer VP
         // holder is never reused as an issuer for this child.
         verifyVcdmCredential(compact, classification, issuer, trustedAuthentications, issuerAlgAllowlist)?.let { return "child credential rejected: $it" }
+        val vcJoseConfirmation =
+            if (classification.document.version == VcdmVersion.V2_0) listOf(classification.rawPayload, classification.protectedHeader) else emptyList()
+        holderSubjectBindingFailure(classification.document.json, state, vcJoseConfirmation)?.let { return "child credential rejected: $it" }
         val trust = validateCredentialTrust(
             verifierId, dcqlQueryId, templateId, queryId, compact, format, issuer,
         )
         if (trust.enabled && trust.mode == CredentialTrustValidationMode.DEFAULT_ENFORCE && trust.trusted != true) {
             return "child credential trust validation failed: ${trust.details ?: trust.status ?: "issuer is not trusted"}"
         }
-        if (credentialStatusVerifiers.isNotEmpty()) {
-            val input = credentialStatusInputFor(compact, format) ?: CredentialStatusInput()
-            val evaluation = evaluateCredentialStatus(credentialStatusVerifiers, input, statusPolicy)
-            if (evaluation.decision == CredentialStatusDecision.REJECT) {
-                state.rejections.add(statusRejection(queryId, evaluation))
-                emitStatusRejected(queryId, evaluation)
-                return "child credential status rejected"
-            }
-        }
+        val statusEvaluation =
+            evaluateChildStatus(queryId, state) { evaluateCredentialStatus(credentialStatusVerifiers, (credentialStatusInputFor(compact, format) ?: CredentialStatusInput()), statusPolicy) }
+                ?: return "child credential status rejected"
+        credentialTypeFailure(classification.document.json, state.credentialQuery)?.let { return "child credential rejected: $it" }
+        state.credentials +=
+            VerifiedVcdmCredential(
+                document = classification.document.json,
+                format = format,
+                issuer = issuer,
+                trust = trust,
+                statusEvaluation = statusEvaluation,
+                temporalFacts = verifiedCredentialTemporalFacts(classification.rawPayload, vcdm = true),
+            )
         return null
     }
 
@@ -1983,12 +2286,33 @@ class ValidateAuthorizationResponseCommandImpl(
         val error: String? = null,
         /** Typed status rejections collected from nested children, under the parent query identity. */
         val rejections: List<CredentialValidationRejection> = emptyList(),
+        /** Every child credential that passed all of its own checks, in presentation order. */
+        val credentials: List<VerifiedVcdmCredential> = emptyList(),
     )
 
-    private class VcdmRecursionState {
+    /** A credential inside a W3C presentation that passed its own proof, trust and status checks. */
+    private class VerifiedVcdmCredential(
+        val document: JsonObject,
+        val format: CredentialFormat,
+        val issuer: CredentialIssuerRef?,
+        val trust: CredentialTrustValidation,
+        val statusEvaluation: CredentialStatusEvaluation,
+        val temporalFacts: VerifiedCredentialTemporalFacts?,
+    )
+
+    private class VcdmRecursionState(
+        /** The query every credential in the presentation must satisfy on its own. */
+        val credentialQuery: DcqlCredentialQuery,
+    ) {
+        /**
+         * The DID holder of the presentation whose credentials are being verified, when that
+         * presentation must carry Cryptographic Holder Binding; null when no subject binding applies.
+         */
+        var boundHolder: String? = null
         val artifacts: MutableSet<String> = mutableSetOf()
         val rejections: MutableList<CredentialValidationRejection> = mutableListOf()
         val credentialFormats: MutableSet<CredentialFormat> = linkedSetOf()
+        val credentials: MutableList<VerifiedVcdmCredential> = mutableListOf()
         var nodes: Int = 1
         var decodedBytes: Long = 0
     }
@@ -2205,65 +2529,43 @@ class ValidateAuthorizationResponseCommandImpl(
     private fun formatJsonLdError(error: JsonLdError): String = "${error.code}: ${error.message.defaultMessage}"
 
     /**
-     * Extract disclosed claims from a credential presentation.
+     * Extract the claims of the credentials in a presentation, typed as they were issued.
      *
-     * - SD-JWT: parses the compact serialization and resolves all disclosures into native values.
-     * - mso_mdoc: CBOR-decodes the `DeviceResponse` and walks each document's issuer-signed
-     *   namespaces, surfacing every disclosed `IssuerSignedItem` as a claim.
+     * - SD-JWT: parses the compact serialization and resolves all disclosures. One projection.
+     * - mso_mdoc: CBOR-decodes the `DeviceResponse` and reports each document on its own, with every
+     *   disclosed `IssuerSignedItem` converted to JSON from its original CBOR.
      *
      * Claim-key shape: mdoc data elements are namespace-qualified, so keys are
      * `<namespace>.<elementIdentifier>` (e.g. `org.iso.18013.5.1.given_name`). This mirrors the
      * mdoc DCQL `claims[].path` representation `[namespace, elementIdentifier]` (a two-segment
      * path joined by `.`), keeping the verifier's normalized claims map aligned with the query
-     * paths used to request them. Values are kept consistent with the SD-JWT mapping: primitives
-     * (String/Long/Boolean/Double) pass through; anything richer is rendered via toString().
+     * paths used to request them.
+     *
+     * A presentation whose claims cannot be read is an error, never an empty claims map.
      */
-    internal fun extractDisclosedClaims(
+    internal fun extractClaimProjections(
         presentation: String,
         format: CredentialFormat,
-    ): Map<String, Any?> =
+    ): IdkResult<List<CredentialClaimProjection>, IdkError> =
         when (format) {
-            CredentialFormat.SD_JWT_VC, CredentialFormat.W3C_VC_SD_JWT -> {
-                SdJwtCodec.parse(presentation).fold(
-                    success = { sdJwt ->
-                        // fullPayload has all disclosures resolved into a JsonObject
-                        val payload = sdJwt.payload.fullPayload
-                        // Filter out SD-JWT internal fields and unwrap JsonPrimitive to native types
-                        val internalKeys = setOf("_sd", "_sd_alg", "cnf", "iss", "iat", "exp", "nbf", "vct", "status")
-                        payload.filterKeys { it !in internalKeys }.mapValues { (_, element) ->
-                            when (element) {
-                                is JsonPrimitive -> element.booleanOrNull ?: element.longOrNull ?: element.doubleOrNull ?: element.contentOrNull
-                                else -> element.toString()
-                            }
-                        }
-                    },
-                    failure = { error ->
-                        log.warn("Failed to parse SD-JWT presentation for claim extraction: ${error.message}")
-                        emptyMap()
-                    },
-                )
-            }
+            CredentialFormat.SD_JWT_VC, CredentialFormat.W3C_VC_SD_JWT ->
+                SdJwtCodec.parse(presentation).map { sdJwt -> listOf(sdJwtClaimProjection(sdJwt.payload.fullPayload)) }
 
-            CredentialFormat.MSO_MDOC -> {
-                extractMdocClaims(presentation)
-            }
+            CredentialFormat.MSO_MDOC -> mdocClaimProjections(presentation)
 
-            else -> {
-                log.debug("Claim extraction not implemented for format: ${format.value}")
-                emptyMap()
-            }
+            else -> Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Claim extraction is not supported for format ${format.value}"))
         }
 
     /**
      * Full credential payload (including the `status` / `credentialStatus` claims that
-     * [extractDisclosedClaims] deliberately strips) for status-list verification. SD-JWT → the
+     * the reported claims deliberately leave out) for status-list verification. SD-JWT → the
      * resolved full payload; compact JWT-VC → the decoded JWT body; mdoc → a metadata-only status
      * reference extracted from the authenticated MSO (never a disclosed namespace claim).
      */
     private fun credentialStatusInputFor(
         presentation: String,
         format: CredentialFormat,
-        mdocTrustAnchors: List<String>? = null,
+        mdocAuthentications: List<TrustedAuthenticationResolution> = emptyList(),
     ): CredentialStatusInput? =
         when (format) {
             CredentialFormat.SD_JWT_VC, CredentialFormat.W3C_VC_SD_JWT -> {
@@ -2280,7 +2582,7 @@ class ValidateAuthorizationResponseCommandImpl(
             }
 
             CredentialFormat.MSO_MDOC -> {
-                extractMdocStatusMetadata(presentation, mdocTrustAnchors)?.let { metadata ->
+                extractMdocStatusMetadata(presentation, mdocAuthentications)?.let { metadata ->
                     CredentialStatusInput(metadata = metadata)
                 }
             }
@@ -2295,19 +2597,20 @@ class ValidateAuthorizationResponseCommandImpl(
      * claim shape. This is deliberately metadata-only: MSO status never becomes an ordinary
      * disclosed namespace claim.
      */
-    private fun extractMdocStatusMetadata(presentation: String, trustAnchors: List<String>?): CredentialStatusMetadata? {
+    private fun extractMdocStatusMetadata(presentation: String, authentications: List<TrustedAuthenticationResolution>): CredentialStatusMetadata? {
         val deviceResponseBytes = runCatching { presentation.decodeFromBase64Url() }.getOrNull() ?: return null
         val response = deviceResponseCborCodec.decode(deviceResponseBytes).getOrNull()?.value ?: return null
         val statuses = response.documents
             ?.asSequence()
             ?.mapNotNull { document ->
                 val payload = document.issuerSigned.issuerAuth.payload?.value ?: return@mapNotNull null
-                mobileSecurityObjectCborCodec.decode(payload).getOrNull()?.value?.status
+                mobileSecurityObjectCborCodec.decode(payload).getOrNull()?.value?.status?.let { it to document.docType.toString() }
             }
             ?.toList()
             .orEmpty()
         if (statuses.isEmpty()) return null
-        val references = statuses.flatMap { status ->
+        val references = statuses.flatMap { (status, documentType) ->
+            val trustAnchors = mdocStatusTrustAnchors(authentications, documentType)
             buildList {
                 status.statusList?.let { statusList ->
                     add(
@@ -2470,6 +2773,26 @@ class ValidateAuthorizationResponseCommandImpl(
             }
         }
 
+    /**
+     * For a credential issued under a DID that is verified with the `vc_issuer` keys of the OpenID
+     * Federation entity it names (DIIP v5, Appendix B), the trust evidence is that entity: it is the
+     * admitted controller, while the credential keeps its DID as issuer. Any other credential keeps its
+     * extracted issuer reference.
+     */
+    private fun withFederationEntity(
+        issuer: CredentialIssuerRef?,
+        compact: String,
+        trustedAuthentications: List<TrustedAuthenticationResolution>,
+    ): CredentialIssuerRef? {
+        val ref = issuer ?: return null
+        val federated = FederatedCredentialIssuer.applicableSources(
+            ref.issuer, decodeJwtPayloadOrNull(compact.substringBefore('~')), trustedAuthentications,
+        ) ?: return ref
+        // Without exactly one admitted source the credential has already failed issuer verification.
+        if (federated.sources.size != 1) return ref
+        return ref.copy(method = FEDERATION_ISSUER_METHOD, oidfedEntityId = federated.entity)
+    }
+
     private fun extractDataIntegrityIssuer(document: JsonObject): CredentialIssuerRef? {
         val issuerElement = document["issuer"]
             ?: (document["vc"] as? JsonObject)?.get("issuer")
@@ -2484,16 +2807,6 @@ class ValidateAuthorizationResponseCommandImpl(
             method = if (did != null) "did" else null,
             did = did,
         )
-    }
-
-    private fun extractDataIntegrityClaims(document: JsonObject): Map<String, Any?> {
-        val subject = document["credentialSubject"] as? JsonObject ?: return emptyMap()
-        return subject.mapValues { (_, value) ->
-            when (value) {
-                is JsonPrimitive -> value.booleanOrNull ?: value.longOrNull ?: value.doubleOrNull ?: value.contentOrNull
-                else -> value.toString()
-            }
-        }
     }
 
     private fun extractJwtIssuer(compactJwt: String): CredentialIssuerRef? {
@@ -2513,7 +2826,7 @@ class ValidateAuthorizationResponseCommandImpl(
             when {
                 x5c.isNotEmpty() -> "x509"
                 did != null -> "did"
-                oidfedEntityId != null -> "openid_federation"
+                oidfedEntityId != null -> FEDERATION_ISSUER_METHOD
                 issuer?.isHttpUrl() == true -> "issuer_uri"
                 else -> null
             }
@@ -2617,62 +2930,38 @@ class ValidateAuthorizationResponseCommandImpl(
     }
 
     /**
-     * Extract the disclosed issuer-signed data elements from an mso_mdoc presentation.
+     * One projection per document of an mso_mdoc presentation.
      *
-     * The presentation wire form is base64url(CBOR(DeviceResponse)) per ISO 18013-7 §B.3.
-     * Holder binding has already been verified by the time this runs, so the CBOR decode is a
-     * pure structural read. Every `IssuerSignedItem` across every document and namespace is
-     * surfaced under the `<namespace>.<elementIdentifier>` key.
+     * The presentation wire form is base64url(CBOR(DeviceResponse)) per ISO 18013-7 §B.3. Holder binding
+     * has already been verified by the time this runs, so the CBOR decode is a pure structural read.
+     * Each `IssuerSignedItem` value is converted from the item's original CBOR bytes, because the
+     * decoded Kotlin value no longer knows its tags.
      */
-    private fun extractMdocClaims(presentation: String): Map<String, Any?> {
+    private fun mdocClaimProjections(presentation: String): IdkResult<List<CredentialClaimProjection>, IdkError> {
         val deviceResponseBytes =
             try {
                 presentation.decodeFromBase64Url()
             } catch (expected: IllegalArgumentException) {
-                log.warn("Failed to base64url-decode mso_mdoc presentation for claim extraction: ${expected.message}")
-                return emptyMap()
+                return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "The mso_mdoc presentation is not base64url: ${expected.message}", throwable = expected))
             }
-
-        val deviceResponse =
-            deviceResponseCborCodec
-                .decode(deviceResponseBytes)
-                .getOrElse { error ->
-                    log.warn("Failed to CBOR-decode DeviceResponse for claim extraction: ${error.message.defaultMessage}")
-                    return emptyMap()
-                }.value
-
+        val deviceResponse = deviceResponseCborCodec.decode(deviceResponseBytes).getOrElse { return Err(it) }.value
         val documents = deviceResponse.documents
         if (documents.isNullOrEmpty()) {
-            log.debug("mso_mdoc DeviceResponse contains no documents; no claims to extract")
-            return emptyMap()
+            return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "The mso_mdoc DeviceResponse contains no documents"))
         }
-
-        val claims = mutableMapOf<String, Any?>()
-        documents.forEach { document ->
-            val nameSpaces = document.issuerSigned.getNameSpaces() ?: return@forEach
-            nameSpaces.forEach { nameSpace ->
-                val items = document.issuerSigned.getIssuerSignedItems(nameSpace.toString()) ?: return@forEach
-                items.forEach { item ->
-                    val key = "$nameSpace.${item.elementIdentifier}"
-                    claims[key] = unwrapMdocElementValue(item.elementValue)
+        val projections = mutableListOf<CredentialClaimProjection>()
+        for (document in documents) {
+            val elements = mutableListOf<MdocElement>()
+            for (nameSpace in document.issuerSigned.getNameSpaces().orEmpty()) {
+                for (item in document.issuerSigned.getNamespace(nameSpace.toString()).orEmpty()) {
+                    val value = mdocElementValue(item.value.taggedItem.value, cborParser).getOrElse { return Err(it) }
+                    elements += MdocElement(nameSpace.toString(), item.data().elementIdentifier.toString(), value)
                 }
             }
+            projections += mdocDocumentProjection(document.docType.toString(), elements)
         }
-        return claims
+        return Ok(projections)
     }
-
-    /**
-     * Render a CBOR-decoded mdoc element value into a serialization-friendly value consistent
-     * with how SD-JWT claims land in the map. The codec already unwraps each CBOR item to its
-     * underlying Kotlin value, so native primitives pass through; richer structures (nested
-     * maps/arrays, byte strings, tagged dates) are rendered via toString().
-     */
-    private fun unwrapMdocElementValue(value: Any?): Any? =
-        when (value) {
-            null -> null
-            is String, is Boolean, is Long, is Int, is Double, is Float -> value
-            else -> value.toString()
-        }
 
     private companion object {
         /**
@@ -2680,6 +2969,10 @@ class ValidateAuthorizationResponseCommandImpl(
          * the only signal separating that rejection from a required-but-absent one.
          */
         const val UNRESOLVABLE_STATUS_REASON_PREFIX = "status could not be resolved"
+
+        /** Query formats whose credential type constraint is enforced through [CredentialTypeMatcher]. */
+        val TYPE_CHECKED_FORMATS: Set<String> =
+            setOf(CredentialFormat.SD_JWT_VC.value, CredentialFormat.JWT_VC_JSON.value, CredentialFormat.LDP_VC.value)
 
         const val MDOC_MIN_ENCODED_LENGTH = 20
         const val VCDM_MAX_RECURSION_DEPTH = 4
@@ -2690,6 +2983,9 @@ class ValidateAuthorizationResponseCommandImpl(
         const val VCDM2_VC_DATA_URI_PREFIX = "data:application/vc+jwt,"
         const val VCDM2_VP_DATA_URI_PREFIX = "data:application/vp+jwt,"
         const val LDP_VC_FORMAT = "ldp_vc"
+
+        /** [CredentialIssuerRef.method] of an issuer admitted as an OpenID Federation entity. */
+        const val FEDERATION_ISSUER_METHOD = "openid_federation"
         val VCDM2_ENVELOPED_TYPES = setOf(VCDM2_ENVELOPED_VC_TYPE, VCDM2_ENVELOPED_VP_TYPE)
         val JSON_LENIENT =
             Json {
@@ -2705,10 +3001,19 @@ class ValidateAuthorizationResponseCommandImpl(
  * roots that may verify it. Holder authentications and non-X.509 issuer evidence never contribute;
  * null when the session resolved no X.509 issuer evidence, so the status verifier keeps its own roots.
  */
-internal fun mdocStatusTrustAnchors(trustedAuthentications: List<TrustedAuthenticationResolution>): List<String>? =
-    trustedAuthentications
-        .filter { it.purpose == TrustedAuthenticationPurpose.CREDENTIAL_ISSUER }
+internal fun mdocStatusTrustAnchors(
+    trustedAuthentications: List<TrustedAuthenticationResolution>,
+    documentType: String? = null,
+): List<String>? {
+    val issuerSources = trustedAuthentications.filter {
+        it.purpose == TrustedAuthenticationPurpose.CREDENTIAL_ISSUER && it.identifier is ExternalIdentifierX5cOpts
+    }
+    if (issuerSources.isEmpty()) return null
+    // An explicitly constrained source with no match yields an empty trust set, not null:
+    // null would allow the status verifier to fall back to unrelated configured roots.
+    return issuerSources
+        .filter { it.documentTypes == null || (documentType != null && documentType in it.documentTypes!!) }
         .mapNotNull { it.identifier as? ExternalIdentifierX5cOpts }
         .flatMap { it.identifier }
         .distinct()
-        .takeIf { it.isNotEmpty() }
+}

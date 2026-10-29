@@ -925,6 +925,9 @@ class SoftwareKmsProviderImpl(
      * @return The generated signature as a byte array.
      * @throws IllegalArgumentException If the private key is not provided or not supported.
      */
+    override fun rawSignatureEncoding(algorithm: SignatureAlgorithm): com.sphereon.crypto.core.kms.command.SignatureEncoding? =
+        com.sphereon.crypto.core.kms.command.SignatureEncoding.RAW
+
     override suspend fun createRawSignature(
         keyInfo: KeyInfoType<*>,
         input: ByteArray,

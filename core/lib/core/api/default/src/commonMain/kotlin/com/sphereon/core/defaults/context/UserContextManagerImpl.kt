@@ -322,9 +322,28 @@ class UserContextManagerImpl(
             makeActive = makeActive,
         ).instance
 
+    @Deprecated(
+        message = "Use createOrGet(tenantAware, principalAware, principalType, makeActive) instead to avoid principal classification and tenant boundary ambiguities.",
+    )
     override fun createOrGetFromData(
         tenantData: TenantContextData,
         principalValue: Any?,
+        makeActive: Boolean,
+    ): UserContextInstance =
+        createOrGetFromData(
+            tenantData = tenantData,
+            principalValue = principalValue,
+            principalType = PrincipalType.USER,
+            makeActive = makeActive,
+        )
+
+    @Deprecated(
+        message = "Use createOrGet(tenantAware, principalAware, principalType, makeActive) instead to avoid principal classification and tenant boundary ambiguities.",
+    )
+    override fun createOrGetFromData(
+        tenantData: TenantContextData,
+        principalValue: Any?,
+        principalType: PrincipalType,
         makeActive: Boolean,
     ): UserContextInstance {
         val principalAware =
@@ -334,7 +353,7 @@ class UserContextManagerImpl(
         return createOrGetContextInternal(
             tenantContextData = tenantData,
             principal = principalAware,
-            principalType = PrincipalType.USER,
+            principalType = principalType,
             makeActive = makeActive,
         ).instance
     }

@@ -154,7 +154,7 @@ class HandleDirectPostResponseCommandImpl(
         val tenantId = runCatching { execution.sessionContext.context.tenant.tenantId }.getOrNull() ?: return
 
         // Pull the verifier session by state for the boundInvitationToken etc.
-        val correlationId = args.originalRequest.state
+        val correlationId = args.sessionCorrelationId ?: args.originalRequest.state
         val session =
             if (!correlationId.isNullOrBlank()) {
                 authorizationSessionStore.get(correlationId).fold(success = { it }, failure = { null })
@@ -206,7 +206,7 @@ class HandleDirectPostResponseCommandImpl(
     ): IdkResult<DirectPostHandledResponse, IdkError> {
         val processedArgs = applyDuring(args)
         val historyCorrelationId =
-            processedArgs.originalRequest.state?.takeIf { it.isNotBlank() }
+            (processedArgs.sessionCorrelationId ?: processedArgs.originalRequest.state)?.takeIf { it.isNotBlank() }
                 ?: return Err(
                     IdkError.ILLEGAL_ARGUMENT_ERROR(
                         message = "OID4VP direct_post response has no session correlation state",
@@ -286,6 +286,7 @@ class HandleDirectPostResponseCommandImpl(
             ValidateAuthorizationResponseArgs(
                 parsedResponse = parsedResponse,
                 originalRequest = processedArgs.originalRequest,
+                sessionCorrelationId = processedArgs.sessionCorrelationId,
                 dcqlQuery = processedArgs.dcqlQuery,
                 expectedNonce = processedArgs.originalRequest.nonce ?: "",
                 verifierEncryptionJwkThumbprint = processedArgs.verifierEncryptionJwkThumbprint,
@@ -293,6 +294,7 @@ class HandleDirectPostResponseCommandImpl(
                 dcqlQueryId = processedArgs.dcqlQueryId,
                 templateId = processedArgs.templateId,
                 trustedAuthentications = processedArgs.trustedAuthentications,
+                credentialIssuerAuthenticationLookup = processedArgs.credentialIssuerAuthenticationLookup,
                 verificationMethodResolutionPolicy = processedArgs.verificationMethodResolutionPolicy,
                 mdocDocumentResponseDecryptionKey = processedArgs.mdocDocumentResponseDecryptionKey,
                 mdocDocumentResponseEncryptionParameters = processedArgs.mdocDocumentResponseEncryptionParameters,

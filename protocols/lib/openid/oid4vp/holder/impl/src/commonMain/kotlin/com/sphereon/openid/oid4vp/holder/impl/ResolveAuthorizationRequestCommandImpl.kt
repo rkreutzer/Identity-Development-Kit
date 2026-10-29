@@ -32,6 +32,9 @@ import com.sphereon.di.session.SessionScope
 import com.sphereon.mdoc.oid4vp.Oid4VPPresentationDefinition
 import com.sphereon.mdoc.oid4vp.assertedPathEntry
 import com.sphereon.oauth2.common.model.AuthorizationRequest
+import com.sphereon.oauth2.common.model.AuthorizationErrorResponse
+import com.sphereon.openid.oid4vp.holder.validation.validateOid4vpAuthorizationRequest
+import io.konform.validation.Invalid
 import com.sphereon.openid.oid4vp.common.ClientIdScheme
 import com.sphereon.openid.oid4vp.common.JarSignerMethod
 import com.sphereon.openid.oid4vp.common.ParseClientIdArgs
@@ -375,6 +378,11 @@ class ResolveAuthorizationRequestCommandImpl(
                 dcqlQuery = dcqlQuery,
                 clientMetadata = resolvedMetadata.metadata,
                 verifierInfo = verifierInfoResult,
+                authorizationError = if (validateOid4vpAuthorizationRequest(processedArgs) is Invalid) {
+                    AuthorizationErrorResponse(error = "invalid_request", state = processedArgs.state)
+                } else {
+                    null
+                },
                 transactionData = transactionData,
                 verifierAttestations = verifierAttestations,
             ),

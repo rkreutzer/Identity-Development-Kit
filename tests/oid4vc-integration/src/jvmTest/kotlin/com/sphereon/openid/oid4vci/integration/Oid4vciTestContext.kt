@@ -1,7 +1,11 @@
 package com.sphereon.openid.oid4vci.integration
 
+import com.sphereon.core.api.IdkResult
+import com.sphereon.core.api.Ok
 import com.sphereon.core.api.conf.DefaultAppMapPropertySource
 import com.sphereon.core.api.conf.DefaultPrincipalMapPropertySource
+import com.sphereon.core.api.conf.DefaultTenantMapPropertySource
+import com.sphereon.core.api.error.IdkError
 import com.sphereon.core.api.session.asCoreApiServiceGraph
 import com.sphereon.crypto.core.KeyInfo
 import com.sphereon.crypto.core.KeyType
@@ -13,11 +17,21 @@ import com.sphereon.di.app.AppGraph
 import com.sphereon.di.context.MutableResolvedTenantIdProvider
 import com.sphereon.di.session.SessionInstance
 import com.sphereon.di.session.SessionScope
+import com.sphereon.oauth2.common.config.MutableOAuth2ServerInstanceIdProvider
+import com.sphereon.oauth2.common.model.ClientAuthenticationConfig
+import com.sphereon.oauth2.common.model.ClientAuthenticationMethod
+import com.sphereon.oauth2.common.model.GrantType
+import com.sphereon.oauth2.server.authorization.model.ClientRegistration
+import com.sphereon.oauth2.server.authorization.model.ClientType
+import com.sphereon.oauth2.server.authorization.storage.ClientRegistry
 import com.sphereon.oauth2.server.authorization.storage.OAuth2SigningKey
 import com.sphereon.oauth2.server.authorization.storage.OAuth2SigningKeyState
 import com.sphereon.oauth2.server.authorization.storage.SigningKeyStore
 import com.sphereon.openid.oid4vci.issuer.config.MutableOid4vciIssuerInstanceIdProvider
 import com.sphereon.openid.oid4vci.issuer.config.Oid4vciIssuerProtocolConfig
+import com.sphereon.wallet.interaction.protocol.oid4vci.Oid4vciTokenEndpointProofRequest
+import com.sphereon.wallet.interaction.protocol.oid4vci.Oid4vciTokenEndpointProofs
+import com.sphereon.wallet.interaction.protocol.oid4vci.Oid4vciTokenEndpointProofsProvider
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesTo
 import kotlin.time.Clock
@@ -50,14 +64,7 @@ class Oid4vciTestContext(
             "${com.sphereon.oauth2.common.config.OAuth2ServerInstanceConfig.CONFIG_PREFIX}.default.grant-types-enabled",
             "authorization_code,client_credentials,refresh_token,urn:ietf:params:oauth:grant-type:pre-authorized_code",
         )
-        DefaultPrincipalMapPropertySource.addProperty(
-            "${com.sphereon.oauth2.common.config.OAuth2ServerInstanceConfig.CONFIG_PREFIX}.default.internal-clients.issuer.client-id",
-            "issuer-service",
-        )
-        DefaultPrincipalMapPropertySource.addProperty(
-            "${com.sphereon.oauth2.common.config.OAuth2ServerInstanceConfig.CONFIG_PREFIX}.default.internal-clients.issuer.client-secret",
-            "issuer-secret",
-        )
+        configureOid4vciTestInternalClient()
         // The real registry-backed issuer requires an explicitly owned resource namespace.
         val issuerRoot = "oid4vci.issuers.$OID4VCI_TEST_ISSUER_INSTANCE_ID"
         val authorizationServerId = "00000000-0000-4000-8000-000000000002"
@@ -92,8 +99,6 @@ class Oid4vciTestContext(
                 "$issuerRoot.credentials.[UniversityDegree].proofTypes.jwt.signingAlgorithms" to "ES256",
                 "$issuerRoot.credentials.[UniversityDegree].signingKeyMode" to "jwk-thumbprint",
                 "$issuerRoot.credentials.[UniversityDegree].credentialDefinition.types" to "VerifiableCredential,UniversityDegreeCredential",
-                "oauth2.servers.default.internal-clients.issuer.default-access-token-audience" to OID4VCI_TEST_ISSUER_URL,
-                "oauth2.servers.default.internal-clients.issuer.allowed-access-token-audiences" to OID4VCI_TEST_ISSUER_URL,
             )
         issuerProperties.forEach { (key, value) -> DefaultPrincipalMapPropertySource.addProperty(key, value) }
         // Credential requests execute against the app-scoped configuration. Keep the integration
@@ -132,6 +137,8 @@ class Oid4vciTestContext(
 
     init {
         (session.graph as Oid4vciTenantOverrideSessionGraph).mutableResolvedTenantIdProvider.setCurrentTenantId(OID4VCI_TEST_TENANT_ID)
+        // Direct internal command calls use the fixture's explicitly configured hosted AS.
+        (session.graph as Oid4vciTenantOverrideSessionGraph).mutableOAuth2ServerInstanceIdProvider.setCurrentAsInstanceId("default")
         (session.graph as Oid4vciIssuerInstanceOverrideSessionGraph)
             .mutableOid4vciIssuerInstanceIdProvider
             .setCurrentInstanceId(OID4VCI_TEST_ISSUER_INSTANCE_ID)
@@ -184,6 +191,45 @@ class Oid4vciTestContext(
         return alias
     }
 
+    /** Admit the identified public wallet used by the real pre-authorized-code token exchange. */
+    suspend fun ensurePublicWalletClient(clientId: String) =
+        withAuthorizationServer {
+            val registry = (session.graph as Oid4vciTenantOverrideSessionGraph).clientRegistry
+            val existing = registry.getClient(clientId).getOrThrow()
+            if (existing == null) {
+                val registered =
+                    registry.registerClient(
+                        ClientRegistration(
+                            clientId = clientId,
+                            clientType = ClientType.PUBLIC,
+                            grantTypes = listOf(GrantType.PRE_AUTHORIZED_CODE),
+                            tokenEndpointAuthMethod = ClientAuthenticationMethod.NONE,
+                        ),
+                    )
+                check(registered.isOk) { "Public wallet registration must succeed" }
+            } else {
+                check(existing.clientType == ClientType.PUBLIC && existing.tokenEndpointAuthMethod == ClientAuthenticationMethod.NONE) {
+                    "The fixture wallet must remain an explicitly registered public client"
+                }
+            }
+        }
+
+    /** Restore the fixture's trusted AS selection after an HTTP adapter has cleared request state. */
+    suspend fun <T> withAuthorizationServer(block: suspend () -> T): T {
+        val selection = (session.graph as Oid4vciTenantOverrideSessionGraph).mutableOAuth2ServerInstanceIdProvider
+        val previous = selection.currentAsInstanceId()
+        selection.setCurrentAsInstanceId("default")
+        return try {
+            block()
+        } finally {
+            if (previous == null) {
+                selection.clearCurrentAsInstanceId()
+            } else {
+                selection.setCurrentAsInstanceId(previous)
+            }
+        }
+    }
+
     suspend fun registerIssuerSigningKey(
         keyName: String,
         issuerInstanceId: String = OID4VCI_TEST_ISSUER_INSTANCE_ID,
@@ -217,9 +263,31 @@ interface Oid4vciTestIssuerKeyNameRegistryGraph {
 @ContributesTo(SessionScope::class)
 interface Oid4vciTenantOverrideSessionGraph {
     val mutableResolvedTenantIdProvider: MutableResolvedTenantIdProvider
+    val mutableOAuth2ServerInstanceIdProvider: MutableOAuth2ServerInstanceIdProvider
+    val clientRegistry: ClientRegistry
 }
 
 @ContributesTo(SessionScope::class)
 interface Oid4vciIssuerInstanceOverrideSessionGraph {
     val mutableOid4vciIssuerInstanceIdProvider: MutableOid4vciIssuerInstanceIdProvider
+}
+
+/** Match the credential-proof issuer to the client identity sent in the real token request. */
+fun integrationPublicWalletTokenEndpointProofs(clientId: String): Oid4vciTokenEndpointProofsProvider =
+    object : Oid4vciTokenEndpointProofsProvider {
+        override suspend fun proofs(request: Oid4vciTokenEndpointProofRequest): IdkResult<Oid4vciTokenEndpointProofs, IdkError> {
+            check(request.options.clientId == clientId) { "Token and credential proof client identities must match" }
+            return Ok(Oid4vciTokenEndpointProofs(clientAuthentication = ClientAuthenticationConfig.None(clientId)))
+        }
+    }
+
+/** Opaque internal clients belong to the tenant configuration, never to a caller principal. */
+internal fun configureOid4vciTestInternalClient() {
+    val root = "oauth2.servers.default.internal-clients.issuer"
+    mapOf(
+        "$root.client-id" to "issuer-service",
+        "$root.client-secret" to "issuer-secret",
+        "$root.default-access-token-audience" to OID4VCI_TEST_ISSUER_URL,
+        "$root.allowed-access-token-audiences" to OID4VCI_TEST_ISSUER_URL,
+    ).forEach { (key, value) -> DefaultTenantMapPropertySource.addProperty(key, value) }
 }

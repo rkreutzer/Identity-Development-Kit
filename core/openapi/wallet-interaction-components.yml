@@ -1839,6 +1839,100 @@ components:
           nullable: true
           description: Sequence of the last returned entry. Pass it as afterSequence to fetch the next page. Null when the page is empty.
 
+    WalletInteractionTaskKind:
+      type: string
+      description: |
+        What an unfinished holder interaction waits for. OfferReview covers a credential offer,
+        its issuer, a transaction code or an authorization step; DisclosureReview covers credential
+        selection and disclosure consent; UnlockRequired is a wallet unlock or key authorization;
+        DeferredIssuance waits on the issuer to issue later; InProgress is protocol work nobody
+        needs to act on.
+      enum: [OfferReview, DisclosureReview, UnlockRequired, DeferredIssuance, InProgress]
+
+    WalletInteractionTaskParty:
+      type: string
+      description: Who the task is currently waiting on.
+      enum: [HOLDER, COUNTERPARTY, WALLET]
+
+    WalletInteractionTaskAction:
+      type: string
+      description: |
+        An action a host may offer for the task. CONTINUE opens the interaction where it stopped,
+        RETRY_DEFERRED_RETRIEVAL asks the issuer again now, CANCEL stops the interaction.
+      enum: [CONTINUE, RETRY_DEFERRED_RETRIEVAL, CANCEL]
+
+    WalletInteractionTaskProjection:
+      type: object
+      description: One unfinished holder interaction of a wallet unit, projected as a task by the interaction engine.
+      required: [sessionId, walletUnitId, status, kind, waitingOn, revision, openedAtEpochSeconds, updatedAtEpochSeconds]
+      example:
+        sessionId: 018f5c1e-9a3b-7c4d-8e2f-3a4b5c6d7e8f
+        walletUnitId: wu-7f9d
+        flowKind: CredentialReceive
+        protocol: OID4VCI
+        status: DeferredRetrievalPending
+        kind: DeferredIssuance
+        waitingOn: COUNTERPARTY
+        revision: 4
+        openedAtEpochSeconds: 1755300000
+        updatedAtEpochSeconds: 1755300060
+        deferred:
+          intervalSeconds: 30
+          attempt: 1
+          resumable: true
+        actions: [CONTINUE, RETRY_DEFERRED_RETRIEVAL, CANCEL]
+      properties:
+        sessionId:
+          type: string
+          description: Interaction session the task belongs to.
+        walletUnitId:
+          type: string
+        flowKind:
+          type: string
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/WalletInteractionFlowKind'
+        protocol:
+          type: string
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/WalletProtocol'
+        status:
+          $ref: '#/components/schemas/WalletInteractionStatus'
+        kind:
+          $ref: '#/components/schemas/WalletInteractionTaskKind'
+        waitingOn:
+          $ref: '#/components/schemas/WalletInteractionTaskParty'
+        revision:
+          type: integer
+          format: int64
+          description: Interaction revision the task was projected from. Pass it as expectedRevision when acting.
+        openedAtEpochSeconds:
+          type: integer
+          format: int64
+        updatedAtEpochSeconds:
+          type: integer
+          format: int64
+        counterparty:
+          $ref: '#/components/schemas/WalletCounterpartySummary'
+        deferred:
+          $ref: '#/components/schemas/WalletDeferredRetrievalSummary'
+        actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletInteractionTaskAction'
+          default: []
+
+    ListWalletInteractionTasksResult:
+      type: object
+      description: The open tasks of a wallet unit, most recently updated first.
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletInteractionTaskProjection'
+
     # ------------------------------------------------------------------
     # Credential hand-off sessions (multi-screen operator, display, conduit)
     # ------------------------------------------------------------------

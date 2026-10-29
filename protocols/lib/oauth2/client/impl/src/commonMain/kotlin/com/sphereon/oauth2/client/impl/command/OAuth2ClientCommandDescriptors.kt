@@ -19,7 +19,11 @@ package com.sphereon.oauth2.client.impl.command
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.core.api.service.ServiceCommand
 import com.sphereon.di.session.SessionScope
+import com.sphereon.oauth2.client.command.CompleteFederatedAuthenticationCommand
 import com.sphereon.oauth2.client.command.CompleteOidcLoginCommand
+import com.sphereon.oauth2.client.command.StartFederatedAuthenticationCommand
+import com.sphereon.oauth2.client.impl.federation.CompleteFederatedAuthenticationCommandImpl
+import com.sphereon.oauth2.client.impl.federation.StartFederatedAuthenticationCommandImpl
 import com.sphereon.oauth2.client.command.CreateAuthorizationRequestUrlCommand
 import com.sphereon.oauth2.client.command.CreateEncryptedJarCommand
 import com.sphereon.oauth2.client.command.CreatePkceCommand
@@ -89,6 +93,15 @@ interface OAuth2ClientCommandDescriptors {
     @Provides @IntoMap
     @StringKey(ParseJarCommand.COMMAND_ID)
     fun parseJar(impl: ParseJarCommandImpl): ServiceCommand<*, *, *> = impl
+
+    // OpenID Federation Automatic Registration (Relying Party side)
+    @Provides @IntoMap
+    @StringKey(StartFederatedAuthenticationCommand.COMMAND_ID)
+    fun startFederatedAuthentication(impl: StartFederatedAuthenticationCommandImpl): ServiceCommand<*, *, *> = impl
+
+    @Provides @IntoMap
+    @StringKey(CompleteFederatedAuthenticationCommand.COMMAND_ID)
+    fun completeFederatedAuthentication(impl: CompleteFederatedAuthenticationCommandImpl): ServiceCommand<*, *, *> = impl
 
     // Authorization commands
     @Provides @IntoMap

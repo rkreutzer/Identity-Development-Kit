@@ -17,6 +17,7 @@ import com.sphereon.cbor.CborTDate
 import com.sphereon.cbor.CborUInt
 import at.asitplus.awesn1.Asn1Element
 import at.asitplus.awesn1.Asn1Primitive
+import at.asitplus.awesn1.Asn1Sequence
 import at.asitplus.awesn1.encoding.parse
 import com.sphereon.core.api.IdkResult
 import com.sphereon.crypto.core.cose.CoseSign1CborCodec
@@ -35,6 +36,9 @@ import dev.zacsweers.metro.SingleIn
 import dev.zacsweers.metro.binding
 import kotlinx.coroutines.CancellationException
 import kotlin.time.Instant
+import com.sphereon.core.compat.LocalDateTimeKMP
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 
 /** Deterministic CBOR codec for the ISO/IEC 18013-5 VICAL payload. */
 @Inject
@@ -272,6 +276,15 @@ class VicalValidatorImpl(
     ): IdkResult<VicalValidationResult, com.sphereon.core.api.error.IdkError> =
         try {
             require(policy.trustedCerts.isNotEmpty()) { "VICAL validation requires explicit trust anchors" }
+            val wire = Cbor.tryDecode(signedVical).getOrThrow() as? CborArray<*>
+                ?: error("VICAL COSE_Sign1 must be untagged")
+            require(wire.value.size == 4) { "VICAL COSE_Sign1 must contain four elements" }
+            val protectedBytes = wire.value[0] as? CborByteString ?: error("VICAL protected header must be a byte string")
+            val protectedMap = Cbor.tryDecode(protectedBytes.value).getOrThrow() as? CborMap<*, *>
+                ?: error("VICAL protected header must contain a map")
+            val unprotectedMap = wire.value[1] as? CborMap<*, *> ?: error("VICAL unprotected header must be a map")
+            require(protectedMap.value.keys.toList() == listOf(CborUInt(1))) { "VICAL protected header must contain only alg" }
+            require(unprotectedMap.value.keys.toList() == listOf(CborUInt(33))) { "VICAL unprotected header must contain only x5chain" }
             val cose = coseSign1CborCodec.decode(signedVical).getOrThrow().value
             require(cose.payload != null) { "VICAL payload must not be detached" }
             require(cose.protectedHeader.x5chain == null) { "VICAL signer x5chain must be unprotected" }
@@ -288,23 +301,41 @@ class VicalValidatorImpl(
                 unprotected.partialIv == null && unprotected.typ == null
             ) { "VICAL unprotected header contains unsupported parameters" }
 
-            val chainResult =
+            val strictProfile = policy.signerCertificateProfile == VicalSignerCertificateProfile.ISO_18013_5_ANNEX_C
+            val trustedCertificates = com.sphereon.crypto.core.x509.pemAndDerToCertificateChain(policy.trustedCerts, null)
+            if (strictProfile) VicalSignerCertificateValidator.validate(chain, trustedCertificates.map { it.der }, policy.verificationTimeEpochSeconds)
+            // Exact leaf pinning is explicit admission. The dedicated profile checks its
+            // validity/extensions; COSE below proves possession. A generic mdoc leaf check
+            // incorrectly requires digitalSignature instead of Annex C's nonRepudiation.
+            val explicitlyPinned = strictProfile && trustedCertificates.any { it.der.contentEquals(chain.first()) }
+            if (!explicitlyPinned) {
+                val chainResult =
                 x509VerifyService.verifyCertificateChain(
                     X509VerificationRequest(
+                        enabled = true,
                         chainDER = chain.toTypedArray(),
                         trustedCerts = policy.trustedCerts,
                         verificationProfile = X509VerificationProfile.ISO_18013_5,
+                        verificationTime = policy.verificationTime(),
                     ),
                 )
-            require(!chainResult.error) { "VICAL signer certificate chain is not trusted: ${chainResult.message}" }
+            require(!chainResult.error && !chainResult.critical && chainResult.message != "X509 verification has been disabled") {
+                "VICAL signer certificate chain is not trusted: ${chainResult.message}"
+            }
+            }
             val signature = coseCryptoService.verify1(cose, keyInfo = null, requireX5Chain = true)
-            require(!signature.error) { "VICAL COSE_Sign1 signature is invalid: ${signature.message}" }
+            require(!signature.error && !signature.critical && !signature.message.orEmpty().contains("disabled", ignoreCase = true)) {
+                "VICAL COSE_Sign1 signature is invalid: ${signature.message}"
+            }
 
             val vical = vicalCborCodec.decode(cose.payload!!.value)
             validateDates(vical, policy)
             val matches = selectAndValidateEntries(vical, policy)
+            // Snapshot ingestion may legitimately project zero roots (withdrawal or profile
+            // filtering). Concrete certificate lookups still require a matching certificate.
             if (policy.expectedDocType != null || policy.expectedCertificateSerialNumber != null ||
-                policy.expectedCertificateSki != null || policy.requiredCertificateProfiles.isNotEmpty()
+                policy.expectedCertificateSki != null || (policy.requiredCertificateProfiles.isNotEmpty() &&
+                    policy.embeddedIacaTrustMode != VicalEmbeddedIacaTrustMode.AUTHENTICATED_VICAL)
             ) {
                 require(matches.isNotEmpty()) { "VICAL contains no certificate matching the requested selection" }
             }
@@ -335,7 +366,9 @@ class VicalValidatorImpl(
         if (policy.requireNextUpdate) {
             require(nextUpdate != null) { "VICAL nextUpdate is required by policy" }
         }
-        require(nextUpdate == null || nextUpdate > now) { "VICAL nextUpdate has expired" }
+        require(!policy.rejectPastNextUpdate || nextUpdate == null || nextUpdate > now) {
+            "VICAL nextUpdate freshness cutoff exceeded"
+        }
         val vicalNotAfter = vical.notAfter
         require(vicalNotAfter == null || Instant.parse(vicalNotAfter).epochSeconds > now) { "VICAL notAfter has expired" }
     }
@@ -371,12 +404,14 @@ class VicalValidatorImpl(
                 val issuerTrust =
                     x509VerifyService.verifyCertificateChain(
                         X509VerificationRequest(
+                            enabled = true,
                             chainDER = arrayOf(info.certificate),
                             trustedCerts = policy.trustedIssuerCerts,
                             verificationProfile = X509VerificationProfile.ISO_18013_5,
+                            verificationTime = policy.verificationTime(),
                         ),
                     )
-                require(!issuerTrust.error) {
+                require(!issuerTrust.error && !issuerTrust.critical && issuerTrust.message != "X509 verification has been disabled") {
                     "VICAL embedded issuer certificate is not trusted: ${issuerTrust.message}"
                 }
             }
@@ -396,9 +431,18 @@ class VicalValidatorImpl(
         val actualSki = subjectKeyIdentifier(certificate.toX509Certificate())
             ?: error("VICAL certificate does not contain a Subject Key Identifier extension")
         require(actualSki.contentEquals(info.ski)) { "VICAL certificate ski does not match certificate" }
-        info.notBefore?.let { require(Instant.parse(it).epochSeconds <= policy.verificationTimeEpochSeconds) { "VICAL certificate notBefore is in the future" } }
-        info.notAfter?.let { require(Instant.parse(it).epochSeconds > policy.verificationTimeEpochSeconds) { "VICAL certificate notAfter has expired" } }
+        info.notBefore?.let { require(Instant.parse(it) == certificate.notBefore) { "VICAL certificate notBefore does not match certificate" } }
+        info.notAfter?.let { require(Instant.parse(it) == certificate.notAfter) { "VICAL certificate notAfter does not match certificate" } }
+        val fields = ((Asn1Element.parse(info.certificate) as Asn1Sequence).children.first() as Asn1Sequence).children
+        val versionOffset = if (fields.first().derEncoded.first() == 0xa0.toByte()) 1 else 0
+        info.issuer?.let { require(it.contentEquals(fields[versionOffset + 2].derEncoded)) { "VICAL certificate issuer does not match certificate" } }
+        info.subject?.let { require(it.contentEquals(fields[versionOffset + 4].derEncoded)) { "VICAL certificate subject does not match certificate" } }
     }
+
+    private fun VicalValidationPolicy.verificationTime(): LocalDateTimeKMP =
+        Instant.fromEpochSeconds(verificationTimeEpochSeconds).toLocalDateTime(TimeZone.currentSystemDefault()).let {
+            LocalDateTimeKMP(it.year, it.monthNumber, it.dayOfMonth, it.hour, it.minute, it.second, it.nanosecond)
+        }
 
     private fun unsignedEquals(left: ByteArray, right: ByteArray): Boolean =
         normalize(left).contentEquals(normalize(right))

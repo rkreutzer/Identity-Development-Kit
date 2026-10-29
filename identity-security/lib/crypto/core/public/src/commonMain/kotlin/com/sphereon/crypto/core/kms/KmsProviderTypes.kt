@@ -181,6 +181,8 @@ interface KmsProvider :
     SimpleSignatureService,
     EncryptionService,
     KeyStoreService {
+    /** Exact createRawSignature output of this implementation; null is undeclared and must never be guessed. */
+    fun rawSignatureEncoding(algorithm: SignatureAlgorithm): SignatureEncoding? = null
     val order: Int
         get() = Order.MEDIUM.orderValue
     val id: String

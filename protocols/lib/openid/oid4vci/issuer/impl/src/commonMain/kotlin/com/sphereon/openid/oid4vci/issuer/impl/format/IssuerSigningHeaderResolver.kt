@@ -60,14 +60,7 @@ internal suspend fun resolveIssuerSigningHeader(
                         ),
                     )
             val validated = issuerKeyIdResolver.validateDidVerificationMethodId(keyAlias, selected).getOrElse { return Err(it) }
-            if (!validated.startsWith("did:") || '#' !in validated) {
-                return Err(
-                    IdkError.fromString(
-                        code = "invalid_signing_verification_method",
-                        message = "DID signing requires a DID URL verification method",
-                    ),
-                )
-            }
+            didOfVerificationMethod(validated).getOrElse { return Err(it) }
             Ok(buildJsonObject { put("kid", JsonPrimitive(validated)) })
         }
 
@@ -177,3 +170,19 @@ private fun unavailableSigningMaterial(): IdkResult<JsonObject?, IdkError> =
             message = "Configured issuer signing key material is unavailable",
         ),
     )
+
+/**
+ * The DID that roots a validated DID-URL verification method. A DID-signed credential names this
+ * DID as its issuer (OID4VCI 1.0 §14.4), so the header `kid` and `issuer`/`iss` share one DID.
+ */
+internal fun didOfVerificationMethod(verificationMethodId: String): IdkResult<String, IdkError> {
+    if (!verificationMethodId.startsWith("did:") || '#' !in verificationMethodId) {
+        return Err(
+            IdkError.fromString(
+                code = "invalid_signing_verification_method",
+                message = "DID signing requires a DID URL verification method",
+            ),
+        )
+    }
+    return Ok(verificationMethodId.substringBefore('#'))
+}

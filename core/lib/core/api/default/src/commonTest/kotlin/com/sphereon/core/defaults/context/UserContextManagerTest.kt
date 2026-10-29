@@ -871,6 +871,31 @@ class UserContextManagerTest {
             assertNotNull(instance)
             assertEquals("data-tenant", instance.context.tenant.tenantId)
             assertEquals("data-user", instance.context.principal)
+            assertEquals(com.sphereon.di.context.PrincipalType.USER, instance.context.principalType)
+        } finally {
+            appGraph.destroy()
+        }
+    }
+
+    @Test
+    fun createOrGetFromDataWithPrincipalTypeCreatesClassifiedContext() {
+        val appGraph = createAppGraph()
+        try {
+            val tenantData =
+                object : com.sphereon.di.context.TenantContextData {
+                    override val tenantId = "workload-tenant"
+                }
+            val instance =
+                appGraph.userContextManager.createOrGetFromData(
+                    tenantData = tenantData,
+                    principalValue = "workload-client",
+                    principalType = com.sphereon.di.context.PrincipalType.WORKLOAD,
+                    makeActive = false,
+                )
+            assertNotNull(instance)
+            assertEquals("workload-tenant", instance.context.tenant.tenantId)
+            assertEquals("workload-client", instance.context.principal)
+            assertEquals(com.sphereon.di.context.PrincipalType.WORKLOAD, instance.context.principalType)
         } finally {
             appGraph.destroy()
         }

@@ -85,6 +85,17 @@ class SdJwtVcFormatHandler(
             context.credentialConfiguration.vct
                 ?: return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "vct is required for the IETF SD-JWT VC format"))
 
+        // DIIP v5 Appendix B: a federation-entity issuer owns the `fed` claim. An attribute of the
+        // same name would either be emitted as a disclosure or collide with the issuer's own value.
+        val federationEntityIdentifier = context.federationEntityIdentifier
+        if (federationEntityIdentifier != null && context.attributes.containsKey(FED_CLAIM)) {
+            return Err(
+                IdkError.ILLEGAL_ARGUMENT_ERROR(
+                    message = "the $FED_CLAIM claim is set by a federation-entity issuer and cannot be supplied as an attribute",
+                ),
+            )
+        }
+
         // Server-resolved signing key. The same name backs the `iss` DID and the JWT header, so a
         // credential can never be signed under one identity and advertised under another.
         val keyAlias = context.requireSigningKeyName().getOrElse { return Err(it) }
@@ -147,6 +158,10 @@ class SdJwtVcFormatHandler(
                 // Standard JWT claims (never SD per RFC 9901 Section 9.7)
                 iss(issClaim)
                 claim("vct", vct)
+                // OpenID Federation Entity Identifier (DIIP v5 Appendix B), always disclosed: a
+                // verifier needs it to build the issuer's trust chain before it trusts any claim.
+                // `iss` keeps naming the signing identity.
+                federationEntityIdentifier?.let { claim(FED_CLAIM, it) }
                 credentialId?.let { claim("jti", it) }
                 iat(iat)
                 if (exp != null) claim("exp", exp)
@@ -260,5 +275,8 @@ class SdJwtVcFormatHandler(
 
     companion object {
         private const val SECONDS_PER_DAY: Long = 24L * 60L * 60L
+
+        /** SD-JWT VC claim carrying the issuer's OpenID Federation Entity Identifier (DIIP v5 Appendix B). */
+        const val FED_CLAIM: String = "fed"
     }
 }

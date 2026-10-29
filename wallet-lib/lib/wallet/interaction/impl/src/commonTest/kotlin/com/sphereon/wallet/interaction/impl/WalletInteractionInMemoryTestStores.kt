@@ -12,6 +12,8 @@ import com.sphereon.wallet.interaction.WalletInteractionPrivateSessionStore
 import com.sphereon.wallet.interaction.WalletInteractionSessionId
 import com.sphereon.wallet.interaction.WalletInteractionState
 import com.sphereon.wallet.interaction.WalletInteractionStateEvent
+import com.sphereon.wallet.interaction.WalletInteractionTaskProjection
+import com.sphereon.wallet.interaction.taskProjection
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
@@ -43,9 +45,13 @@ class InMemoryWalletInteractionSessionStore(
     private val eventHistory = mutableMapOf<WalletInteractionSessionId, MutableList<WalletInteractionStateEvent>>()
     private val activityHistory = mutableMapOf<WalletInteractionSessionId, WalletInteractionActivityProjection>()
     private val activitySequenceByWalletUnit = mutableMapOf<String, Long>()
+    private val tasks = mutableMapOf<WalletInteractionSessionId, WalletInteractionTaskProjection>()
 
     override suspend fun save(session: WalletInteractionStoredSession) {
         sessions[session.sessionId] = session
+        val now = kotlin.time.Clock.System.now().epochSeconds
+        val task = session.state.taskProjection(tasks[session.sessionId]?.openedAtEpochSeconds ?: now, now)
+        if (task == null) tasks.remove(session.sessionId) else tasks[session.sessionId] = task
         val event = session.state.toEvent()
         val events = eventHistory.getOrPut(session.sessionId) { mutableListOf() }
         if (events.lastOrNull()?.revision != event.revision || events.lastOrNull()?.state != event.state) {
@@ -73,7 +79,14 @@ class InMemoryWalletInteractionSessionStore(
     override suspend fun remove(sessionId: WalletInteractionSessionId) {
         sessions.remove(sessionId)
         eventHistory.remove(sessionId)
+        tasks.remove(sessionId)
     }
+
+    override suspend fun listTasks(walletUnitId: String, limit: Int): List<WalletInteractionTaskProjection> =
+        tasks.values
+            .filter { it.walletUnitId == walletUnitId }
+            .sortedWith(compareByDescending<WalletInteractionTaskProjection> { it.updatedAtEpochSeconds }.thenBy { it.sessionId })
+            .take(limit)
 
     override suspend fun listActivity(
         walletUnitId: String,

@@ -42,6 +42,12 @@ import dev.zacsweers.metro.binding
  * [IdkError.NOT_FOUND_ERROR]: serving it as the default server would answer under the wrong
  * issuer. Requests outside issuer paths (`/token`, root `/.well-known/...`) keep the default server.
  *
+ * A URL that names an issuer path (`/.well-known/<metadata>/<issuer-path>`,
+ * `/<issuer-path>/.well-known/<metadata>` or `/as/{issuer}/...`) is answered only by the server
+ * whose issuer has exactly that path, after at most one reload. It never falls back to the single,
+ * default or bare-origin server, so the platform tenant's bare-origin server answers its own bare
+ * URLs only.
+ *
  * Tenant-aware routing strategies are contributed by higher layers via a
  * binding that replaces this default.
  */
@@ -52,6 +58,22 @@ class DefaultOAuth2ServerInstanceResolver(
     private val configProvider: OAuth2ServersConfigProvider,
 ) : OAuth2ServerInstanceResolver {
     override suspend fun resolve(request: GenericHttpRequest): IdkResult<String, IdkError> {
+        // A URL that names an issuer path (metadata suffix or prefix form, or `/as/{issuer}`) is
+        // answered only by the server whose issuer has exactly that path. It never falls back to
+        // the single, default or bare-origin server. The host is not compared: east-west calls
+        // carry the platform host while naming the tenant issuer path.
+        namedIssuerPath(request.path)?.let { named ->
+            val current = configProvider.getConfig()
+            val selected = current.serverPublishing(named) ?: configProvider.reloadConfig().serverPublishing(named)
+            if (selected != null) return Ok(selected)
+            // A server without a static issuer or template takes its identity from the request
+            // (the base URL resolver), so configuration cannot tell which path it owns; leave
+            // that deployment shape to the selection below. Statically issued servers fail closed.
+            if (configProvider.getConfig().servers.values.none { it.issuer == null && it.issuerTemplate == null }) {
+                return Err(IdkError.NOT_FOUND_ERROR(message = "No authorization server is hosted at issuer path '$named'"))
+            }
+        }
+
         val requestUrl = request.requestUrl()
         val current = configProvider.getConfig()
         val all =
@@ -90,6 +112,13 @@ class DefaultOAuth2ServerInstanceResolver(
             ),
         )
     }
+
+    /** Id of the server whose issuer (or issuer template) path is exactly [issuerPath]. */
+    private fun OAuth2ServersConfig.serverPublishing(issuerPath: String): String? =
+        servers.entries.firstOrNull { (_, cfg) ->
+            cfg.issuer?.let { pathOf(it) == issuerPath } == true ||
+                cfg.issuerTemplate?.let { templatePathRegex(it).matches(issuerPath) } == true
+        }?.key
 
     private fun OAuth2ServersConfig.matchingServerId(requestUrl: String): String? =
         servers.entries.firstOrNull { (_, cfg) -> matches(requestUrl, cfg) }?.key
@@ -199,3 +228,38 @@ private fun issuerRelativePath(path: String): String =
     WELL_KNOWN_METADATA_PATHS.firstNotNullOfOrNull { wellKnown ->
         path.takeIf { it.startsWith("$wellKnown/") }?.removePrefix(wellKnown)
     } ?: path
+
+/**
+ * Issuer path a request URL names, or `null` when it names none. The metadata suffix form
+ * (`/.well-known/<name>/<issuer-path>`), the prefix form (`/<issuer-path>/.well-known/<name>`)
+ * and the hosted issuer form (`/as/{issuer}/...`) name an issuer; bare URLs such as `/token` or
+ * `/.well-known/openid-configuration` do not.
+ */
+internal fun namedIssuerPath(rawPath: String): String? {
+    val path = rawPath.substringBefore('?').substringBefore('#').trimEnd('/')
+    for (wellKnown in WELL_KNOWN_METADATA_PATHS) {
+        if (path.startsWith("$wellKnown/")) return path.removePrefix(wellKnown).trimEnd('/').takeIf { it.isNotEmpty() }
+        if (path.endsWith(wellKnown) && path != wellKnown) return path.removeSuffix(wellKnown).trimEnd('/')
+    }
+    val segments = path.split('/').filter { it.isNotEmpty() }
+    if (segments.size >= 2 && segments[0] == HOSTED_ISSUER_SEGMENT) return "/$HOSTED_ISSUER_SEGMENT/${segments[1]}"
+    return null
+}
+
+private const val HOSTED_ISSUER_SEGMENT = "as"
+
+/** Path of an issuer identifier, without a trailing slash; empty for a bare origin. */
+private fun pathOf(issuer: String): String {
+    val trimmed = issuer.trimEnd('/')
+    val schemeEnd = trimmed.indexOf("://").takeIf { it >= 0 }?.plus(3) ?: return trimmed
+    val pathStart = trimmed.indexOf('/', schemeEnd)
+    return if (pathStart < 0) "" else trimmed.substring(pathStart)
+}
+
+/** Regex for the path part of an issuer template, each `{placeholder}` matching one segment. */
+private fun templatePathRegex(template: String): Regex {
+    val path = pathOf(template)
+    val body =
+        Regex("""\{[^}]*}""").split(path).joinToString("[^/]+") { Regex.escape(it) }
+    return Regex("^$body$")
+}

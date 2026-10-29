@@ -45,6 +45,7 @@ import com.sphereon.oauth2.common.jarm.CreateJarmResponseCommand
 import com.sphereon.oauth2.common.jarm.CreateJarmResponseResult
 import com.sphereon.oauth2.common.jarm.JarmConfig
 import com.sphereon.oauth2.common.jarm.JarmMode
+import com.sphereon.oauth2.common.model.AuthorizationErrorResponse
 import com.sphereon.oauth2.common.model.AuthorizationRequest
 import com.sphereon.openid.oid4vp.common.ClientIdScheme
 import com.sphereon.openid.oid4vp.common.ClientMetadata
@@ -58,6 +59,8 @@ import com.sphereon.openid.oid4vp.holder.SubmitAuthorizationResponseArgs
 import com.sphereon.openid.oid4vp.holder.JarmOptions
 import com.sphereon.openid.oid4vp.holder.PreparedOid4vpJweRecipientBinding
 import com.sphereon.openid.oid4vp.holder.VerifierInfo
+import io.ktor.client.request.HttpRequestData
+import io.ktor.client.request.forms.FormDataContent
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -78,6 +81,8 @@ import org.junit.jupiter.api.TestInstance
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import kotlin.test.assertFalse
+import kotlinx.serialization.json.JsonObject
 
 /**
  * Tests for SubmitAuthorizationResponseCommandImpl.
@@ -119,6 +124,134 @@ class SubmitAuthorizationResponseCommandImplTest {
             assertEquals("dc-api-state", (digitalCredential.data["state"] as? JsonPrimitive)?.content)
             assertTrue(digitalCredential.data.containsKey("vp_token"))
         }
+
+
+    private fun invalidRequest(mode: ResponseMode = ResponseMode.DIRECT_POST, withEncryption: Boolean = false): ResolvedOid4vpRequest {
+        val base = createResolvedRequestDirectPost()
+        val error = AuthorizationErrorResponse(error = "invalid_request", state = base.request.state)
+        return base.copy(
+            request = base.request.copy(redirectUri = null, responseMode = mode.value, nonce = "nonce"),
+            authorizationError = error,
+            clientMetadata = if (withEncryption) ClientMetadata(jwks = JwkSet(arrayOf(Jwk(
+                kty = JwaKeyType.EC, crv = JwaCurve.P_256,
+                x = "0_3S7HedSywaxlekdt6Or8pkcR13hQaCPMqt9cuZBVc",
+                y = "ZVXSCL3HlnMQWKrwMyIAe5wsAIWd3Eu1misKFr3POdA",
+                use = "enc", alg = JwaAlgorithm.ECDH_ES, kid = "error-recipient",
+            )))) else null,
+        )
+    }
+
+    @Test
+    fun directPostErrorContainsOnlyProtocolErrorAndOriginalState() = runTest {
+        val resolved = invalidRequest()
+        var requests = 0
+        val command = SubmitAuthorizationResponseCommandImpl(
+            TestExecutionContext.createExecution(),
+            createMockHttpClientFactory(onHttpRequest = { request ->
+                requests++
+                val form = (request.body as FormDataContent).formData
+                assertEquals(setOf("error", "state"), form.names())
+                assertEquals("invalid_request", form["error"])
+                assertEquals(resolved.request.state, form["state"])
+                assertEquals("https://verifier.example.com/response", request.url.toString())
+            }),
+            createMockExternalIdentifierService(),
+            createMockJarmCommand(onExecute = { error("Plain protocol error must not create a JWT") }),
+        )
+        val result = command.execute(SubmitAuthorizationResponseArgs(resolvedRequest = resolved, errorResponse = resolved.authorizationError))
+        assertIs<SubmissionResult.Success>(result.getOrThrow())
+        assertEquals(1, requests)
+    }
+
+    @Test
+    fun encryptedErrorHasBareErrorPayloadWithoutCredentialOrInventedIssuerEvenWhenNonceIsMissing() = runTest {
+        val resolved = invalidRequest(ResponseMode.DIRECT_POST_JWT, withEncryption = true).let { it.copy(request = it.request.copy(nonce = null)) }
+        var encrypted = 0
+        var requests = 0
+        val command = SubmitAuthorizationResponseCommandImpl(
+            TestExecutionContext.createExecution(),
+            createMockHttpClientFactory(onHttpRequest = { request ->
+                requests++
+                val form = (request.body as FormDataContent).formData
+                assertEquals(setOf("response"), form.names())
+                assertEquals("mock.jarm.jwt", form["response"])
+            }),
+            createMockExternalIdentifierService(),
+            createMockJarmCommand(onArguments = { args ->
+                encrypted++
+                assertEquals(JsonObject(mapOf("error" to JsonPrimitive("invalid_request"), "state" to JsonPrimitive("test-state"))), args.responseParameters)
+                assertEquals(null, args.issuer)
+                assertEquals(null, args.signingKey)
+                assertEquals(null, args.protectedHeaderOverrides)
+                assertFalse(args.appendStandardJwtClaims)
+                assertEquals(JarmMode.ENCRYPTED, args.jarmConfig.mode)
+            }),
+        )
+        assertIs<SubmissionResult.Success>(command.execute(SubmitAuthorizationResponseArgs(resolvedRequest = resolved, errorResponse = resolved.authorizationError)).getOrThrow())
+        assertEquals(1, encrypted)
+        assertEquals(1, requests)
+    }
+
+    @Test
+    fun encryptionFailureMaySendPlainErrorBeforeAnyHttpAttempt() = runTest {
+        val resolved = invalidRequest(ResponseMode.DIRECT_POST_JWT, withEncryption = true)
+        var requests = 0
+        val command = SubmitAuthorizationResponseCommandImpl(
+            TestExecutionContext.createExecution(),
+            createMockHttpClientFactory(onHttpRequest = { request ->
+                requests++
+                assertEquals(setOf("error", "state"), (request.body as FormDataContent).formData.names())
+            }),
+            createMockExternalIdentifierService(),
+            createMockJarmCommand(failure = IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Encryption failed")),
+        )
+        assertIs<SubmissionResult.Success>(command.execute(SubmitAuthorizationResponseArgs(resolvedRequest = resolved, errorResponse = resolved.authorizationError)).getOrThrow())
+        assertEquals(1, requests)
+    }
+
+    @Test
+    fun rejectedHttpResponseDoesNotRetryErrorWithoutEncryption() = runTest {
+        val resolved = invalidRequest(ResponseMode.DIRECT_POST_JWT, withEncryption = true)
+        var requests = 0
+        val command = SubmitAuthorizationResponseCommandImpl(
+            TestExecutionContext.createExecution(),
+            createMockHttpClientFactory(responseStatus = HttpStatusCode.BadRequest, onHttpRequest = { request ->
+                requests++
+                assertEquals(setOf("response"), (request.body as FormDataContent).formData.names())
+            }),
+            createMockExternalIdentifierService(), createMockJarmCommand(),
+        )
+        assertIs<SubmissionResult.Error>(command.execute(SubmitAuthorizationResponseArgs(resolvedRequest = resolved, errorResponse = resolved.authorizationError)).getOrThrow())
+        assertEquals(1, requests)
+    }
+
+    @Test
+    fun invalidRequestsCannotPresentAndUnvalidatedClientsOrChangedStateCannotReceiveErrors() = runTest {
+        val resolved = invalidRequest()
+        val command = SubmitAuthorizationResponseCommandImpl(
+            TestExecutionContext.createExecution(),
+            createMockHttpClientFactory(onRequest = { error("Rejected request must not perform HTTP") }),
+            createMockExternalIdentifierService(), createMockJarmCommand(onExecute = { error("Rejected request must not create a JWT") }),
+        )
+        val success = buildOid4vpAuthorizationResponse { vpToken("pid", "credential-must-not-leave") }
+        assertTrue(command.execute(SubmitAuthorizationResponseArgs(resolvedRequest = resolved, response = success)).isErr)
+        assertTrue(command.execute(SubmitAuthorizationResponseArgs(resolvedRequest = resolved.copy(verifierInfo = resolved.verifierInfo.copy(clientIdValid = false)), errorResponse = resolved.authorizationError)).isErr)
+        assertTrue(command.execute(SubmitAuthorizationResponseArgs(resolvedRequest = resolved, errorResponse = resolved.authorizationError!!.copy(state = "changed"))).isErr)
+    }
+
+    @Test
+    fun dcApiProtocolErrorsAreSingleErrorMemberForBothResponseModes() = runTest {
+        val command = SubmitAuthorizationResponseCommandImpl(
+            TestExecutionContext.createExecution(),
+            createMockHttpClientFactory(onRequest = { error("DC API must not perform HTTP") }),
+            createMockExternalIdentifierService(), createMockJarmCommand(onExecute = { error("DC API errors must not be encrypted") }),
+        )
+        for (mode in listOf(ResponseMode.DC_API, ResponseMode.DC_API_JWT)) {
+            val resolved = invalidRequest(mode)
+            val result = command.execute(SubmitAuthorizationResponseArgs(resolvedRequest = resolved, errorResponse = resolved.authorizationError)).getOrThrow()
+            assertEquals(JsonObject(mapOf("error" to JsonPrimitive("invalid_request"))), assertIs<SubmissionResult.DigitalCredential>(result).data)
+        }
+    }
 
     /**
      * Create a resolved request for direct_post mode
@@ -193,12 +326,14 @@ class SubmitAuthorizationResponseCommandImplTest {
         responseStatus: HttpStatusCode = HttpStatusCode.OK,
         responseBody: String = """{"redirect_uri": "https://verifier.example.com/complete"}""",
         onRequest: () -> Unit = {},
+        onHttpRequest: (HttpRequestData) -> Unit = {},
     ): HttpClientFactory =
         object : HttpClientFactory {
             override fun createClient(options: HttpClientOptions): HttpClient =
                 HttpClient(
                     MockEngine { request ->
                         onRequest()
+                        onHttpRequest(request)
                         respond(
                             content = responseBody,
                             status = responseStatus,
@@ -246,7 +381,7 @@ class SubmitAuthorizationResponseCommandImplTest {
     /**
      * Create a mock CreateJarmResponseCommand for testing
      */
-    private fun createMockJarmCommand(onExecute: () -> Unit = {}): CreateJarmResponseCommand =
+    private fun createMockJarmCommand(onExecute: () -> Unit = {}, onArguments: (CreateJarmResponseArgs) -> Unit = {}, failure: IdkError? = null): CreateJarmResponseCommand =
         object : CreateJarmResponseCommand {
             override val commandId: String = CreateJarmResponseCommand.COMMAND_ID
             override val isEnabled: Boolean = true
@@ -255,10 +390,12 @@ class SubmitAuthorizationResponseCommandImplTest {
 
             override suspend fun execute(args: CreateJarmResponseArgs): IdkResult<CreateJarmResponseResult, IdkError> {
                 onExecute()
+                onArguments(args)
+                failure?.let { return Err(it) }
                 return Ok(
                     CreateJarmResponseResult(
                         jarmJwt = "mock.jarm.jwt",
-                        mode = JarmMode.SIGNED,
+                        mode = args.jarmConfig.mode,
                     ),
                 )
             }
@@ -790,7 +927,13 @@ class SubmitAuthorizationResponseCommandImplTest {
                     execution = TestExecutionContext.createExecution(),
                     httpClientFactory = createMockHttpClientFactory(onRequest = { httpRequests++ }),
                     externalIdentifierService = createMockExternalIdentifierService(),
-                    createJarmCommand = createMockJarmCommand(onExecute = { jarmExecutions++ }),
+                    createJarmCommand = createMockJarmCommand(
+                        onExecute = { jarmExecutions++ },
+                        onArguments = { args ->
+                            assertFalse(args.appendStandardJwtClaims)
+                            assertIs<JsonObject>(args.responseParameters["vp_token"])
+                        },
+                    ),
                 )
             val binding =
                 PreparedOid4vpJweRecipientBinding(

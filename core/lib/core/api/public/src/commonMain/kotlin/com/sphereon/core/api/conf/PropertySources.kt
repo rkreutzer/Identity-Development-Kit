@@ -652,17 +652,29 @@ open class DefaultPropertySources(
             }
         }
 
-    override fun copy(additionalSources: PropertySources?): PropertySources =
-        kotlinx.atomicfu.locks.synchronized(this) {
-            DefaultPropertySources(
-                sources = mutableListOf(*this.sources.toTypedArray(), *additionalSources?.toList()?.toTypedArray() ?: arrayOf()),
-                sorting = sorting,
-            ).also { copiedSources ->
-                copiedSources._revision =
-                    additionalSources?.let { (this._revision * 31L) + it.revision }
-                        ?: this._revision
+    override fun copy(additionalSources: PropertySources?): PropertySources {
+        val ownSnapshot = snapshotForCopy()
+        // Snapshot collections independently. Neither another collection's monitor nor a scoped
+        // source's lazy validation/loading may be entered while this collection is locked.
+        val additionalSnapshot =
+            when {
+                additionalSources == null -> null
+                additionalSources === this -> ownSnapshot
+                additionalSources is DefaultPropertySources -> additionalSources.snapshotForCopy()
+                else -> additionalSources.toList() to additionalSources.revision
             }
+        return DefaultPropertySources(
+            sources = (ownSnapshot.first + additionalSnapshot?.first.orEmpty()).toMutableList(),
+            sorting = sorting,
+        ).also { copiedSources ->
+            copiedSources._revision =
+                additionalSnapshot?.let { (ownSnapshot.second * 31L) + it.second }
+                    ?: ownSnapshot.second
         }
+    }
+
+    private fun snapshotForCopy(): Pair<List<PropertySource<*>>, Long> =
+        kotlinx.atomicfu.locks.synchronized(this) { sources.toList() to _revision }
 
     fun removeByName(name: String): Boolean =
         kotlinx.atomicfu.locks.synchronized(this) {

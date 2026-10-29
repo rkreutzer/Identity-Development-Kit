@@ -7,6 +7,8 @@
  * the independently sharded conformance lane.
  */
 
+import java.nio.file.Files
+
 plugins {
     alias(sphereonplug.plugins.org.jetbrains.kotlin.jvm)
     alias(sphereonplug.plugins.org.jetbrains.kotlin.plugin.serialization)
@@ -42,6 +44,18 @@ dependencies {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // Relative runtime stores must be isolated per execution, outside the source tree.
+    val runtimeRoot =
+        layout.buildDirectory
+            .dir("oidf-runtime")
+            .get()
+            .asFile
+    val sutWorkspace = projectDir.absolutePath
+    doFirst {
+        runtimeRoot.mkdirs()
+        workingDir(Files.createTempDirectory(runtimeRoot.toPath(), "run-").toFile())
+    }
+    systemProperty("oidf.sut.workspace", sutWorkspace)
     val evidenceDirectory =
         System.getProperty("oidf.evidence.dir")
             ?: providers.gradleProperty("oidf.evidence.dir").orNull
@@ -52,6 +66,9 @@ tasks.withType<Test>().configureEach {
     systemProperty("oidf.evidence.dir", evidenceDirectory)
     listOf(
         "oidf.suite.baseUrl",
+        "oidf.suite.apiBaseUrl",
+        "oidf.suite.protocolBaseUrl",
+        "oidf.suite.caCert",
         "oidf.suite.dir",
         "oidf.suite.mode",
         "oidf.plan",

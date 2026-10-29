@@ -16,6 +16,7 @@
 
 package com.sphereon.data.store.asset.model
 
+import com.sphereon.core.api.Base64Serializer
 import com.sphereon.core.compat.JsExportCompat
 import kotlinx.serialization.Serializable
 
@@ -51,11 +52,15 @@ data class UploadAssetInput(
 
 /**
  * A stored asset resolved to its raw bytes, used by the public hosting surface that serves
- * `/public/assets/{tenantId}/{namespace}/{hash}.{ext}`.
+ * `/public/assets/{tenantId}/{namespace}/{hash}.{ext}` and returned by the tenant asset content command.
+ *
+ * The bytes serialize as a base64 string. A plain `ByteArray` becomes a JSON array of numbers, about three and a half
+ * characters per byte of image data, which this type carries across the command transport.
  */
 @JsExportCompat
 @Serializable
 data class ResolvedAsset(
+    @Serializable(with = Base64Serializer::class)
     val data: ByteArray,
     val contentType: String,
     val info: AssetInfo,

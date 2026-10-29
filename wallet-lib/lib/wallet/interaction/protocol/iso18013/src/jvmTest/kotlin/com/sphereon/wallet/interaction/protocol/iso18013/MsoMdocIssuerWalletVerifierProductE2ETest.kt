@@ -118,7 +118,6 @@ import com.sphereon.statuslist.hosting.rest.adapter.StatusListHostingHttpAdapter
 import com.sphereon.statuslist.hosting.rest.command.GetStatusListTokenByCorrelationIdEndpointCommandImpl
 import com.sphereon.statuslist.hosting.rest.http.GetStatusListTokenByCorrelationIdEndpointCommand
 import com.sphereon.statuslist.impl.codec.MdocRevocationCwtClaimsCodecImpl
-import com.sphereon.statuslist.impl.command.GetStatusListCommandImpl
 import com.sphereon.statuslist.impl.command.GetStatusListTokenCommandImpl
 import com.sphereon.statuslist.impl.driver.InMemoryStatusListDriver
 import com.sphereon.statuslist.impl.driver.InMemoryStatusListStore
@@ -1871,7 +1870,6 @@ class MsoMdocIssuerWalletVerifierProductE2ETest {
             val endpoint =
                 GetStatusListTokenByCorrelationIdEndpointCommandImpl(
                     execution,
-                    GetStatusListCommandImpl(execution, driver),
                     GetStatusListTokenCommandImpl(execution, driver),
                     statusListHostingConfig,
                 )

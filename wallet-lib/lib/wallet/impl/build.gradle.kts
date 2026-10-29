@@ -96,6 +96,7 @@ kotlin {
         }
         val jvmTest by getting {
             dependencies {
+                implementation(if (rootProject.findProperty("idk.consumeLowerAsArtifacts") == "true") "com.sphereon.idk:lib-data-store-blob-impl-fs:$version" else project(":lib-data-store-blob-impl-fs"))
                 implementation(if (rootProject.findProperty("idk.consumeLowerAsArtifacts") == "true") "com.sphereon.idk:lib-core-api-default:$version" else project(":lib-core-api-default"))
                 // Software KMS provider needed by WalletBootstrap
                 implementation(if (rootProject.findProperty("idk.consumeLowerAsArtifacts") == "true") "com.sphereon.idk:lib-crypto-kms-provider-software:$version" else project(":lib-crypto-kms-provider-software"))

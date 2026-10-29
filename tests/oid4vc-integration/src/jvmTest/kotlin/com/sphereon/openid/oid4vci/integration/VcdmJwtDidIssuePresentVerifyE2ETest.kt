@@ -211,7 +211,7 @@ class VcdmJwtDidIssuePresentVerifyE2ETest {
                 assertTrue(graph.didResolverRegistry.getSupportedMethods().contains("jwk"), "did:jwk provider must be registered")
                 assertDidResolution(graph, flow.issuerVerificationMethod)
                 assertDidResolution(graph, flow.holderVerificationMethod)
-                assertCredentialShape(flow.credential, flow.issuerVerificationMethod, version)
+                assertCredentialShape(flow.credential, flow.issuerVerificationMethod, version, flow.holderKey)
 
                 val vp = assertNotNull(flow.response.vpToken).getSinglePresentation(QUERY_ID)
                 assertNotNull(vp)
@@ -232,6 +232,22 @@ class VcdmJwtDidIssuePresentVerifyE2ETest {
                 assertTrue(validation.isOk, "production verifier must return a structured result")
                 assertTrue(validation.value.valid, "issuer and holder DID JWT signatures must verify: ${validation.value.errors}")
             }
+        }
+
+    @Test
+    fun anonymousVcdm11BearerCredentialCannotAuthenticateThePresentationHolder() =
+        runTest {
+            val flow = createFlow("did-vcdm-anonymous-bearer", JwtVersion.V11, bindHolder = false)
+            val payload = jwtObject(flow.credential, 1)
+            val vc = assertNotNull(payload["vc"] as? JsonObject)
+            assertAnonymousCredentialSubject(vc["credentialSubject"] as? JsonObject)
+            assertFalse(payload.containsKey("cnf"))
+
+            val validation = validate(flow, trusted(flow))
+
+            assertTrue(validation.isOk, "anonymous credential rejection must return a structured result")
+            assertFalse(validation.value.valid, "an anonymous bearer credential cannot establish holder binding")
+            assertTrue(validation.value.errors.any { it.contains("not bound to the presentation holder") })
         }
 
     @Test
@@ -387,6 +403,7 @@ class VcdmJwtDidIssuePresentVerifyE2ETest {
         prefix: String,
         version: JwtVersion = JwtVersion.V20,
         holderDidOverride: String? = null,
+        bindHolder: Boolean = true,
     ): Flow {
         val issuerKey = generateKey("$prefix-issuer")
         val provisionedHolder = provisionHolder("$prefix-holder")
@@ -401,7 +418,7 @@ class VcdmJwtDidIssuePresentVerifyE2ETest {
         val holderVm = holderKey.verificationMethod
         val issuerDid = issuerVm.substringBefore('#')
         val holderDid = holderKey.did
-        val credential = issue(issuerKey.alias, issuerDid, issuerVm, holderDid, version)
+        val credential = issue(issuerKey.alias, issuerDid, issuerVm, holderDid, version, holderKey.takeIf { bindHolder })
         val query = DcqlQuery(credentials = listOf(query(version)))
         val request =
             verifierService()
@@ -435,7 +452,8 @@ class VcdmJwtDidIssuePresentVerifyE2ETest {
         issuerDid: String,
         issuerVm: String,
         holderDid: String,
-        version: JwtVersion = JwtVersion.V20
+        version: JwtVersion,
+        holderKey: HolderMaterial?,
     ): String {
         ctx.registerIssuerSigningKey(alias)
         val configuration =
@@ -454,7 +472,8 @@ class VcdmJwtDidIssuePresentVerifyE2ETest {
                     issuerIdentifier = issuerDid,
                     credentialConfigurationId = "did-vcdm-credential",
                     credentialConfiguration = configuration,
-                    holderBindingKey = null,
+                    holderBindingKey = holderKey?.publicJwk?.let { json.encodeToJsonElement(Jwk.serializer(), it).jsonObject },
+                    holderKeyId = holderKey?.verificationMethod,
                     attributes = mapOf("level" to JsonPrimitive("gold")),
                     signingKeyAlias = alias,
                     signingKeyMode = SigningKeyMode.Did("jwk"),
@@ -619,7 +638,8 @@ class VcdmJwtDidIssuePresentVerifyE2ETest {
     private fun assertCredentialShape(
         jwt: String,
         issuerVerificationMethod: String,
-        version: JwtVersion
+        version: JwtVersion,
+        holderKey: HolderMaterial,
     ) {
         val header = jwtObject(jwt, 0)
         val payload = jwtObject(jwt, 1)
@@ -632,13 +652,26 @@ class VcdmJwtDidIssuePresentVerifyE2ETest {
             val vc = assertNotNull(payload["vc"] as? JsonObject)
             assertEquals(version.context, (vc["@context"] as JsonArray).first().jsonPrimitive.content)
             assertEquals(version.credentialType, (vc["type"] as JsonArray).last().jsonPrimitive.content)
-            assertAnonymousCredentialSubject(vc["credentialSubject"] as? JsonObject)
+            val subject = assertNotNull(vc["credentialSubject"] as? JsonObject)
+            assertEquals("gold", subject["level"]?.jsonPrimitive?.content)
+            assertEquals(holderKey.did, subject["id"]?.jsonPrimitive?.content)
+            assertEquals(holderKey.did, payload["sub"]?.jsonPrimitive?.content)
+            assertFalse(payload.containsKey("cnf"), "VCDM 1.1 maps holder binding through its subject identifier")
             assertFalse(payload.containsKey("@context"))
         } else {
             assertEquals("vc", header["cty"]?.jsonPrimitive?.content)
             assertEquals(version.context, contextValue(payload))
             assertEquals(version.credentialType, (payload["type"] as JsonArray).last().jsonPrimitive.content)
             assertAnonymousCredentialSubject(payload["credentialSubject"] as? JsonObject)
+            assertEquals(
+                holderKey.verificationMethod,
+                payload
+                    .getValue("cnf")
+                    .jsonObject["kid"]
+                    ?.jsonPrimitive
+                    ?.content,
+            )
+            assertFalse(payload.getValue("cnf").jsonObject.containsKey("jwk"))
         }
     }
 

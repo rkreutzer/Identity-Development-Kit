@@ -16,6 +16,7 @@
 
 package com.sphereon.openid.oid4vci.rest
 
+import com.sphereon.core.api.Err
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.core.compat.JsExportCompat
@@ -131,6 +132,86 @@ data class CredentialOfferTemplate(
 )
 
 /**
+ * Where a correlation id stands.
+ */
+@JsExportCompat
+@Serializable
+enum class OfferRequestState {
+    /** A caller holds the key and is creating the offer. Its outcome is unknown until it completes or the claim expires. */
+    ACTIVE,
+
+    /** The offer exists and [OfferRequestReservation.outcome] describes it. */
+    COMPLETED,
+
+    /** The attempt definitely created nothing and gave the key back, so the next caller may take it. */
+    RELEASED,
+
+    /** The offer was deleted. The key is not used for another offer. */
+    WITHDRAWN,
+    ;
+
+    companion object {
+        fun fromValue(value: String): OfferRequestState =
+            entries.find { it.name.equals(value, ignoreCase = true) }
+                ?: throw IllegalArgumentException("Unknown OfferRequestState: $value")
+    }
+}
+
+/**
+ * The offer a correlation id produced, kept with the claim so a repeat is answered from it.
+ *
+ * @property offerUri the offer URI handed to the wallet.
+ * @property issuanceSessionId the protocol session the offer belongs to.
+ * @property instanceId the issuer instance the offer was created for.
+ * @property offerExpiresAt epoch milliseconds after which the offer can no longer be redeemed.
+ */
+@JsExportCompat
+@Serializable
+data class OfferRequestOutcome(
+    val offerUri: String,
+    val issuanceSessionId: String,
+    val instanceId: String,
+    val offerExpiresAt: Long,
+)
+
+/**
+ * A claim on a correlation id, made before the offer it covers exists so that no second offer can follow a lost
+ * response.
+ *
+ * @property intentDigest digest of what the request asked for, including the issuer instance it was bound to.
+ * @property expiresAt epoch milliseconds after which an [OfferRequestState.ACTIVE] claim no longer protects the key,
+ *   because the offer it covers would have expired by then.
+ * @property state where the key stands.
+ * @property outcome the offer, present exactly when [state] is [OfferRequestState.COMPLETED].
+ */
+@JsExportCompat
+@Serializable
+data class OfferRequestReservation(
+    val key: String,
+    val intentDigest: String,
+    val createdAt: Long,
+    val expiresAt: Long,
+    val state: OfferRequestState = OfferRequestState.ACTIVE,
+    val outcome: OfferRequestOutcome? = null,
+)
+
+/**
+ * The answer to a claim: this caller holds the key, or somebody already did.
+ *
+ * @property reservation the reservation that holds the key now, this caller's own when [claimed] is true.
+ * @property version an opaque token naming the claim as the store saw it. Handing the whole claim back to
+ *   [CredentialOfferSessionStore.reclaimRequest], [CredentialOfferSessionStore.completeRequest] or
+ *   [CredentialOfferSessionStore.releaseRequest] acts on that claim only, so a caller that read a claim which has
+ *   changed since can neither take over, complete nor free somebody else's.
+ */
+@JsExportCompat
+data class OfferRequestClaim(
+    val claimed: Boolean,
+    val reservation: OfferRequestReservation,
+    val version: String? = null,
+)
+
+/**
  * Store for OID4VCI backend REST API sessions.
  */
 @JsExportCompat
@@ -151,5 +232,42 @@ interface CredentialOfferSessionStore {
 
     suspend fun update(session: CredentialOfferSession): IdkResult<CredentialOfferSession, IdkError>
 
+    /**
+     * Deletes the session. A correlation id claimed under the same id is withdrawn, so a repeat of that request is told the
+     * offer was deleted instead of creating another one.
+     */
     suspend fun delete(correlationId: String): IdkResult<Boolean, IdkError>
+
+    /**
+     * Atomically claims [reservation]'s key unless a claim exists. A claim that is still [OfferRequestState.ACTIVE]
+     * after its expiry answers as the claim on the key, because only the caller can tell whether it left an offer
+     * behind, and it takes the key over through [reclaimRequest]. A store that cannot claim atomically refuses, so an
+     * idempotent request is never admitted without the guarantee.
+     */
+    suspend fun claimRequest(reservation: OfferRequestReservation): IdkResult<OfferRequestClaim, IdkError> =
+        Err(IdkError.UNSUPPORTED_OPERATION_ERROR(operation = "claimRequest", reason = "The session store has no atomic request claim"))
+
+    /**
+     * Replaces [observed], the claim a caller read, with [replacement], only while [observed] still is the claim on
+     * the key. Of several callers that read the same expired claim exactly one is told it holds the key, and the others
+     * are shown the claim that won.
+     */
+    suspend fun reclaimRequest(observed: OfferRequestClaim, replacement: OfferRequestReservation): IdkResult<OfferRequestClaim, IdkError> =
+        Err(IdkError.UNSUPPORTED_OPERATION_ERROR(operation = "reclaimRequest", reason = "The session store has no atomic request reclaim"))
+
+    /**
+     * Records [outcome] on [claim], only while [claim] still is the claim on its key. The answer is claimed when the
+     * outcome was recorded. Otherwise it shows the claim that holds the key now, and the caller must not hand out the
+     * offer it created: somebody took the key over while it was creating it.
+     */
+    suspend fun completeRequest(claim: OfferRequestClaim, outcome: OfferRequestOutcome): IdkResult<OfferRequestClaim, IdkError> =
+        Err(IdkError.UNSUPPORTED_OPERATION_ERROR(operation = "completeRequest", reason = "The session store has no atomic request completion"))
+
+    /**
+     * Gives [claim], one whose request definitely created nothing, back for the caller's next attempt. Answers false
+     * when the key is no longer held by [claim], because somebody else holds it by now and it is not this caller's to
+     * free.
+     */
+    suspend fun releaseRequest(claim: OfferRequestClaim): IdkResult<Boolean, IdkError> =
+        Err(IdkError.UNSUPPORTED_OPERATION_ERROR(operation = "releaseRequest", reason = "The session store has no atomic request release"))
 }

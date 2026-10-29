@@ -1,5 +1,5 @@
 /*
- * © 2026 Sphereon International B.V.
+ * Copyright 2026 Sphereon International B.V.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,16 +31,8 @@ import com.sphereon.crypto.core.generic.SignatureAlgorithm
  * fallback to a defensible default rather than emit a wrong/missing alg in discovery.
  */
 internal fun keyAlgorithmToJwsAlg(alg: SignatureAlgorithm): String =
-    when (alg) {
-        SignatureAlgorithm.RSA_SHA256 -> "RS256"
-        SignatureAlgorithm.RSA_SHA384 -> "RS384"
-        SignatureAlgorithm.RSA_SHA512 -> "RS512"
-        SignatureAlgorithm.ECDSA_SHA256 -> "ES256"
-        SignatureAlgorithm.ECDSA_SHA384 -> "ES384"
-        SignatureAlgorithm.ECDSA_SHA512 -> "ES512"
-        SignatureAlgorithm.ED25519 -> "EdDSA"
-        SignatureAlgorithm.RSA_SSA_PSS_SHA256_MGF1 -> "PS256"
-        SignatureAlgorithm.RSA_SSA_PSS_SHA384_MGF1 -> "PS384"
-        SignatureAlgorithm.RSA_SSA_PSS_SHA512_MGF1 -> "PS512"
-        else -> error("Unsupported signature algorithm for JWS: $alg")
-    }
+
+    com.sphereon.oauth2.server.authorization.signing.AsServerSigningAlgorithms.joseName(alg)
+
+        ?: error("Unsupported signature algorithm for JWS: $alg")
+

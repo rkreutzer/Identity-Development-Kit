@@ -12,6 +12,7 @@ import com.sphereon.oidf.conformance.OidfPlanModule
 import com.sphereon.oidf.conformance.OidfSuiteConfigPreprocessor
 import com.sphereon.wallet.interaction.WalletEntryPoint
 import com.sphereon.wallet.interaction.WalletInteractionAction
+import com.sphereon.wallet.interaction.WalletInteractionFailureCodes
 import com.sphereon.wallet.interaction.WalletInteractionFlowKind
 import com.sphereon.wallet.interaction.WalletInteractionInput
 import com.sphereon.wallet.interaction.WalletInteractionStatus
@@ -45,6 +46,22 @@ internal data class OidfWalletHarnessResult(
     val suiteResult: String?,
 )
 
+/** Retains an observed wallet result when the subsequent official-suite exchange fails. */
+internal class OidfWalletSuiteCompletionException(
+    val walletOutcome: HeadlessRunOutcome,
+    cause: Throwable,
+) : RuntimeException("Official suite completion failed after observing the wallet outcome", cause)
+
+internal inline fun <T> oidfWithObservedWalletOutcome(
+    walletOutcome: HeadlessRunOutcome,
+    awaitSuiteCompletion: () -> T,
+): T =
+    try {
+        awaitSuiteCompletion()
+    } catch (error: Throwable) {
+        throw OidfWalletSuiteCompletionException(walletOutcome, error)
+    }
+
 private data class OidfWalletExecution(
     val outcome: HeadlessRunOutcome,
     val completionHandoff: JsonObject? = null,
@@ -71,9 +88,9 @@ internal class OidfWalletConformanceHarness(
     private val suite: OidfConformanceSuiteClient,
     private val configPreprocessor: OidfSuiteConfigPreprocessor,
     private val profileId: String = "default",
-    private val walletUnitId: String = "oidf-wallet-conformance",
     private val haipAttestationFixture: OidfHaipWalletAttestationFixture? = null,
 ) {
+    private lateinit var walletUnitId: String
     private var vpBootstrap: HeadlessWalletRunnerBootstrap? = null
     private var vpRunner: HeadlessWalletRunner? = null
     private val provisionedPresentationFormats = mutableSetOf<String>()
@@ -128,13 +145,10 @@ internal class OidfWalletConformanceHarness(
             } else {
                 null
             }
-        val encryptCredentialRequest = module.variant["vci_credential_encryption"] == "encrypted"
+        val encryptCredentialRequest = oidfCredentialRequestEncryption(plan.selectionVariant, module.variant)
         val credentialBatchSize = if (module.testModule == VCI_BATCH_MODULE) 2 else 1
         val walletInput =
-            if (
-                module.testModule.startsWith(FAPI2_CLIENT_MODULE_PREFIX) ||
-                plan.selectionVariant["vci_authorization_code_flow_variant"] == "wallet_initiated"
-            ) {
+            if (oidfWalletInitiatedIssuance(plan.selectionVariant, module.variant, module.testModule)) {
                 awaitWalletInitiatedInput(
                     testId = test.id,
                     testModule = module.testModule,
@@ -157,51 +171,53 @@ internal class OidfWalletConformanceHarness(
                 )
             }
         val walletOutcome = walletExecution.outcome
-        when (walletInput) {
-            is OidfWalletInput.Uri -> {
-                suite.markVisited(test.id, walletInput.value)
-            }
+        return oidfWithObservedWalletOutcome(walletOutcome) {
+            when (walletInput) {
+                is OidfWalletInput.Uri -> {
+                    suite.markVisited(test.id, walletInput.value)
+                }
 
-            is OidfWalletInput.WalletInitiated -> {
-                Unit
-            }
+                is OidfWalletInput.WalletInitiated -> {
+                    Unit
+                }
 
-            is OidfWalletInput.BrowserApi -> {
-                if (walletInput.callback.submitUrl.isBlank()) {
-                    require(walletInput.protocol == "openid4vci-v1") {
-                        "Only the OID4VCI Digital Credentials API create flow may omit a submit URL"
+                is OidfWalletInput.BrowserApi -> {
+                    if (walletInput.callback.submitUrl.isBlank()) {
+                        require(walletInput.protocol == "openid4vci-v1") {
+                            "Only the OID4VCI Digital Credentials API create flow may omit a submit URL"
+                        }
+                        require(walletOutcome.succeeded) {
+                            "VDX wallet did not complete OID4VCI Digital Credentials API issuance: " +
+                                (walletOutcome.error?.code ?: walletOutcome.status)
+                        }
+                    } else {
+                        val response =
+                            walletExecution.completionHandoff
+                                ?: buildJsonObject {
+                                    put(
+                                        "exception",
+                                        walletOutcome.error?.code
+                                            ?: "wallet interaction ended with ${walletOutcome.status}",
+                                    )
+                                }
+                        suite.submitBrowserApiResponse(
+                            submitUrl = walletInput.callback.submitUrl,
+                            responseJson = response,
+                        )
                     }
-                    require(walletOutcome.succeeded) {
-                        "VDX wallet did not complete OID4VCI Digital Credentials API issuance: " +
-                            (walletOutcome.error?.code ?: walletOutcome.status)
-                    }
-                } else {
-                    val response =
-                        walletExecution.completionHandoff
-                            ?: buildJsonObject {
-                                put(
-                                    "exception",
-                                    walletOutcome.error?.code
-                                        ?: "wallet interaction ended with ${walletOutcome.status}",
-                                )
-                            }
-                    suite.submitBrowserApiResponse(
-                        submitUrl = walletInput.callback.submitUrl,
-                        responseJson = response,
-                    )
                 }
             }
+            suite.waitForState(test.id, listOf("FINISHED", "INTERRUPTED"), timeoutMs = 180_000)
+            val info = suite.info(test.id)
+            OidfWalletHarnessResult(
+                planId = plan.id,
+                testId = test.id,
+                walletInput = walletInput.toString(),
+                walletOutcome = walletOutcome,
+                suiteStatus = info.status,
+                suiteResult = info.result,
+            )
         }
-        suite.waitForState(test.id, listOf("FINISHED", "INTERRUPTED"), timeoutMs = 180_000)
-        val info = suite.info(test.id)
-        return OidfWalletHarnessResult(
-            planId = plan.id,
-            testId = test.id,
-            walletInput = walletInput.toString(),
-            walletOutcome = walletOutcome,
-            suiteStatus = info.status,
-            suiteResult = info.result,
-        )
     }
 
     private suspend fun runWalletEphemeral(
@@ -224,6 +240,7 @@ internal class OidfWalletConformanceHarness(
             )
         return try {
             val runner = bootstrap.runner(profileId = profileId)
+            bindProfileWalletUnit(bootstrap)
             if (haip) {
                 checkNotNull(haipAttestationFixture) { "HAIP OID4VCI requires x5c wallet-attestation material" }
                     .provision(bootstrap, walletUnitId, profileId)
@@ -232,6 +249,14 @@ internal class OidfWalletConformanceHarness(
         } finally {
             bootstrap.destroy()
         }
+    }
+
+    private suspend fun bindProfileWalletUnit(bootstrap: HeadlessWalletRunnerBootstrap) {
+        val profile = bootstrap.profileRegistry.get(profileId).getOrElse { error(it.toString()) }
+        walletUnitId =
+            checkNotNull(profile.providerBinding?.descriptor?.walletUnitId) {
+                "OIDF fixture requires the selected profile's wallet-unit binding"
+            }
     }
 
     private suspend fun runWallet(
@@ -320,7 +345,7 @@ internal class OidfWalletConformanceHarness(
             runner.dispatch(outcome.sessionId, WalletInteractionAction.submitTxCode(txRef))
             outcome = runner.driveToTerminal(outcome.sessionId)
         }
-        repeat(MAX_EXTERNAL_HANDOFFS) {
+        for (handoffAttempt in 0 until MAX_EXTERNAL_HANDOFFS) {
             when (outcome.status) {
                 WalletInteractionStatus.AuthorizationRequired -> {
                     val handoffRef =
@@ -328,11 +353,23 @@ internal class OidfWalletConformanceHarness(
                             ?: error("OID4VCI authorization handoff is unavailable")
                     val authorizationUrl =
                         runner.consumeAuthorizationHandoff(outcome.sessionId, handoffRef)
-                            ?: error("OID4VCI authorization handoff is invalid or expired")
+                            ?: error(
+                                "OID4VCI authorization handoff is invalid or expired " +
+                                    "(status=${outcome.status}, errorCode=${outcome.error?.code})",
+                            )
                     val callbackUri = suite.visitFollowingRedirects(authorizationUrl, terminalRedirectUri = redirectUri)
                     val callbackRef = runner.registerAuthorizationCallback(outcome.sessionId, callbackUri)
                     runner.dispatch(outcome.sessionId, WalletInteractionAction.authCallback(callbackRef))
                     outcome = runner.driveToTerminal(outcome.sessionId)
+                    if (
+                        outcome.status == WalletInteractionStatus.AuthorizationRequired &&
+                        outcome.error?.code == WalletInteractionFailureCodes.OID4VCI_AUTHORIZATION_STATE_MISMATCH
+                    ) {
+                        // The callback was rejected; the pending receive still waits for its own response.
+                        // The browser handoff is one-use. Preserve the real typed outcome and let the
+                        // official suite independently observe that no token request follows this callback.
+                        break
+                    }
                 }
 
                 WalletInteractionStatus.DeferredRetrievalPending -> {
@@ -347,16 +384,23 @@ internal class OidfWalletConformanceHarness(
                 }
 
                 else -> {
-                    return@repeat
+                    break
                 }
             }
         }
         val completionHandoff =
             if (outcome.succeeded) {
-                val ref = runner.observe(outcome.sessionId).value.completionHandoffRef
-                ref
-                    ?.let { runner.consumeCompletionHandoff(outcome.sessionId, it) }
-                    ?.let { Json.parseToJsonElement(it).jsonObject }
+                val state = runner.observe(outcome.sessionId).value
+                state.completionHandoffRef?.let { ref ->
+                    consumeOidfCompletionHandoff(
+                        transport = state.completionHandoffTransport,
+                        consume = {
+                            checkNotNull(runner.consumeCompletionHandoff(outcome.sessionId, ref)) {
+                                "OIDF completion handoff is invalid or expired"
+                            }
+                        },
+                    )
+                }
             } else {
                 null
             }
@@ -398,6 +442,7 @@ internal class OidfWalletConformanceHarness(
                     ).also { created ->
                         vpBootstrap = created
                         vpRunner = created.runner(profileId = profileId)
+                        bindProfileWalletUnit(created)
                     }
         bootstrap.setHaipEnabled(false, profileId)
         val runner = checkNotNull(vpRunner)
@@ -411,6 +456,9 @@ internal class OidfWalletConformanceHarness(
                         overrides =
                             buildJsonObject {
                                 put("credential", buildJsonObject { put("signing_jwk", signingJwk) })
+                                if (format == "iso_mdl") {
+                                    put("vci", buildJsonObject { put("credential_configuration_id", "org.iso.18013.5.1.mDL") })
+                                }
                             },
                     ),
                 variant = oidfVciPresentationCredentialVariant(format),
@@ -443,7 +491,12 @@ internal class OidfWalletConformanceHarness(
                 }
             }
             require(setupExecution.outcome.succeeded) {
-                "OIDF credential setup wallet flow failed: ${setupExecution.outcome.error?.code ?: setupExecution.outcome.status}"
+                val providerCode =
+                    setupExecution.outcome.error
+                        ?.arguments
+                        ?.get("providerErrorCode")
+                "OIDF credential setup wallet flow failed: ${setupExecution.outcome.error?.code ?: setupExecution.outcome.status}" +
+                    (providerCode?.let { "; providerErrorCode=${it.toString().take(160)}" } ?: "")
             }
             suite.waitForState(setupTest.id, listOf("FINISHED", "INTERRUPTED"), timeoutMs = 180_000)
             setupInfo = suite.info(setupTest.id)
@@ -605,11 +658,34 @@ private fun oidfVciPreAuthorizedSmokeVariant(): JsonObject =
 
 private fun oidfVciPresentationCredentialVariant(format: String): JsonObject =
     oidfVciPreAuthorizedSmokeVariant().let { base ->
-        JsonObject(base + ("credential_format" to JsonPrimitive(if (format == "iso_mdl") "mdoc" else format)))
+        JsonObject(
+            base +
+                mapOf(
+                    "credential_format" to JsonPrimitive(if (format == "iso_mdl") "mdoc" else format),
+                    "authorization_request_type" to JsonPrimitive("rar"),
+                ),
+        )
     }
 
 private const val VCI_SETUP_PLAN = "oid4vci-1_0-wallet-test-plan"
 private const val VCI_SETUP_MODULE = "oid4vci-1_0-wallet-test-credential-issuance"
+
+internal fun oidfCredentialRequestEncryption(
+    planVariant: Map<String, String>,
+    moduleVariant: Map<String, String>,
+): Boolean = (planVariant + moduleVariant)["vci_credential_encryption"] == "encrypted"
+
+internal fun oidfWalletInitiatedIssuance(
+    planVariant: Map<String, String>,
+    moduleVariant: Map<String, String>,
+    testModule: String = "",
+): Boolean =
+    when ((planVariant + moduleVariant)["vci_authorization_code_flow_variant"]) {
+        null -> testModule.startsWith(FAPI2_CLIENT_MODULE_PREFIX)
+        "wallet_initiated" -> true
+        else -> false
+    }
+
 private const val VCI_BATCH_MODULE = "oid4vci-1_0-wallet-test-batch-credential-issuance"
 private const val FAPI2_CLIENT_MODULE_PREFIX = "fapi2-security-profile-final-client-test-"
 private const val VCI_SETUP_CONFIG = "scripts/test-configs-rp-against-op/vci-wallet-test-config-plain.json"

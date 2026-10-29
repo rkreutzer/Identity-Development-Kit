@@ -17,6 +17,8 @@
 package com.sphereon.wallet.credential
 
 import com.sphereon.core.api.IdkResult
+import com.sphereon.core.api.Err
+import com.sphereon.core.api.Ok
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.wallet.credential.store.WalletCredentialProtectedDocumentRole
 import kotlinx.serialization.Serializable
@@ -50,6 +52,54 @@ interface WalletCredentialStore {
         getCredential(walletUnitId, credentialRecordId).map { record ->
             record?.copy(instances = record.instances.map { it.withoutRaw() })
         }
+
+    /**
+     * Updates presentation-history metadata without requiring callers to open credential bodies.
+     * The transform may be retried by stores that use optimistic concurrency and therefore must
+     * be deterministic and side-effect free. Implementations without an envelope-write primitive
+     * retain the existing read/put authorization path by using the hydrated record fallback.
+     */
+    suspend fun updateCredentialEnvelope(
+        walletUnitId: String,
+        credentialRecordId: String,
+        transform: (CredentialRecord) -> CredentialRecord,
+    ): IdkResult<CredentialRecord?, IdkError> {
+        val record = getCredential(walletUnitId, credentialRecordId).getOrElse { return Err(it) } ?: return Ok(null)
+        val envelope = record.copy(instances = record.instances.map { it.withoutRaw() })
+        val updated = transform(envelope)
+        if (
+            updated.id != envelope.id ||
+            updated.walletUnitId != envelope.walletUnitId ||
+            updated.instances.size != envelope.instances.size ||
+            updated.instances.map { it.id }.toSet() != envelope.instances.map { it.id }.toSet() ||
+            updated.instances.any { it.raw != null } ||
+            updated.instances.any { updatedInstance ->
+                envelope.instances.first { it.id == updatedInstance.id }.bodyStorageRef != updatedInstance.bodyStorageRef
+            } ||
+            updated.copy(
+                updatedAt = envelope.updatedAt,
+                syncState = updated.syncState.copy(localRevision = envelope.syncState.localRevision),
+                instances =
+                    updated.instances.map { updatedInstance ->
+                        val original = envelope.instances.first { it.id == updatedInstance.id }
+                        updatedInstance.copy(bindingRefs = original.bindingRefs, updatedAt = original.updatedAt)
+                    },
+            ) != envelope
+        ) {
+            return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Credential envelope updates may only change presentation history and update timestamps"))
+        }
+        if (updated == envelope) return Ok(envelope)
+        val originalById = record.instances.associateBy { it.id }
+        val hydratedUpdate =
+            updated.copy(
+                instances =
+                    updated.instances.map { updatedInstance ->
+                        val original = requireNotNull(originalById[updatedInstance.id])
+                        updatedInstance.copy(raw = original.raw, bodyStorageRef = original.bodyStorageRef)
+                    },
+            )
+        return putCredential(walletUnitId, hydratedUpdate).map { it.copy(instances = it.instances.map { instance -> instance.withoutRaw() }) }
+    }
 
     suspend fun getMetadata(
         walletUnitId: String,

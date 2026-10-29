@@ -20,6 +20,7 @@ import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import dev.zacsweers.metro.binding
+import kotlinx.coroutines.CancellationException
 import kotlin.time.Instant
 
 /**
@@ -42,17 +43,24 @@ import kotlin.time.Instant
 class InMemoryDpopProofJtiCacheImpl(
     private val store: SingleUseObjectStore,
 ) : DpopProofJtiCache {
+    override suspend fun recordIfNew(jti: String, expiresAt: Instant): Boolean =
+        try {
+            store.recordIfNew(SingleUseObjectNamespaces.DPOP_JTI, jti, expiresAt).valueOrFalse()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
+
     override suspend fun hasBeenUsed(jti: String): Boolean = store.isRecorded(SingleUseObjectNamespaces.DPOP_JTI, jti).valueOrFalse()
 
     override suspend fun markAsUsed(
         jti: String,
         expiresAt: Instant
     ) {
-        // The two-phase contract (`hasBeenUsed` then `markAsUsed`) is inherently TOCTOU —
-        // upgrading callers to call [SingleUseObjectStore.recordIfNew] directly closes the
-        // race. This adapter preserves the legacy SPI shape for in-flight callers; new code
-        // should bypass this cache and use the unified SPI.
-        store.recordIfNew(SingleUseObjectNamespaces.DPOP_JTI, jti, expiresAt)
+        // Retained for legacy callers. Authentication must use recordIfNew and honor its
+        // result; separate peek/mark calls cannot provide atomic replay protection.
+        recordIfNew(jti, expiresAt)
     }
 
     override suspend fun clear() {

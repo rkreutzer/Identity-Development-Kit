@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.sphereon.openid.oid4vp.universal.impl.command
+package com.sphereon.openid.oid4vp.verifier.impl
 
 import com.sphereon.oauth2.common.model.AuthorizationRequest
 import com.sphereon.openid.oid4vp.dcql.DcqlCredentialQuery
@@ -22,6 +22,7 @@ import com.sphereon.openid.oid4vp.dcql.DcqlQuery
 import com.sphereon.openid.oid4vp.dcql.sdJwtVcMeta
 import com.sphereon.openid.oid4vp.universal.AuthorizationValidationSummary
 import com.sphereon.openid.oid4vp.universal.GetAuthorizationRequestStatusOutput
+import com.sphereon.openid.oid4vp.universal.VerifiedDataMode
 import com.sphereon.openid.oid4vp.universal.universalOid4vpResponseJson
 import com.sphereon.openid.oid4vp.verifier.CredentialValidationRejection
 import com.sphereon.openid.oid4vp.verifier.CredentialValidationRejectionReason
@@ -47,14 +48,10 @@ import kotlinx.serialization.json.jsonPrimitive
  * inspecting a Kotlin object that never crossed a codec.
  */
 class AuthorizationStatusValidationSummaryTest {
-    /**
-     * The very configuration the REST endpoint writes this response with, referenced rather than
-     * copied so the assertions below cannot drift from what a client actually receives. Reading it
-     * from [universalOid4vpResponseJson] matters: with `encodeDefaults = true` and the default
-     * `explicitNulls = true`, an absent optional is emitted as an explicit `null`, which a lenient
-     * hand-built `Json` would have dropped.
-     */
+    /** The configuration the REST endpoint and the callback dispatcher write this response with, referenced rather than copied. */
     private val productionJson = universalOid4vpResponseJson
+
+    private val mapper = AuthorizationSessionStatusResponseMapperImpl()
 
     @Test
     fun rejectedSessionExposesTheRejectionByCorrelationId() {
@@ -83,7 +80,7 @@ class AuthorizationStatusValidationSummaryTest {
         val encoded =
             productionJson.encodeToString(
                 GetAuthorizationRequestStatusOutput.serializer(),
-                statusOutput(session, summary),
+                mapper.build(session, VerifiedDataMode.entries.toList()),
             )
         val outputJson = productionJson.parseToJsonElement(encoded).jsonObject
 
@@ -135,7 +132,7 @@ class AuthorizationStatusValidationSummaryTest {
         val encoded =
             productionJson.encodeToString(
                 GetAuthorizationRequestStatusOutput.serializer(),
-                statusOutput(session, authorizationValidationSummaryOf(session)),
+                mapper.build(session, VerifiedDataMode.entries.toList()),
             )
         val reasonsOnTheWire =
             productionJson
@@ -176,7 +173,7 @@ class AuthorizationStatusValidationSummaryTest {
         val encoded =
             productionJson.encodeToString(
                 GetAuthorizationRequestStatusOutput.serializer(),
-                statusOutput(session, summary),
+                mapper.build(session, VerifiedDataMode.entries.toList()),
             )
         val validationJson =
             productionJson.parseToJsonElement(encoded).jsonObject.getValue("validation").jsonObject
@@ -198,25 +195,13 @@ class AuthorizationStatusValidationSummaryTest {
         val encoded =
             productionJson.encodeToString(
                 GetAuthorizationRequestStatusOutput.serializer(),
-                statusOutput(session, authorizationValidationSummaryOf(session)),
+                mapper.build(session, VerifiedDataMode.entries.toList()),
             )
         assertFalse(
             productionJson.parseToJsonElement(encoded).jsonObject.containsKey("validation"),
             "A session that never ran a validation must not advertise one",
         )
     }
-
-    private fun statusOutput(
-        session: AuthorizationSession,
-        summary: AuthorizationValidationSummary?,
-    ): GetAuthorizationRequestStatusOutput =
-        GetAuthorizationRequestStatusOutput(
-            correlationId = session.correlationId,
-            status = session.status,
-            lastUpdated = session.updatedAt,
-            sessionId = session.sessionId,
-            validation = summary,
-        )
 
     private fun session(
         correlationId: String,

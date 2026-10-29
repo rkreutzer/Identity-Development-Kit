@@ -94,6 +94,12 @@ interface DeleteCredentialOfferServiceCommand :
 data class GetCredentialOfferStatusInput(
     @SerialName("correlation_id")
     val correlationId: String,
+    /**
+     * Issuer instance the session must belong to. A session of another instance is answered as not found. Omitted by a
+     * caller that is not scoped to an instance.
+     */
+    @SerialName("instance_id")
+    val instanceId: String? = null,
 )
 
 /**

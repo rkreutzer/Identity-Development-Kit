@@ -22,6 +22,9 @@ import com.sphereon.openid.oid4vci.common.model.Oid4vciErrors
 import com.sphereon.openid.oid4vci.issuer.config.MutableOid4vciIssuerInstanceIdProvider
 import com.sphereon.openid.oid4vci.issuer.config.Oid4vciIssuerInstanceResolver
 import com.sphereon.openid.oid4vci.issuer.config.Oid4vciIssuerSpecProfile
+import com.sphereon.openid.oid4vci.issuer.config.CredentialSigningConfig
+import com.sphereon.openid.oid4vci.issuer.format.SigningKeyMode
+import com.sphereon.openid.oid4vci.issuer.impl.signing.IssuerKeyIdResolver
 import com.sphereon.openid.oid4vci.issuer.authorization.Oid4vciAuthorizationGrant
 import com.sphereon.openid.oid4vci.issuer.authorization.Oid4vciAuthorizationPolicySnapshot
 import com.sphereon.openid.oid4vci.issuer.impl.http.command.DefaultOid4vciIssuerPublicUrlResolver
@@ -34,6 +37,8 @@ import com.sphereon.openid.oid4vci.issuer.impl.http.command.IssueNonceEndpointCo
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
@@ -45,6 +50,37 @@ import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
 class Oid4vciIssuerProtocolHttpAdapterTest {
+    @Test
+    fun servedIssuerMetadataPublishesTheConfiguredCredentialThumbprintKey() = runTest {
+        val publicKey = Json.parseToJsonElement("""{"kty":"EC","crv":"P-256","x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"}""").jsonObject
+        val provider = object : com.sphereon.openid.oid4vci.issuer.config.Oid4vciIssuerConfigProvider by fakeConfigProvider {
+            override val credentialConfigurations = mapOf("selected" to CredentialConfigurationSupported(format = "dc+sd-jwt"))
+            override suspend fun credentialSigningConfigs() = mapOf("selected" to CredentialSigningConfig("server-owned-key", SigningKeyMode.JwkThumbprint))
+        }
+        fakeBuildMetadata.result = Ok(CredentialIssuerMetadata(
+            credentialIssuer = "https://issuer.example.com",
+            credentialEndpoint = "https://issuer.example.com/oid4vci/credential",
+            credentialConfigurationsSupported = provider.credentialConfigurations,
+        ))
+        val resolver = object : IssuerKeyIdResolver {
+            override suspend fun resolveDidVerificationMethodId(keyAlias: String, didMethod: String): IdkResult<String, IdkError> = error("No DID lookup")
+            override suspend fun resolvePublicJwk(keyAlias: String): IdkResult<JsonObject, IdkError> {
+                assertEquals("server-owned-key", keyAlias)
+                return Ok(publicKey)
+            }
+        }
+        val command = GetIssuerMetadataEndpointCommandImpl(execution, fakeBuildMetadata, fakeBuildSignedMetadata,
+            provider, fakeRestConfigProvider, FakeMultiManagedIdentifierService,
+            DefaultOid4vciIssuerPublicUrlResolver(NoOpAppConfigService), resolver)
+        val response = command.execute(GenericHttpRequest(method = "GET", path = "/.well-known/openid-credential-issuer")).getOrThrow()
+        assertEquals(200, response.statusCode)
+        val body = Json.parseToJsonElement(response.body!!).jsonObject
+        val published = body.getValue("jwks").jsonObject.getValue("keys").jsonArray.single().jsonObject
+        assertEquals(publicKey, JsonObject(published - "kid" - "use"))
+        assertTrue(published.getValue("kid").jsonPrimitive.content.startsWith("urn:ietf:params:oauth:jwk-thumbprint:sha-256:"))
+        assertEquals(JsonPrimitive("sig"), published["use"])
+    }
+
     private val routedIssuerId = "8b1c1e72-3677-4d46-8491-7bfcc7ed3f5e"
     private val json =
         Json {
@@ -328,6 +364,28 @@ class Oid4vciIssuerProtocolHttpAdapterTest {
         }
 
     @Test
+    fun metadataEndpointFallsBackToJsonWhenSignedMetadataIsRequestedWithoutSigningKey() =
+        runTest {
+            configureMetadataSuccess()
+
+            val request =
+                GenericHttpRequest(
+                    method = "GET",
+                    path = "/.well-known/openid-credential-issuer",
+                    headers = mapOf("host" to "issuer.example.com", "Accept" to "application/jwt"),
+                )
+
+            val response = metadataAdapter.dispatchForTest(request, metadataRegistry)
+
+            assertEquals(200, response.statusCode)
+            assertEquals("application/json", response.headers["Content-Type"])
+            val body = json.parseToJsonElement(assertNotNull(response.body)).jsonObject
+            assertEquals("https://issuer.example.com", body["credential_issuer"]?.jsonPrimitive?.content)
+            assertNull(body["signed_metadata"])
+            assertNull(fakeBuildSignedMetadata.lastArgs)
+        }
+
+    @Test
     fun pathBearingMetadataEndpointReturns200WithoutTenantResolution() =
         runTest {
             val pathConfigProvider =
@@ -379,6 +437,209 @@ class Oid4vciIssuerProtocolHttpAdapterTest {
             assertEquals("http://localhost:18084/oid4vci", buildMetadata.lastArgs?.issuerIdentifier)
             assertEquals("http://localhost:18084/oid4vci", buildMetadata.lastArgs?.baseUrl)
         }
+
+    /**
+     * A tenant host carries several issuers under `/oid4vci/<instance>`. A request for an issuer
+     * path that names none of them must not be answered with another issuer's metadata, even when
+     * the URL resolver lands on a sibling (host-level or tenant-default binding).
+     */
+    @Test
+    fun metadataEndpointRefusesUnknownIssuerPathInsteadOfServingAnotherIssuer() =
+        runTest {
+            val known = metadataFixtureFor("https://operator.example/oid4vci/msfm-r9")
+
+            val response =
+                known.adapter.dispatchForTest(
+                    GenericHttpRequest(
+                        method = "GET",
+                        path = "/.well-known/openid-credential-issuer/oid4vci/does-not-exist",
+                        headers = mapOf("host" to "operator.example"),
+                    ),
+                    known.registry,
+                )
+
+            assertEquals(404, response.statusCode, "unknown issuer path must be 404, got ${response.body}")
+            val body = json.parseToJsonElement(assertNotNull(response.body)).jsonObject
+            assertEquals("not_found", body["error"]?.jsonPrimitive?.content)
+            assertNull(body["credential_issuer"], "no issuer metadata may be disclosed for an unknown issuer path")
+            assertNull(known.buildMetadata.lastArgs, "metadata must not be built for an unknown issuer path")
+        }
+
+    @Test
+    fun metadataEndpointServesKnownIssuerPathWithItsOwnIdentifier() =
+        runTest {
+            val known = metadataFixtureFor("https://operator.example/oid4vci/msfm-r9")
+
+            val response =
+                known.adapter.dispatchForTest(
+                    GenericHttpRequest(
+                        method = "GET",
+                        path = "/.well-known/openid-credential-issuer/oid4vci/msfm-r9",
+                        headers = mapOf("host" to "operator.example"),
+                    ),
+                    known.registry,
+                )
+
+            assertEquals(200, response.statusCode, "known issuer path must be served, got ${response.body}")
+            val body = json.parseToJsonElement(assertNotNull(response.body)).jsonObject
+            assertEquals(
+                "https://operator.example/oid4vci/msfm-r9",
+                body["credential_issuer"]?.jsonPrimitive?.content,
+            )
+        }
+
+    @Test
+    fun bareOriginIssuerIsServedOnlyAtTheBareWellKnownPath() =
+        runTest {
+            val bare = metadataFixtureFor("https://issuer.example.com")
+
+            val bareResponse =
+                bare.adapter.dispatchForTest(
+                    GenericHttpRequest(
+                        method = "GET",
+                        path = "/.well-known/openid-credential-issuer",
+                        headers = mapOf("host" to "issuer.example.com"),
+                    ),
+                    bare.registry,
+                )
+            assertEquals(200, bareResponse.statusCode)
+            assertEquals(
+                "https://issuer.example.com",
+                json.parseToJsonElement(assertNotNull(bareResponse.body)).jsonObject["credential_issuer"]?.jsonPrimitive?.content,
+            )
+
+            val suffixed =
+                metadataFixtureFor("https://issuer.example.com")
+            val suffixedResponse =
+                suffixed.adapter.dispatchForTest(
+                    GenericHttpRequest(
+                        method = "GET",
+                        path = "/.well-known/openid-credential-issuer/anything",
+                        headers = mapOf("host" to "issuer.example.com"),
+                    ),
+                    suffixed.registry,
+                )
+            assertEquals(404, suffixedResponse.statusCode, "a bare-origin issuer has no path-bearing alias")
+            assertNull(suffixed.buildMetadata.lastArgs)
+        }
+
+    @Test
+    fun legacyPrefixMetadataRequestForUnknownIssuerPathIsNotFound() =
+        runTest {
+            val known = metadataFixtureFor("https://operator.example/oid4vci/msfm-r9")
+
+            val unknown =
+                known.command.execute(
+                    GenericHttpRequest(
+                        method = "GET",
+                        path = "/.well-known/openid-credential-issuer",
+                        headers = mapOf("host" to "operator.example"),
+                        originalPath = "/oid4vci/does-not-exist/.well-known/openid-credential-issuer",
+                    ),
+                )
+            assertEquals(404, unknown.value.statusCode)
+            assertNull(known.buildMetadata.lastArgs)
+
+            val own =
+                known.command.execute(
+                    GenericHttpRequest(
+                        method = "GET",
+                        path = "/.well-known/openid-credential-issuer",
+                        headers = mapOf("host" to "operator.example"),
+                        originalPath = "/oid4vci/msfm-r9/.well-known/openid-credential-issuer",
+                    ),
+                )
+            assertEquals(200, own.value.statusCode)
+        }
+
+    @Test
+    fun endedIssuerSelectionAnswersNotFoundWithMetadataErrorShape() =
+        runTest {
+            val ended =
+                metadataFixtureFor(
+                    issuerIdentifier = "https://operator.example/oid4vci/ended",
+                    resolvedUrls = Err(IdkError.NOT_FOUND_ERROR(message = "No active public endpoint for the selected OID4VCI issuer instance")),
+                )
+
+            val response =
+                ended.adapter.dispatchForTest(
+                    GenericHttpRequest(
+                        method = "GET",
+                        path = "/.well-known/openid-credential-issuer/oid4vci/ended",
+                        headers = mapOf("host" to "operator.example"),
+                    ),
+                    ended.registry,
+                )
+
+            assertEquals(404, response.statusCode, "an ended issuer must be 404, got ${response.body}")
+            assertEquals(
+                "not_found",
+                json.parseToJsonElement(assertNotNull(response.body)).jsonObject["error"]?.jsonPrimitive?.content,
+            )
+        }
+
+    private class MetadataFixture(
+        val command: GetIssuerMetadataEndpointCommandImpl,
+        val registry: TestHttpEndpointCommandRegistry,
+        val adapter: Oid4vciIssuerMetadataHttpAdapter,
+        val buildMetadata: FakeBuildIssuerMetadataCommand,
+    )
+
+    /**
+     * Metadata command whose URL resolver always answers [issuerIdentifier], regardless of the
+     * requested path. This models a resolver that fell back to a host-level or tenant-default
+     * binding: the command itself must still refuse a request for a different issuer path.
+     */
+    private fun metadataFixtureFor(
+        issuerIdentifier: String,
+        resolvedUrls: IdkResult<com.sphereon.openid.oid4vci.issuer.impl.http.command.Oid4vciIssuerPublicUrls, IdkError> =
+            Ok(
+                com.sphereon.openid.oid4vci.issuer.impl.http.command.Oid4vciIssuerPublicUrls(
+                    issuerIdentifier = issuerIdentifier,
+                    endpointBaseUrl = issuerIdentifier,
+                ),
+            ),
+    ): MetadataFixture {
+        val buildMetadata = FakeBuildIssuerMetadataCommand()
+        buildMetadata.result =
+            Ok(
+                CredentialIssuerMetadata(
+                    credentialIssuer = issuerIdentifier,
+                    credentialEndpoint = "$issuerIdentifier/credential",
+                    credentialConfigurationsSupported =
+                        mapOf("TestCred" to CredentialConfigurationSupported(format = "jwt_vc_json")),
+                ),
+            )
+        val resolver =
+            object : com.sphereon.openid.oid4vci.issuer.impl.http.command.Oid4vciIssuerPublicUrlResolver {
+                override suspend fun resolve(
+                    request: GenericHttpRequest,
+                    issuerConfigProvider: com.sphereon.openid.oid4vci.issuer.config.Oid4vciIssuerConfigProvider,
+                    restConfigProvider: com.sphereon.openid.oid4vci.rest.Oid4vciRestConfigProvider,
+                ) = resolvedUrls
+            }
+        val command =
+            GetIssuerMetadataEndpointCommandImpl(
+                execution,
+                buildMetadata,
+                FakeBuildSignedIssuerMetadataCommand(),
+                FakeOid4vciIssuerConfigProvider(issuerIdentifier = issuerIdentifier),
+                fakeRestConfigProvider,
+                FakeMultiManagedIdentifierService,
+                resolver,
+            )
+        val registry = TestHttpEndpointCommandRegistry(command)
+        val adapter =
+            Oid4vciIssuerMetadataHttpAdapter(
+                execution,
+                registry,
+                NoOpRoutableSlugLookup(),
+                testTenantIdProvider(),
+                FixedIssuerInstanceResolver(Ok(routedIssuerId)),
+                com.sphereon.openid.oid4vci.issuer.impl.config.DefaultOid4vciIssuerInstanceIdProvider(),
+            )
+        return MetadataFixture(command, registry, adapter, buildMetadata)
+    }
 
     // ========================================================================
     // 2. Credential offer endpoint

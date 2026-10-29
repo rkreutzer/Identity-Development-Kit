@@ -37,6 +37,7 @@ import com.sphereon.oauth2.server.authorization.command.CreateTokenResponseComma
 import com.sphereon.oauth2.server.authorization.command.GrantParameters
 import com.sphereon.oauth2.server.authorization.command.TokenRequestData
 import com.sphereon.oauth2.server.authorization.command.VerifiedAuthorizationCodeGrant
+import com.sphereon.oauth2.server.authorization.command.VerifiedClientAuthorization
 import com.sphereon.oauth2.server.authorization.command.VerifiedRefreshTokenGrant
 import com.sphereon.oauth2.server.authorization.command.VerifyAuthorizationCodeGrantArgs
 import com.sphereon.oauth2.server.authorization.command.VerifyAuthorizationCodeGrantCommand
@@ -48,6 +49,7 @@ import com.sphereon.oauth2.server.authorization.impl.storage.memory.InMemoryAuth
 import com.sphereon.oauth2.server.authorization.impl.storage.memory.InMemoryOAuth2BackingStorageImpl
 import com.sphereon.oauth2.server.authorization.impl.storage.memory.InMemoryTokenStorageImpl
 import com.sphereon.oauth2.server.authorization.impl.command.token.CreateRefreshTokenCommandImpl
+import com.sphereon.oauth2.server.authorization.impl.command.token.issueForVerifiedAuthorizationCode
 import com.sphereon.oauth2.server.authorization.impl.command.token.VerifyRefreshTokenGrantCommandImpl
 import com.sphereon.oauth2.server.authorization.impl.testutil.OAuth2ServerTestContext
 import com.sphereon.oauth2.server.authorization.impl.testutil.TestOAuth2ServersConfigProvider
@@ -64,6 +66,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import com.sphereon.oauth2.server.authorization.impl.provider.NoCredentialIssuerAudienceResolver
+import com.sphereon.oauth2.server.authorization.impl.config.RecordingSessionLogService
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -84,6 +87,65 @@ import kotlin.time.Duration.Companion.seconds
  * `JsonArray` of string primitives. Identity claims stay excluded — only `roles` crosses.
  */
 class AuthorizationCodeGrantRolesClaimTest {
+    @Test
+    fun publicPkceClientRefreshIssuanceUsesVerifiedCodeEvidence() = runTest {
+        val execution = OAuth2ServerTestContext("public-pkce-refresh", this@AuthorizationCodeGrantRolesClaimTest).execution
+        val storage = InMemoryTokenStorageImpl(InMemoryOAuth2BackingStorageImpl())
+        val creator = CreateRefreshTokenCommandImpl(execution, storage, TestOAuth2ServersConfigProvider(), defaultSecureRandom())
+        val context = grantContext().copy(tenantId = execution.tenantId)
+        val verified = VerifiedAuthorizationCodeGrant(codeData().copy(codeChallenge = "verified-challenge"), "operator-1", "client-1")
+        val issued = creator.issueForVerifiedAuthorizationCode(verified, context, null)
+        assertTrue(issued.isOk)
+        assertEquals("client-1", assertNotNull(storage.getRefreshToken(issued.value.value).value).clientId)
+        assertTrue(creator.createAfterVerifiedAuthorizationCode(verified.copy(codeData = codeData()), context, null).isErr)
+    }
+
+    @Test
+    fun trustedRefreshIssuancePreservesVerifiedGrantBindings() = runTest {
+        val execution = OAuth2ServerTestContext("verified-refresh-bindings", this@AuthorizationCodeGrantRolesClaimTest).execution
+        val storage = InMemoryTokenStorageImpl(InMemoryOAuth2BackingStorageImpl())
+        val creator = CreateRefreshTokenCommandImpl(execution, storage, TestOAuth2ServersConfigProvider(), defaultSecureRandom())
+        val original = codeData().copy(authTime = 123L, acr = "aal2", amr = listOf("pwd"), nonce = "nonce", sessionId = "login-session")
+        val verified = VerifiedAuthorizationCodeGrant(original, "operator-1", "client-1", scope = "openid", resource = listOf("issuer"), dpopJkt = "proof")
+        val context = grantContext().copy(tenantId = execution.tenantId, proofJkt = "proof", clientInstanceKeyJkt = "instance")
+        val client = VerifiedClientAuthorization("client-1", listOf(GrantType.AUTHORIZATION_CODE), tenantId = execution.tenantId)
+        val minted = creator.createAfterVerifiedAuthorizationCode(verified, context, client)
+        assertTrue(minted.isOk)
+        val row = assertNotNull(storage.getRefreshToken(minted.value.value).value)
+        assertEquals(verified.subject, row.subject)
+        assertEquals(verified.clientId, row.clientId)
+        assertEquals(verified.scope, row.scope)
+        assertEquals(verified.resource, row.resource)
+        assertEquals(original.authTime, row.authTime)
+        assertEquals(original.acr, row.acr)
+        assertEquals(original.amr, row.amr)
+        assertEquals(original.nonce, row.nonce)
+        assertEquals(original.sessionId, row.loginSessionId)
+        assertEquals("proof", row.dpopJkt)
+        assertEquals("instance", row.clientInstanceKeyJkt)
+    }
+
+    @Test
+    fun trustedRefreshIssuanceRejectsChangedClientTenantAndProof() = runTest {
+        val execution = OAuth2ServerTestContext("verified-refresh-refusal", this@AuthorizationCodeGrantRolesClaimTest).execution
+        val creator = CreateRefreshTokenCommandImpl(execution, InMemoryTokenStorageImpl(InMemoryOAuth2BackingStorageImpl()), TestOAuth2ServersConfigProvider(), defaultSecureRandom())
+        val verified = VerifiedAuthorizationCodeGrant(codeData(), "operator-1", "client-1", dpopJkt = "proof")
+        val context = grantContext().copy(tenantId = execution.tenantId, proofJkt = "proof")
+        val client = VerifiedClientAuthorization("client-1", listOf(GrantType.AUTHORIZATION_CODE), tenantId = execution.tenantId)
+        listOf(
+            context.copy(resolvedClientId = "other-client"),
+            context.copy(tenantId = "other-tenant"),
+            context.copy(proofJkt = null),
+            context.copy(proofJkt = "other-proof"),
+        ).forEach { changed ->
+            val refused = creator.createAfterVerifiedAuthorizationCode(verified, changed, client)
+            assertTrue(refused.isErr)
+            assertEquals("invalid_grant", refused.error.code)
+        }
+        assertTrue(creator.createAfterVerifiedAuthorizationCode(verified, context, client.copy(clientId = "other-client")).isErr)
+        assertTrue(creator.createAfterVerifiedAuthorizationCode(verified, context, client.copy(grantTypes = listOf(GrantType.CLIENT_CREDENTIALS))).isErr)
+    }
+
     private fun codeData(subject: String = "operator-1"): AuthorizationCodeData {
         val now = Clock.System.now()
         return AuthorizationCodeData(
@@ -195,6 +257,7 @@ class AuthorizationCodeGrantRolesClaimTest {
             createIdToken = lazy { commands.createIdToken },
             createTokenResponse = commands.createTokenResponse,
             credentialIssuerAudienceResolver = NoCredentialIssuerAudienceResolver(),
+            log = RecordingSessionLogService(),
         )
 
     private fun walletInstanceAttestationEvidence(): WalletInstanceAttestationEvidence =

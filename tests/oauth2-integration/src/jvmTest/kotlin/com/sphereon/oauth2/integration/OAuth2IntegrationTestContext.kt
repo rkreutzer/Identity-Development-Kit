@@ -70,6 +70,8 @@ class OAuth2IntegrationTestContext(
 
     init {
         (session.graph as TenantOverrideSessionGraph).mutableResolvedTenantIdProvider.setCurrentTenantId(DEFAULT_TENANT_ID)
+        // This trusted in-process fixture selects its one configured hosted AS explicitly.
+        (session.graph as TenantOverrideSessionGraph).mutableOAuth2ServerInstanceIdProvider.setCurrentAsInstanceId("default")
 
         val providerConfig = SoftwareKmsProviderConfig(id = "oauth2-integration-kms")
         val providerFactory = (app as SoftwareKmsProviderFactoryImpl.Graph).softwareKmsProvider

@@ -116,7 +116,7 @@ class DefaultIssuerKeyIdResolver(
     private val didProviderRegistry: DidProviderRegistry,
     private val didResolverRegistry: DidResolverRegistry,
     private val configService: PrincipalConfigService,
-    private val publicJwkSource: Provider<IssuerPublicJwkSource>? = null,
+    private val publicJwkSource: Provider<IssuerPublicJwkSource?>? = null,
 ) : IssuerKeyIdResolver {
     override suspend fun resolveDidVerificationMethodId(
         keyAlias: String,
@@ -247,9 +247,16 @@ class DefaultIssuerKeyIdResolver(
         if (keyName.isBlank()) {
             return Err(IdkError.fromString(code = "signing_key_unavailable", message = SIGNING_KEY_UNAVAILABLE))
         }
-        val managedPublicJwkSource = publicJwkSource
+        // Metro represents an absent optional provider binding with a provider of null.
+        // Resolve that optional pointee once; a failing provider remains authoritative refusal.
+        val managedPublicJwkSource =
+            try {
+                publicJwkSource?.invoke()
+            } catch (_: Exception) {
+                return Err(IdkError.fromString(code = "signing_key_unavailable", message = SIGNING_KEY_UNAVAILABLE))
+            }
         if (managedPublicJwkSource != null) {
-            val publicJwk = runCatching { managedPublicJwkSource.invoke().resolvePublicJwk(keyName) }.getOrNull()
+            val publicJwk = runCatching { managedPublicJwkSource.resolvePublicJwk(keyName) }.getOrNull()
             val jwk = publicJwk?.let { runCatching { Json.decodeFromJsonElement(Jwk.serializer(), it) }.getOrNull() }
                 ?: return Err(IdkError.fromString(code = "signing_key_unavailable", message = SIGNING_KEY_UNAVAILABLE))
             return Ok(jwk)

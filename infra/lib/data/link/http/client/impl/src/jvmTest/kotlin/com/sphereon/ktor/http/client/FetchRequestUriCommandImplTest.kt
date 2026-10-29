@@ -21,16 +21,22 @@ import com.sphereon.core.api.Ok
 import com.sphereon.core.api.session.asCoreApiServiceGraph
 import com.sphereon.core.defaults.app.staticMinimalTestAppGraph
 import com.sphereon.ktor.http.client.provider.HttpClientOptions
+import io.ktor.client.HttpClient
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.request.contentType
+import io.ktor.server.request.receiveParameters
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
+import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
+import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
@@ -53,7 +59,6 @@ class FetchRequestUriCommandImplTest {
     private val execution = session.asCoreApiServiceGraph().serviceExecution
 
     private var server: EmbeddedServer<*, *>? = null
-    private val serverPort: Int = 8065 // Fixed port for testing
 
     @AfterEach
     fun cleanup() {
@@ -61,22 +66,20 @@ class FetchRequestUriCommandImplTest {
         server = null
     }
 
-    private fun startTestServer(module: Application.() -> Unit): Int {
-        server =
-            embeddedServer(CIO, port = serverPort) {
+    private suspend fun startTestServer(module: Application.() -> Unit): Int {
+        val running =
+            embeddedServer(CIO, host = "127.0.0.1", port = 0) {
                 module()
             }.start(wait = false)
-
-        // Wait for server to be ready
-        Thread.sleep(100)
-        return serverPort
+        server = running
+        return running.engine.resolvedConnectors().single().port
     }
 
-    private fun getCommand(): FetchRequestUriCommand {
+    private fun getCommand(clientFactory: () -> HttpClient = { HttpClient() }): FetchRequestUriCommand {
         val httpClientFactory =
             com.sphereon.ktor.http.client.provider.HttpClientOptions.createDefault().let {
                 object : com.sphereon.ktor.http.client.provider.HttpClientFactory {
-                    override fun createClient(options: com.sphereon.ktor.http.client.provider.HttpClientOptions) = io.ktor.client.HttpClient()
+                    override fun createClient(options: com.sphereon.ktor.http.client.provider.HttpClientOptions) = clientFactory()
 
                     override fun isSupportedOptions(options: com.sphereon.ktor.http.client.provider.HttpClientOptions) = true
 
@@ -87,6 +90,45 @@ class FetchRequestUriCommandImplTest {
             }
         return FetchRequestUriCommandImpl(execution, httpClientFactory)
     }
+
+    @Test
+    fun postRequestUriUsesJwtAcceptAndUtf8FormEncodingWithOrWithoutOptionalFields() =
+        testApplication {
+            val inputs =
+                mapOf(
+                    "empty" to (null to null),
+                    "metadata" to ("""{"client_name":"Wallet & café = +","vp_formats_supported":{}}""" to null),
+                    "nonce" to (null to "nonce + & = é"),
+                    "both" to ("""{"client_name":"Wallet & café = +"}""" to "nonce + & = é"),
+                )
+            application {
+                routing {
+                    post("/request/{scenario}") {
+                        val (metadata, nonce) = inputs.getValue(requireNotNull(call.parameters["scenario"]))
+                        assertEquals("application/oauth-authz-req+jwt", call.request.headers[HttpHeaders.Accept])
+                        assertEquals(ContentType.Application.FormUrlEncoded, call.request.contentType().withoutParameters())
+                        val form = call.receiveParameters()
+                        assertEquals(metadata, form["wallet_metadata"])
+                        assertEquals(nonce, form["wallet_nonce"])
+                        assertEquals(listOfNotNull(metadata?.let { "wallet_metadata" }, nonce?.let { "wallet_nonce" }).toSet(), form.names())
+                        call.respondText("signed.request.jwt", ContentType.parse("application/oauth-authz-req+jwt"))
+                    }
+                }
+            }
+            for ((scenario, input) in inputs) {
+                val result =
+                    getCommand { createClient {} }.execute(
+                        FetchRequestUriArgs(
+                            requestUri = "http://localhost/request/$scenario",
+                            httpMethod = RequestUriMethod.POST,
+                            walletMetadataJson = input.first,
+                            walletNonce = input.second,
+                        ),
+                    )
+                assertTrue(result is Ok, "POST request_uri failed for $scenario: $result")
+                assertEquals("signed.request.jwt", result.value.content)
+            }
+        }
 
     @Test
     fun testFetchJwtRequestObject() =

@@ -38,6 +38,7 @@ enum class WalletUnitAttestationKind {
 enum class WalletUnitAttestationProfile {
     LOCAL_EVALUATION_REFERENCE,
     TS03_JWT,
+    OID4VCI_JWT,
 }
 
 @Serializable

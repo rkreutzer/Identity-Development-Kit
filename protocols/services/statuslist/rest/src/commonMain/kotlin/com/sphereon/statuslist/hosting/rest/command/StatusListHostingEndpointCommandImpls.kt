@@ -28,7 +28,6 @@ import com.sphereon.statuslist.StatusListErrors
 import com.sphereon.statuslist.StatusListHostingMode
 import com.sphereon.statuslist.StatusListRef
 import com.sphereon.statuslist.StatusListToken
-import com.sphereon.statuslist.command.GetStatusListCommand
 import com.sphereon.statuslist.command.GetStatusListTokenCommand
 import com.sphereon.statuslist.hosting.rest.StatusListHostingApiConstants
 import com.sphereon.statuslist.hosting.rest.StatusListHostingApiConstants.CommandIds
@@ -58,7 +57,6 @@ abstract class AbstractGetStatusListTokenEndpointCommand(
     id: String,
     execution: SessionExecution,
     endpoint: HttpEndpointDescriptor,
-    private val getStatusList: GetStatusListCommand,
     private val service: GetStatusListTokenCommand,
     private val hostingConfig: StatusListHostingConfig,
 ) : HttpEndpointCommandAdapter(
@@ -75,11 +73,13 @@ abstract class AbstractGetStatusListTokenEndpointCommand(
     ): IdkResult<GenericHttpResponse, IdkError> {
         val request = applyDuring(args)
         val ref = resolveRef(request).getOrElse { return Err(it) }
-        val list = getStatusList.execute(ref).getOrElse { return Err(it) }
-        if (list.hostingMode == StatusListHostingMode.EXPORT) {
+        // Read publication mode and token from the same URL-resolved list. A tenant-scoped
+        // management lookup can miss this list or select another tenant's correlation-id match.
+        val token = service.execute(ref).getOrElse { return Err(it) }
+        if (token.hostingMode == StatusListHostingMode.EXPORT) {
             return Err(StatusListErrors.listNotFound(ref.correlationId ?: ref.statusListUri ?: "<none>"))
         }
-        return service.execute(ref).map { token -> token.toRawResponse() }
+        return Ok(token.toRawResponse())
     }
 
     private fun StatusListToken.toRawResponse(): GenericHttpResponse {
@@ -103,14 +103,12 @@ abstract class AbstractGetStatusListTokenEndpointCommand(
 @StringKey(GetStatusListTokenByCorrelationIdEndpointCommand.COMMAND_ID)
 class GetStatusListTokenByCorrelationIdEndpointCommandImpl(
     execution: SessionExecution,
-    getStatusList: GetStatusListCommand,
     service: GetStatusListTokenCommand,
     private val hostingConfig: StatusListHostingConfig,
 ) : AbstractGetStatusListTokenEndpointCommand(
         id = GetStatusListTokenByCorrelationIdEndpointCommand.COMMAND_ID,
         execution = execution,
         endpoint = GetStatusListTokenByCorrelationIdEndpointCommand.ENDPOINT,
-        getStatusList = getStatusList,
         service = service,
         hostingConfig = hostingConfig,
     ),

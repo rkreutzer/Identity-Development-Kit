@@ -100,12 +100,20 @@ class DefaultIdentifierProtectionPolicyService : IdentifierProtectionPolicyServi
                 )
             }
 
+            // OID4VCI issuer identity is case-sensitive and includes the complete path.
+            "oid4vci_issuer" -> {
+                IdentifierProtectionPolicy(
+                    identifierType = type,
+                    mode = IdentifierProtectionMode.PLAINTEXT,
+                    normalization = NormalizationProfile.NONE,
+                )
+            }
+
             "domain",
             "url",
             "website",
             "issuer",
             "oidc_issuer",
-            "oid4vci_issuer",
             "oidc_federation_entity",
             "verifier",
             "jwks_url" -> {

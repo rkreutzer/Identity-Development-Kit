@@ -49,6 +49,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -61,6 +62,24 @@ import kotlin.test.assertTrue
  * Full integration tests with DI, HTTP mocking, and JWT parsing would require additional setup.
  */
 class ParseAuthorizationRequestCommandImplTest {
+    @Test
+    fun `unsigned DC API request ignores client id and expected origins in favor of platform origin`() {
+        val requestData =
+            buildJsonObject {
+                put("client_id", "attacker.example")
+                put("expected_origins", "not-an-origin-list")
+                put("response_type", "vp_token")
+                put("response_mode", "dc_api")
+            }
+
+        val normalized = unsignedDigitalCredentialsRequestData(requestData, "https://verified.example")
+
+        assertEquals("origin:https://verified.example", normalized["client_id"]?.jsonPrimitive?.content)
+        assertFalse("expected_origins" in normalized)
+        assertEquals("vp_token", normalized["response_type"]?.jsonPrimitive?.content)
+        assertEquals("dc_api", normalized["response_mode"]?.jsonPrimitive?.content)
+    }
+
     @Test
     fun `transaction data request is rejected when referenced query disables holder binding`() {
         val dcqlQuery =

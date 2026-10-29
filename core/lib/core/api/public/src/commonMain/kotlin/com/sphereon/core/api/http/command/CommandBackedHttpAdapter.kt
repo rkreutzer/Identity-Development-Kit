@@ -230,11 +230,9 @@ abstract class CommandBackedHttpAdapter(
         if (!endpoint.isEnabled) {
             return Err(IdkError.NOT_FOUND_ERROR(message = "Not found: ${request.method} ${request.path}"))
         }
-        // Defense-in-depth: refuse paths that contain traversal or encoded-slash
-        // tokens BEFORE peel evaluation. Endpoint pattern matchers below also
-        // reject these (no real route uses `..` or `%2F`), but failing early keeps
-        // the routableSlugLookup from being asked to resolve attack-shaped tokens.
-        if (pathHasUnsafeTokens(request.path)) {
+        // Opaque resource identifiers may contain encoded separators only in explicitly
+        // declared single-segment parameters. Mount literals and tenant selectors remain strict.
+        if (hasUnsafeEndpointPath(request.path, selectedRoute.matchedPathPattern, endpoint.encodedPathParameters)) {
             log.debug("[$id] Refusing unsafe path: ${request.method} ${request.path}")
             return Err(
                 IdkError.ILLEGAL_ARGUMENT_ERROR(
@@ -505,12 +503,6 @@ abstract class CommandBackedHttpAdapter(
             !seg.endsWith("-") &&
             !seg.startsWith("xn--")
 
-    /**
-     * Cheap pre-filter for path traversal / encoded-slash tokens. Returns true
-     * for any path that would be unsafe to feed into the peel/route layer.
-     */
-    private fun pathHasUnsafeTokens(path: String): Boolean = FORBIDDEN_PATH_TOKENS.any { token -> path.contains(token, ignoreCase = true) }
-
     private fun validateSelectedEndpoint(
         route: HttpAdapterRouteMatch,
         endpoint: HttpEndpointCommand,
@@ -538,8 +530,6 @@ abstract class CommandBackedHttpAdapter(
 
     companion object {
         private val SAFE_SLUG_RE = Regex("^[a-z][a-z0-9-]{0,62}$")
-
-        private val FORBIDDEN_PATH_TOKENS = listOf("..", "//", "%2f", "%5c", "\\")
 
         /** Public protocol mount segments that are never tenant slugs. */
         private val PROTOCOL_PREFIX_SEGMENTS = setOf("as", "oid4vci", "oid4vp")
@@ -673,4 +663,27 @@ private object NoopMutableResolvedTenantIdProvider : MutableResolvedTenantIdProv
     override fun setCurrentTenantId(tenantId: String) { /* no-op */ }
 
     override fun clearCurrentTenantId() { /* no-op */ }
+}
+
+/** Keep encoded resource data out of routing decisions; decoding happens once, after raw segment matching. */
+internal fun hasUnsafeEndpointPath(path: String, pattern: String, encodedParameters: Set<String>): Boolean {
+    val forbidden = listOf("..", "//", "%2f", "%5c", "\\")
+    if (encodedParameters.isEmpty()) return forbidden.any { path.contains(it, ignoreCase = true) }
+    if (path.contains("//") || path.contains('\\')) return true
+    val values = path.split('/').filter { it.isNotEmpty() }
+    val tokens = pattern.split('/').filter { it.isNotEmpty() }
+    if (values.size != tokens.size) return true
+    return values.indices.any { index ->
+        val value = values[index]
+        val name = tokens[index].removePrefix("{").removeSuffix("}")
+        if (tokens[index] != "{$name}" || name !in encodedParameters) {
+            forbidden.any { value.contains(it, ignoreCase = true) }
+        } else {
+            val dots = value.replace(Regex("%2[eE]"), ".")
+            dots == "." || dots == ".." || value.any { it.code < 32 || it.code == 127 } ||
+                value.indices.any { offset -> value[offset] == '%' &&
+                    (offset + 2 >= value.length || value[offset + 1].digitToIntOrNull(16) == null ||
+                        value[offset + 2].digitToIntOrNull(16) == null) }
+        }
+    }
 }

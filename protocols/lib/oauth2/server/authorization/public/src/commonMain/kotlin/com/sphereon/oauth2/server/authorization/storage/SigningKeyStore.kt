@@ -17,6 +17,7 @@
 package com.sphereon.oauth2.server.authorization.storage
 
 import com.sphereon.core.api.IdkResult
+import com.sphereon.core.api.Err
 import com.sphereon.crypto.core.KeyInfo
 import com.sphereon.crypto.core.KeyType
 import com.sphereon.crypto.core.generic.SignatureAlgorithm
@@ -96,6 +97,22 @@ interface SigningKeyStore {
      * a deployment can backfill historical keys at startup without triggering rotation events.
      */
     suspend fun register(key: OAuth2SigningKey): IdkResult<Unit, SigningKeyStoreError>
+
+    /**
+     * Atomically adds an eligible ACTIVE signing descriptor without changing the current
+     * default signer or demoting any existing key. The store derives the appended key's
+     * priority; caller-supplied priority is never authoritative for this operation.
+     *
+     * Requires an existing eligible default, an unused tenant-local kid, and an ACTIVE key
+     * whose notBefore has arrived. On failure the collection and its revision remain unchanged.
+     * The returned descriptor carries the durable priority actually selected by the store.
+     * Implementations that cannot provide this atomic guarantee must fail closed.
+     */
+    suspend fun appendPreservingDefault(key: OAuth2SigningKey): IdkResult<OAuth2SigningKey, SigningKeyStoreError> =
+        Err(SigningKeyStoreError.StorageFailure(
+            operation = "appendPreservingDefault",
+            details = "Atomic default-preserving signing-key append is not supported by this store",
+        ))
 
     /**
      * Atomic rotation: insert [newActive] as the highest-priority `ACTIVE` key for its

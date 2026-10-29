@@ -22,6 +22,7 @@ import com.sphereon.openid.oid4vci.issuer.attribute.CredentialAttributeContribut
 import com.sphereon.openid.oid4vci.issuer.config.Oid4vciIssuerConfigProvider
 import com.sphereon.openid.oid4vci.issuer.format.CredentialFormatHandler
 import com.sphereon.openid.oid4vci.issuer.lifecycle.Oid4vciIssuanceLifecycleHook
+import com.sphereon.openid.oid4vci.issuer.spi.IssuerFederationEntityResolver
 import com.sphereon.openid.oid4vci.issuer.store.CredentialIssuanceSessionStore
 import com.sphereon.openid.oid4vci.issuer.store.DeferredCredentialStore
 import dev.zacsweers.metro.Inject
@@ -60,6 +61,8 @@ class DeferredPipelineReExecutorFactory(
     data class FormatDispatch(
         val formatHandlers: Set<CredentialFormatHandler> = emptySet(),
         val credentialDesignService: CredentialDesignService? = null,
+        /** OpenID Federation membership of the issuer; null when the deployment hosts no federation entities. */
+        val federationEntityResolver: IssuerFederationEntityResolver? = null,
     )
 
     /**
@@ -80,6 +83,7 @@ class DeferredPipelineReExecutorFactory(
             issuerConfigProvider = issuerConfigProvider,
             formatHandlers = formatDispatch.formatHandlers,
             credentialDesignService = formatDispatch.credentialDesignService,
+            federationEntityResolver = formatDispatch.federationEntityResolver,
             tenantIdProvider = tenantIdProvider,
             businessModeProvider = businessModeProvider,
         )

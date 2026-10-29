@@ -43,6 +43,7 @@ import com.sphereon.oauth2.common.jarm.CreateJarmResponseCommand
 import com.sphereon.oauth2.common.jarm.JarmConfig
 import com.sphereon.oauth2.common.jarm.JarmMode
 import com.sphereon.oauth2.common.model.AuthorizationResponse
+import com.sphereon.oauth2.common.model.AuthorizationErrorResponse
 import com.sphereon.openid.oid4vp.common.ResponseMode
 import com.sphereon.openid.oid4vp.common.VpToken.Companion.toJson
 import com.sphereon.openid.oid4vp.common.responseUri
@@ -166,6 +167,14 @@ class SubmitAuthorizationResponseCommandImpl(
     ): IdkResult<SubmissionResult, IdkError> {
         val processedArgs = applyDuring(args)
         val resolvedRequest = processedArgs.resolvedRequest
+        val errorResponse = processedArgs.errorResponse
+        if (errorResponse != null && (!processedArgs.resolvedRequest.verifierInfo.clientIdValid ||
+                errorResponse.state != processedArgs.resolvedRequest.request.state || errorResponse.additionalParameters.isNotEmpty())) {
+            return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Authorization error requires a validated client and the original request state"))
+        }
+        if (errorResponse == null && processedArgs.resolvedRequest.authorizationError != null) {
+            return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "An invalid authorization request cannot receive a credential presentation"))
+        }
         val response = processedArgs.response
 
         // Determine response mode: use override, or request's mode, or default to DIRECT_POST
@@ -199,7 +208,7 @@ class SubmitAuthorizationResponseCommandImpl(
 
         return when (effectiveResponseMode) {
             ResponseMode.DIRECT_POST -> {
-                submitDirectPost(resolvedRequest, response)
+                submitDirectPost(resolvedRequest, response, errorResponse)
             }
 
             ResponseMode.DIRECT_POST_JWT -> {
@@ -207,25 +216,38 @@ class SubmitAuthorizationResponseCommandImpl(
             }
 
             ResponseMode.DC_API -> {
-                buildDigitalCredentialResponse(response)
+                if (errorResponse == null) buildDigitalCredentialResponse(requireNotNull(response)) else digitalCredentialError(errorResponse)
             }
 
             ResponseMode.DC_API_JWT -> {
-                submitDirectPostJwt(processedArgs, digitalCredentialsApi = true)
+                // Appendix A.4 returns a protocol error as a single data.error member, even for dc_api.jwt.
+                if (errorResponse != null) digitalCredentialError(errorResponse) else submitDirectPostJwt(processedArgs, digitalCredentialsApi = true)
             }
 
             ResponseMode.FRAGMENT -> {
-                buildRedirectResponse(resolvedRequest, response, "#")
+                if (errorResponse != null) Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Redirect error submission is not supported"))
+                else buildRedirectResponse(resolvedRequest, requireNotNull(response), "#")
             }
 
             ResponseMode.QUERY -> {
-                buildRedirectResponse(resolvedRequest, response, "?")
+                if (errorResponse != null) Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Redirect error submission is not supported"))
+                else buildRedirectResponse(resolvedRequest, requireNotNull(response), "?")
             }
 
             ResponseMode.IAE_POST, ResponseMode.IAE_POST_JWT -> {
                 Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "IAE response modes are not supported for holder submission"))
             }
         }
+    }
+
+    private fun digitalCredentialError(error: AuthorizationErrorResponse): IdkResult<SubmissionResult, IdkError> =
+        Ok(SubmissionResult.DigitalCredential(buildJsonObject { put("error", JsonPrimitive(error.error)) }))
+
+    private fun authorizationErrorParameters(error: AuthorizationErrorResponse): JsonObject = buildJsonObject {
+        put("error", JsonPrimitive(error.error))
+        error.errorDescription?.let { put("error_description", JsonPrimitive(it)) }
+        error.errorUri?.let { put("error_uri", JsonPrimitive(it)) }
+        error.state?.let { put("state", JsonPrimitive(it)) }
     }
 
     /**
@@ -242,7 +264,8 @@ class SubmitAuthorizationResponseCommandImpl(
      */
     private suspend fun submitDirectPost(
         resolvedRequest: ResolvedOid4vpRequest,
-        response: AuthorizationResponse,
+        response: AuthorizationResponse?,
+        errorResponse: AuthorizationErrorResponse? = null,
     ): IdkResult<SubmissionResult, IdkError> {
         // Get response_uri from request
         val responseUri =
@@ -259,27 +282,20 @@ class SubmitAuthorizationResponseCommandImpl(
             return Err(validationError)
         }
 
-        // Get VP token from response
-        val vpTokenElement =
-            resolveVpTokenElement(response)
-                ?: return Err(
-                    IdkError.ILLEGAL_ARGUMENT_ERROR(
-                        message = "vp_token is required in authorization response",
-                    ),
-                )
-        val vpTokenJson = encodeJsonElement(vpTokenElement)
-        val presentationSubmissionElement = response.additionalParameters["presentation_submission"]
-
-        log.info("Submitting authorization response to: $responseUri")
-
-        // Build form parameters
-        // OpenID4VP 1.0 Final: Only vp_token and state (NO presentation_submission!)
-        val formParameters =
-            Parameters.build {
-                append("vp_token", vpTokenJson)
-                presentationSubmissionElement?.let { append("presentation_submission", encodeJsonElement(it)) }
-                response.state?.let { append("state", it) }
+        val vpTokenElement = if (errorResponse == null) {
+            resolveVpTokenElement(requireNotNull(response))
+                ?: return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "vp_token is required in authorization response"))
+        } else null
+        val formParameters = Parameters.build {
+            if (errorResponse != null) {
+                authorizationErrorParameters(errorResponse).forEach { (name, value) -> append(name, value.jsonPrimitive.content) }
+            } else {
+                val success = requireNotNull(response)
+                append("vp_token", encodeJsonElement(requireNotNull(vpTokenElement)))
+                success.additionalParameters["presentation_submission"]?.let { append("presentation_submission", encodeJsonElement(it)) }
+                success.state?.let { append("state", it) }
             }
+        }
 
         // Create HTTP client and POST
         val httpClient =
@@ -398,10 +414,11 @@ class SubmitAuthorizationResponseCommandImpl(
     ): IdkResult<SubmissionResult, IdkError> {
         val resolvedRequest = args.resolvedRequest
         val response = args.response
+        val errorResponse = args.errorResponse
         val jarmOptions = args.jarmOptions
 
         // Validate JARM options are provided
-        if (jarmOptions == null) {
+        if (jarmOptions == null && errorResponse == null) {
             return Err(
                 IdkError.ILLEGAL_ARGUMENT_ERROR(
                     message = "jarmOptions is required for direct_post.jwt response mode",
@@ -422,29 +439,20 @@ class SubmitAuthorizationResponseCommandImpl(
             validateUri(responseUri)?.let { return Err(it) }
         }
 
-        // Get VP token from response
-        val vpTokenElement =
-            resolveVpTokenElement(response)
-                ?: return Err(
-                    IdkError.ILLEGAL_ARGUMENT_ERROR(
-                        message = "vp_token is required in authorization response",
-                    ),
-                )
-        val vpTokenJson = encodeJsonElement(vpTokenElement)
-
-        // Determine JARM configuration from client_metadata or explicit config
-        val jarmConfig =
-            jarmOptions.jarmConfig ?: deriveJarmConfigFromClientMetadata(resolvedRequest)
-                ?: return Err(
-                    IdkError.ILLEGAL_ARGUMENT_ERROR(
-                        message = "No JARM configuration: neither jarmConfig nor client_metadata JARM parameters provided",
-                    ),
-                )
+        val vpTokenElement = if (errorResponse == null) {
+            resolveVpTokenElement(requireNotNull(response))
+                ?: return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "vp_token is required in authorization response"))
+        } else null
+        val vpTokenJson = vpTokenElement?.let(::encodeJsonElement)
+        val jarmConfig = jarmOptions?.jarmConfig ?: deriveJarmConfigFromClientMetadata(resolvedRequest)
+            ?: if (errorResponse != null && !digitalCredentialsApi) {
+                return submitDirectPost(resolvedRequest, null, errorResponse)
+            } else return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "No response encryption configuration"))
 
         // OpenID4VP 1.0 §8.3/§8.4's final `.jwt` modes require an unsigned,
         // encrypted response. The same embedded JWK selected while preparing
         // mdoc DeviceAuthentication must also be the key used for this JWE.
-        // Reject explicit legacy JARM profiles or key-selection drift before
+        // Reject signed OAuth JARM profiles or key-selection drift before
         // creating/signing any response token.
         val finalOid4vpJwtMode =
             digitalCredentialsApi ||
@@ -462,7 +470,7 @@ class SubmitAuthorizationResponseCommandImpl(
 
         // Validate signing key is present for signing modes
         if ((jarmConfig.mode == JarmMode.SIGNED || jarmConfig.mode == JarmMode.SIGNED_ENCRYPTED) &&
-            jarmOptions.signingKey == null
+            jarmOptions?.signingKey == null
         ) {
             return Err(
                 IdkError.ILLEGAL_ARGUMENT_ERROR(
@@ -480,7 +488,10 @@ class SubmitAuthorizationResponseCommandImpl(
                 jarmConfig.mode == JarmMode.SIGNED_ENCRYPTED
             ) {
                 resolveEncryptionRecipient(resolvedRequest, jarmConfig)
-                    .getOrElse { return Err(it) }
+                    .getOrElse {
+                        if (errorResponse != null && !digitalCredentialsApi) return submitDirectPost(resolvedRequest, null, errorResponse)
+                        return Err(it)
+                    }
             } else {
                 null
             }
@@ -551,30 +562,32 @@ class SubmitAuthorizationResponseCommandImpl(
         log.debug("Creating JARM authorization response with mode: ${jarmConfig.mode}")
 
         // Build response parameters for JARM payload
-        val responseParameters =
-            kotlinx.serialization.json.buildJsonObject {
-                put("vp_token", JsonPrimitive(vpTokenJson))
-                response.additionalParameters["presentation_submission"]?.let { submission ->
-                    put("presentation_submission", submission)
-                }
+        val responseParameters = errorResponse?.let(::authorizationErrorParameters)
+            ?: buildJsonObject {
+                put("vp_token", if (finalOid4vpJwtMode) requireNotNull(vpTokenElement) else JsonPrimitive(vpTokenJson))
+                requireNotNull(response).additionalParameters["presentation_submission"]?.let { put("presentation_submission", it) }
             }
+        // Error responses have no mdoc DeviceAuthentication transcript to bind.
+        val headerOverrides = if (errorResponse != null) null else jarmOptions?.protectedHeaderOverrides
 
         // Create JARM JWT using the generic oauth2 JARM command
         val jarmArgs =
             CreateJarmResponseArgs(
                 responseParameters = responseParameters,
-                state = response.state,
-                issuer = jarmOptions.issuer,
+                state = errorResponse?.state ?: response?.state,
+                issuer = jarmOptions?.issuer,
                 audience = audience,
-                signingKey = jarmOptions.signingKey,
+                signingKey = jarmOptions?.signingKey,
                 encryptionRecipient = encryptionRecipient,
                 jarmConfig = jarmConfig,
-                protectedHeaderOverrides = jarmOptions.protectedHeaderOverrides,
+                protectedHeaderOverrides = headerOverrides,
+                appendStandardJwtClaims = !finalOid4vpJwtMode,
             )
 
         val jarmResult =
             createJarmCommand.execute(jarmArgs).getOrElse { error ->
                 log.error("Failed to create JARM authorization response: ${error.message}")
+                if (errorResponse != null && !digitalCredentialsApi) return submitDirectPost(resolvedRequest, null, errorResponse)
                 return Err(error)
             }
 

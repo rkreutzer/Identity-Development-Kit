@@ -14,6 +14,7 @@ import com.sphereon.core.api.session.asCoreApiServiceGraph
 import com.sphereon.core.compat.Uuid
 import com.sphereon.crypto.core.kms.asKeyManagerServiceGraph
 import com.sphereon.crypto.kms.provider.software.SoftwareKmsProviderFactoryImpl
+import com.sphereon.wallet.credential.store.WalletCredentialProtectedDocumentRole
 import com.sphereon.wallet.wscd.testfixtures.createWalletAppGraph
 import com.sphereon.wallet.wscd.software.SoftwareKmsProviderRegistrar
 import com.sphereon.wallet.wscd.SoftwareWscdKeyStoreConfiguration
@@ -43,6 +44,37 @@ class SoftwareWscdWalletCredentialBodyProtectorTest {
             assertTrue(protector.open("wallet-b", "record-1", "instance-1", protectedBody.value).isErr)
             assertTrue(protector.open("wallet-a", "record-2", "instance-1", protectedBody.value).isErr)
             assertTrue(protector.open("wallet-a", "record-1", "instance-2", protectedBody.value).isErr)
+        }
+
+    @Test
+    fun refreshTokenRoleUsesDistinctAuthenticatedData() =
+        runTest {
+            val protector = createProtector()
+            val plaintext = "refresh-token-secret".encodeToByteArray()
+            val protectedToken =
+                protector.protect(
+                    "wallet-a",
+                    "record-refresh-a",
+                    "refresh-token",
+                    plaintext,
+                    WalletCredentialProtectedDocumentRole.REFRESH_TOKEN,
+                )
+
+            assertTrue(protectedToken.isOk)
+            assertFalse(protectedToken.value.decodeToString().contains("refresh-token-secret"))
+            val opened =
+                protector.open(
+                    "wallet-a",
+                    "record-refresh-a",
+                    "refresh-token",
+                    protectedToken.value,
+                    WalletCredentialProtectedDocumentRole.REFRESH_TOKEN,
+                )
+            assertTrue(opened.isOk)
+            assertEquals("refresh-token-secret", opened.value.decodeToString())
+            assertTrue(
+                protector.open("wallet-a", "record-refresh-a", "refresh-token", protectedToken.value).isErr,
+            )
         }
 
     @Test

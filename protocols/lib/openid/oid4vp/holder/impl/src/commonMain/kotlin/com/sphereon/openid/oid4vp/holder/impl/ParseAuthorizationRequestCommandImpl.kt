@@ -55,6 +55,7 @@ import com.sphereon.oauth2.client.command.MergeRequestObjectArgs
 import com.sphereon.oauth2.common.model.AuthorizationRequest
 import com.sphereon.openid.oid4vp.common.ClientIdScheme
 import com.sphereon.openid.oid4vp.common.ClientMetadata
+import com.sphereon.openid.oid4vp.common.JarConstants
 import com.sphereon.openid.oid4vp.common.Oid4vpJson
 import com.sphereon.openid.oid4vp.common.Oid4vpRequestTrustMaterialProvider
 import com.sphereon.openid.oid4vp.common.qualifyDidJarVerificationMethodId
@@ -63,7 +64,6 @@ import com.sphereon.openid.oid4vp.holder.ParseAuthorizationRequestArgs
 import com.sphereon.openid.oid4vp.holder.ParseAuthorizationRequestCommand
 import com.sphereon.openid.oid4vp.holder.ParseAuthorizationRequestCommandService
 import com.sphereon.openid.oid4vp.holder.WalletConfig
-import com.sphereon.openid.oid4vp.holder.validation.validateOid4vpAuthorizationRequest
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import io.ktor.client.call.body
@@ -317,12 +317,9 @@ class ParseAuthorizationRequestCommandImpl(
                 additionalParameters = additionalParamsFromRequest + jarParams,
             )
 
-        // Validate the authorization request using Konform
-        return validateOid4vpAuthorizationRequest(authRequest).toIdkResult { errors ->
-            IdkError.ILLEGAL_ARGUMENT_ERROR(
-                message = "Invalid OpenID4VP authorization request: ${errors.joinToString(", ") { "${it.path}: ${it.message}" }}",
-            )
-        }
+        // Semantic validation runs after client authentication in the resolver, so a trusted
+        // verifier can receive the protocol error without any credential being prepared.
+        return Ok(authRequest)
     }
 
     private suspend fun parseDigitalCredentialsRequest(
@@ -337,17 +334,10 @@ class ParseAuthorizationRequestCommandImpl(
         val parsed =
             when (request.protocol) {
                 DIGITAL_CREDENTIAL_PROTOCOL_UNSIGNED -> {
-                    if ("client_id" in request.data || "expected_origins" in request.data) {
-                        return Err(
-                            IdkError.ILLEGAL_ARGUMENT_ERROR(
-                                message = "Unsigned Digital Credentials requests must derive client_id from the browser origin",
-                            ),
-                        )
-                    }
                     parseAuthorizationRequestUri(
                         requestUri =
                             authorizationRequestUri(
-                                request.data + ("client_id" to JsonPrimitive("origin:${request.origin}")),
+                                unsignedDigitalCredentialsRequestData(request.data, request.origin),
                             ),
                         walletConfig = walletConfig,
                     ).getOrElse { return Err(it) }
@@ -491,6 +481,14 @@ class ParseAuthorizationRequestCommandImpl(
         walletConfig: WalletConfig?,
     ): IdkResult<io.ktor.http.Parameters, IdkError> {
         val header = extractJwtHeader(requestObjectJwt)
+        val typ = (header["typ"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+        if (typ != JarConstants.JAR_JWT_TYP) {
+            return Err(
+                IdkError.ILLEGAL_ARGUMENT_ERROR(
+                    message = "Request Object typ must be '${JarConstants.JAR_JWT_TYP}'",
+                ),
+            )
+        }
         val payloadHint = extractJwtPayload(requestObjectJwt)
         val kid = header["kid"]?.jsonPrimitive?.contentOrNull
         val x5cHeader =
@@ -791,6 +789,17 @@ class ParseAuthorizationRequestCommandImpl(
         return Ok(resolved.keyInfo)
     }
 }
+
+/**
+ * OID4VP 1.0 Appendix A.2 requires wallets to ignore `client_id` and `expected_origins`
+ * in unsigned DC API requests. The authenticated platform origin supplies the response
+ * identity, so a caller-provided client_id must never override it.
+ */
+internal fun unsignedDigitalCredentialsRequestData(data: JsonObject, origin: String): JsonObject =
+    JsonObject(
+        data.filterKeys { it != "client_id" && it != "expected_origins" } +
+            ("client_id" to JsonPrimitive("origin:$origin")),
+    )
 
 internal const val DIGITAL_CREDENTIAL_ORIGIN_PARAMETER: String = "__idk_dc_api_origin"
 internal const val DIGITAL_CREDENTIAL_PROTOCOL_PARAMETER: String = "__idk_dc_api_protocol"

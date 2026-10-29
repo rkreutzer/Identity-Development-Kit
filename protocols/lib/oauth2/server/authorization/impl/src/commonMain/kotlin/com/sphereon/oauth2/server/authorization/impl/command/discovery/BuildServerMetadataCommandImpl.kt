@@ -267,7 +267,7 @@ class BuildServerMetadataCommandImpl(
         val metadata =
             AuthorizationServerMetadata(
                 issuer = issuerUrl,
-                tokenEndpoint = "$baseUrl/token",
+                tokenEndpoint = canonicalTokenEndpointForIssuer(issuerUrl),
                 authorizationEndpoint = "$baseUrl/authorize",
                 jwksUri = config.jwksUri ?: "$baseUrl/.well-known/jwks.json",
                 grantTypesSupported =
@@ -593,3 +593,6 @@ class BuildServerMetadataCommandImpl(
  * field entirely (`null`) when the feature is disabled, so RFC 8414 § 2 default semantics apply.
  */
 private inline fun <T> FeaturePolicy.whenEnabled(value: () -> T?): T? = if (isEnabled) value() else null
+
+/** The same endpoint expression used by discovery, without request-derived trust decisions. */
+internal fun canonicalTokenEndpointForIssuer(issuerUrl: String): String = "${issuerUrl.trimEnd('/')}/token"

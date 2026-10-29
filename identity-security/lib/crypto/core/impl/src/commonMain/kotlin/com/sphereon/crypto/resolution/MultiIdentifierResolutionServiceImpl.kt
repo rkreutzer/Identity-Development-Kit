@@ -59,10 +59,15 @@ class MultiIdentifierResolutionServiceImpl(
         args: IdentifierOptsOrResult,
         applyDuring: (IdentifierOptsOrResult) -> IdentifierOptsOrResult,
     ): IdkResult<IdentifierOptsOrResult, IdkErrorType> {
-        log.debug("Resolving identifier: ${args.identifier.toString().take(100)}...")
+        val resolutionKind = when (args) {
+            is ManagedIdentifierOptsOrResult -> "managed"
+            is ExternalIdentifierOptsOrResult -> "external"
+            else -> "unsupported"
+        }
+        log.debug("Identifier resolution stage=dispatch resolution_kind=$resolutionKind")
         // Note: supports() validation is already performed by parent CommandAdapter.execute()
 
-        return when (args) {
+        val result = when (args) {
             is ManagedIdentifierOptsOrResult -> {
                 managedMulti.resolve(args)
             }
@@ -77,6 +82,11 @@ class MultiIdentifierResolutionServiceImpl(
                     .asErrorResult()
             }
         }
+        if (result.isErr) {
+            val code = result.error.code.takeIf { it.matches(Regex("[A-Za-z0-9_.:-]{1,160}")) } ?: "unavailable"
+            log.warn("IDENTIFIER_RESOLUTION_REFUSED stage=resolver-result resolution_kind=$resolutionKind code=$code")
+        }
+        return result
     }
 
     override suspend fun supports(args: Any): Boolean =

@@ -109,14 +109,15 @@ class GenerateMacCommandImpl(
                 digestAlgorithm = algorithm,
             ).asOkResult()
         } catch (e: UnsupportedOperationException) {
-            log.warn("Provider does not support MAC operations: ${e.message}")
+            log.warn("KMS_MAC_REFUSED stage=generate code=MAC_NOT_SUPPORTED exception_type=UnsupportedOperationException")
             IdkError
                 .fromString(
                     message = "Provider does not support MAC operations: ${e.message}",
                     code = "MAC_NOT_SUPPORTED",
                 ).asErrorResult()
         } catch (expected: Exception) {
-            log.warn("Failed to generate MAC: ${expected.message}")
+            val exceptionType = expected::class.simpleName?.takeIf { it.matches(Regex("[A-Za-z0-9_]{1,160}")) } ?: "Exception"
+            log.warn("KMS_MAC_REFUSED stage=generate code=MAC_GENERATION_FAILED exception_type=$exceptionType")
             IdkError
                 .fromString(
                     message = "Failed to generate MAC: ${expected.message}",

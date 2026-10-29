@@ -18,6 +18,14 @@ package com.sphereon.oauth2.server.authorization.impl.command.token
 
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.error.IdkError
+import com.sphereon.core.api.service.StringResult
+import com.sphereon.oauth2.server.authorization.command.CreateRefreshTokenArgs
+import com.sphereon.oauth2.server.authorization.command.CreateRefreshTokenCommand
+import com.sphereon.oauth2.server.authorization.command.token.GrantContext
+import com.sphereon.oauth2.server.authorization.impl.command.putClaims
+import com.sphereon.oauth2.server.authorization.model.FederationTokenMetadata
+import kotlinx.serialization.json.buildJsonObject
+import com.sphereon.oauth2.common.model.ClientAuthenticationConfig
 import com.sphereon.oauth2.server.authorization.command.VerifiedAuthorizationCodeGrant
 import com.sphereon.oauth2.server.authorization.command.VerifiedClientAuthorization
 import com.sphereon.oauth2.server.authorization.command.VerifiedClientCredentialsGrant
@@ -45,3 +53,38 @@ internal suspend fun VerifyAuthorizationCodeGrantCommand.executeWithTrustedClien
     } else {
         execute(args)
     }
+
+internal suspend fun CreateRefreshTokenCommand.issueForVerifiedAuthorizationCode(
+    verified: VerifiedAuthorizationCodeGrant,
+    context: GrantContext,
+    clientAuthorization: VerifiedClientAuthorization?,
+): IdkResult<StringResult, IdkError> =
+    if (this is CreateRefreshTokenCommandImpl && (clientAuthorization != null ||
+            context.tokenRequest.clientAuthentication is ClientAuthenticationConfig.None)) {
+        createAfterVerifiedAuthorizationCode(verified, context, clientAuthorization)
+    } else {
+        // Contributed implementations retain their public command contract and lifecycle.
+        execute(refreshTokenArgsForVerifiedCode(verified, context))
+    }
+
+internal fun refreshTokenArgsForVerifiedCode(
+    verified: VerifiedAuthorizationCodeGrant,
+    context: GrantContext,
+): CreateRefreshTokenArgs = CreateRefreshTokenArgs(
+    subject = verified.subject,
+    clientId = verified.clientId,
+    scope = verified.scope,
+    resource = verified.codeData.admittedAudiences ?: verified.resource,
+    defaultAccessTokenAudience = verified.defaultAccessTokenAudience,
+    credentialConfigurationIds = (verified.additionalData["credential_configuration_ids"] as? List<*>)
+        ?.filterIsInstance<String>().orEmpty(),
+    oid4vciIssuerState = (verified.additionalData["issuer_state"] as? String)?.takeIf(String::isNotBlank),
+    dpopJkt = context.proofJkt ?: verified.dpopJkt,
+    clientInstanceKeyJkt = context.clientInstanceKeyJkt,
+    authTime = verified.codeData.authTime,
+    acr = verified.codeData.acr,
+    amr = verified.codeData.amr,
+    nonce = verified.codeData.nonce,
+    loginSessionId = verified.codeData.sessionId,
+    federationClaims = FederationTokenMetadata.fromUserClaims(buildJsonObject { putClaims(verified.userClaims) })?.toString(),
+)

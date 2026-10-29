@@ -28,7 +28,9 @@ object Oid4vciUrls {
      * - `https://issuer.example.com/tenant1` → `https://issuer.example.com/.well-known/openid-credential-issuer/tenant1`
      */
     fun buildWellKnownUrl(issuerUrl: String): String {
-        val normalized = issuerUrl.trim().trimEnd('/')
+        // OID4VCI 12.2.2 inserts the well-known segment without changing the issuer path.
+        // OAuth AS discovery has different terminating-slash rules and uses its own helper.
+        val normalized = issuerUrl.trim()
         if (normalized.contains(WELL_KNOWN_PATH)) {
             return normalized
         }
@@ -50,7 +52,7 @@ object Oid4vciUrls {
      * reverse operation removes that segment and preserves the suffix as the issuer path.
      */
     fun buildIssuerUrl(issuerOrWellKnownUrl: String): String {
-        val normalized = issuerOrWellKnownUrl.trimEnd('/')
+        val normalized = issuerOrWellKnownUrl.trim()
         val schemeEnd = normalized.indexOf("://") + SCHEME_SEPARATOR_LENGTH
         val wellKnownStart = normalized.indexOf(WELL_KNOWN_PATH, schemeEnd)
         if (wellKnownStart < 0) {
@@ -58,7 +60,7 @@ object Oid4vciUrls {
         }
         val host = normalized.substring(0, wellKnownStart)
         val issuerPath = normalized.substring(wellKnownStart + WELL_KNOWN_PATH.length)
-        return "$host$issuerPath".trimEnd('/')
+        return "$host$issuerPath"
     }
 
     const val WELL_KNOWN_PATH = "/.well-known/openid-credential-issuer"

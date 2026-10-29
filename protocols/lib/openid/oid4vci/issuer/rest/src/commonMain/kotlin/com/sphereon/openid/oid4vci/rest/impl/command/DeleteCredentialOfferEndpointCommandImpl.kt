@@ -30,6 +30,8 @@ import com.sphereon.di.session.SessionScope
 import com.sphereon.openid.oid4vci.rest.DeleteCredentialOfferEndpointCommand
 import com.sphereon.openid.oid4vci.rest.DeleteCredentialOfferServiceCommand
 import com.sphereon.openid.oid4vci.rest.GetCredentialOfferStatusInput
+import com.sphereon.openid.oid4vci.rest.Oid4vciRestPaths
+import com.sphereon.openid.oid4vci.rest.withRouteParams
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.ContributesIntoMap
@@ -40,7 +42,8 @@ import dev.zacsweers.metro.binding
 /**
  * HTTP endpoint for deleting credential offer sessions.
  *
- * DELETE /api/oid4vci/v1/backend/credential/offers/{correlation_id}
+ * DELETE /api/oid4vci/v1/instances/{instanceId}/backend/credential/offers/{correlation_id}, and the same route without the
+ * instance segment for callers that predate it.
  */
 @Inject
 @SingleIn(SessionScope::class)
@@ -59,12 +62,15 @@ class DeleteCredentialOfferEndpointCommandImpl(
         args: GenericHttpRequest,
         applyDuring: (GenericHttpRequest) -> GenericHttpRequest,
     ): IdkResult<GenericHttpResponse, IdkError> {
-        val request = applyDuring(args).withExtractedParams(endpoint.pathPattern)
-        val correlationId = request.requirePathParam("correlation_id").getOrElse { return Err(it) }
+        val request = applyDuring(args).withRouteParams(endpoint)
+        val correlationId = request.requirePathParam(Oid4vciRestPaths.CORRELATION_ID_PARAM).getOrElse { return Err(it) }
 
         deleteCredentialOfferServiceCommand
             .execute(
-                GetCredentialOfferStatusInput(correlationId = correlationId),
+                GetCredentialOfferStatusInput(
+                    correlationId = correlationId,
+                    instanceId = request.pathParams[Oid4vciRestPaths.INSTANCE_ID_PARAM],
+                ),
             ).getOrElse { error ->
                 return Err(error)
             }

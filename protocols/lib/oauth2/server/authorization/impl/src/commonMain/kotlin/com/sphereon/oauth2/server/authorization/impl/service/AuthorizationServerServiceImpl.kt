@@ -105,72 +105,164 @@ import dev.zacsweers.metro.binding
 import kotlin.experimental.ExperimentalObjCName
 import kotlin.native.ObjCName
 
-@Inject
 @SingleIn(SessionScope::class)
 @ContributesBinding(SessionScope::class, binding = binding<AuthorizationServerService>())
 @OptIn(ExperimentalObjCName::class)
 @ObjCName("AuthorizationServerServiceImpl", exact = true)
-class AuthorizationServerServiceImpl(
-    private val parseTokenRequestCommand: ParseTokenRequestCommand,
-    private val verifyAuthorizationCodeGrantCommand: VerifyAuthorizationCodeGrantCommand,
-    private val verifyRefreshTokenGrantCommand: VerifyRefreshTokenGrantCommand,
-    private val verifyClientCredentialsGrantCommand: VerifyClientCredentialsGrantCommand,
-    private val verifyPreAuthorizedCodeGrantCommand: VerifyPreAuthorizedCodeGrantCommand,
-    private val createAccessTokenCommand: CreateAccessTokenCommand,
-    private val createRefreshTokenCommand: CreateRefreshTokenCommand,
-    private val createTokenResponseCommand: CreateTokenResponseCommand,
-    private val parseAuthorizationRequestCommand: ParseAuthorizationRequestCommand,
-    private val verifyAuthorizationRequestCommand: VerifyAuthorizationRequestCommand,
-    private val createAuthorizationSessionCommand: CreateAuthorizationSessionCommand,
-    private val createAuthorizationCodeCommand: CreateAuthorizationCodeCommand,
-    private val createAuthorizationResponseCommand: CreateAuthorizationResponseCommand,
-    private val createAuthorizationErrorResponseCommand: CreateAuthorizationErrorResponseCommand,
-    private val parsePushedAuthorizationRequestCommand: ParsePushedAuthorizationRequestCommand,
-    private val verifyPushedAuthorizationRequestCommand: VerifyPushedAuthorizationRequestCommand,
-    private val createRequestUriCommand: CreateRequestUriCommand,
-    private val createPushedAuthorizationResponseCommand: CreatePushedAuthorizationResponseCommand,
-    private val retrieveAuthorizationRequestByUriCommand: RetrieveAuthorizationRequestByUriCommand,
-    private val parseIntrospectionRequestCommand: ParseIntrospectionRequestCommand,
-    private val introspectTokenCommand: IntrospectTokenCommand,
-    private val parseRevocationRequestCommand: ParseRevocationRequestCommand,
-    private val revokeTokenCommand: RevokeTokenCommand,
-    private val buildServerMetadataCommand: BuildServerMetadataCommand,
-    private val verifyClientAuthenticationCommand: VerifyClientAuthenticationCommand,
-    private val createAttestationChallengeCommand: CreateAttestationChallengeCommand,
-    private val createIdTokenCommand: CreateIdTokenCommand,
-    private val getUserInfoCommand: GetUserInfoCommand,
-    private val getJwksCommand: GetJwksCommand,
+class AuthorizationServerServiceImpl @Inject constructor(
+    parseTokenRequestCommandFactory: () -> ParseTokenRequestCommand,
+    verifyAuthorizationCodeGrantCommandFactory: () -> VerifyAuthorizationCodeGrantCommand,
+    verifyRefreshTokenGrantCommandFactory: () -> VerifyRefreshTokenGrantCommand,
+    verifyClientCredentialsGrantCommandFactory: () -> VerifyClientCredentialsGrantCommand,
+    verifyPreAuthorizedCodeGrantCommandFactory: () -> VerifyPreAuthorizedCodeGrantCommand,
+    createAccessTokenCommandFactory: () -> CreateAccessTokenCommand,
+    createRefreshTokenCommandFactory: () -> CreateRefreshTokenCommand,
+    createTokenResponseCommandFactory: () -> CreateTokenResponseCommand,
+    parseAuthorizationRequestCommandFactory: () -> ParseAuthorizationRequestCommand,
+    verifyAuthorizationRequestCommandFactory: () -> VerifyAuthorizationRequestCommand,
+    createAuthorizationSessionCommandFactory: () -> CreateAuthorizationSessionCommand,
+    createAuthorizationCodeCommandFactory: () -> CreateAuthorizationCodeCommand,
+    createAuthorizationResponseCommandFactory: () -> CreateAuthorizationResponseCommand,
+    createAuthorizationErrorResponseCommandFactory: () -> CreateAuthorizationErrorResponseCommand,
+    parsePushedAuthorizationRequestCommandFactory: () -> ParsePushedAuthorizationRequestCommand,
+    verifyPushedAuthorizationRequestCommandFactory: () -> VerifyPushedAuthorizationRequestCommand,
+    createRequestUriCommandFactory: () -> CreateRequestUriCommand,
+    createPushedAuthorizationResponseCommandFactory: () -> CreatePushedAuthorizationResponseCommand,
+    retrieveAuthorizationRequestByUriCommandFactory: () -> RetrieveAuthorizationRequestByUriCommand,
+    parseIntrospectionRequestCommandFactory: () -> ParseIntrospectionRequestCommand,
+    introspectTokenCommandFactory: () -> IntrospectTokenCommand,
+    parseRevocationRequestCommandFactory: () -> ParseRevocationRequestCommand,
+    revokeTokenCommandFactory: () -> RevokeTokenCommand,
+    buildServerMetadataCommandFactory: () -> BuildServerMetadataCommand,
+    verifyClientAuthenticationCommandFactory: () -> VerifyClientAuthenticationCommand,
+    createAttestationChallengeCommandFactory: () -> CreateAttestationChallengeCommand,
+    createIdTokenCommandFactory: () -> CreateIdTokenCommand,
+    getUserInfoCommandFactory: () -> GetUserInfoCommand,
+    getJwksCommandFactory: () -> GetJwksCommand,
 ) : AuthorizationServerService {
+    private val parseTokenRequestCommand: ParseTokenRequestCommand by lazy(parseTokenRequestCommandFactory)
+    private val verifyAuthorizationCodeGrantCommand: VerifyAuthorizationCodeGrantCommand by lazy(verifyAuthorizationCodeGrantCommandFactory)
+    private val verifyRefreshTokenGrantCommand: VerifyRefreshTokenGrantCommand by lazy(verifyRefreshTokenGrantCommandFactory)
+    private val verifyClientCredentialsGrantCommand: VerifyClientCredentialsGrantCommand by lazy(verifyClientCredentialsGrantCommandFactory)
+    private val verifyPreAuthorizedCodeGrantCommand: VerifyPreAuthorizedCodeGrantCommand by lazy(verifyPreAuthorizedCodeGrantCommandFactory)
+    private val createAccessTokenCommand: CreateAccessTokenCommand by lazy(createAccessTokenCommandFactory)
+    private val createRefreshTokenCommand: CreateRefreshTokenCommand by lazy(createRefreshTokenCommandFactory)
+    private val createTokenResponseCommand: CreateTokenResponseCommand by lazy(createTokenResponseCommandFactory)
+    private val parseAuthorizationRequestCommand: ParseAuthorizationRequestCommand by lazy(parseAuthorizationRequestCommandFactory)
+    private val verifyAuthorizationRequestCommand: VerifyAuthorizationRequestCommand by lazy(verifyAuthorizationRequestCommandFactory)
+    private val createAuthorizationSessionCommand: CreateAuthorizationSessionCommand by lazy(createAuthorizationSessionCommandFactory)
+    private val createAuthorizationCodeCommand: CreateAuthorizationCodeCommand by lazy(createAuthorizationCodeCommandFactory)
+    private val createAuthorizationResponseCommand: CreateAuthorizationResponseCommand by lazy(createAuthorizationResponseCommandFactory)
+    private val createAuthorizationErrorResponseCommand: CreateAuthorizationErrorResponseCommand by lazy(createAuthorizationErrorResponseCommandFactory)
+    private val parsePushedAuthorizationRequestCommand: ParsePushedAuthorizationRequestCommand by lazy(parsePushedAuthorizationRequestCommandFactory)
+    private val verifyPushedAuthorizationRequestCommand: VerifyPushedAuthorizationRequestCommand by lazy(verifyPushedAuthorizationRequestCommandFactory)
+    private val createRequestUriCommand: CreateRequestUriCommand by lazy(createRequestUriCommandFactory)
+    private val createPushedAuthorizationResponseCommand: CreatePushedAuthorizationResponseCommand by lazy(createPushedAuthorizationResponseCommandFactory)
+    private val retrieveAuthorizationRequestByUriCommand: RetrieveAuthorizationRequestByUriCommand by lazy(retrieveAuthorizationRequestByUriCommandFactory)
+    private val parseIntrospectionRequestCommand: ParseIntrospectionRequestCommand by lazy(parseIntrospectionRequestCommandFactory)
+    private val introspectTokenCommand: IntrospectTokenCommand by lazy(introspectTokenCommandFactory)
+    private val parseRevocationRequestCommand: ParseRevocationRequestCommand by lazy(parseRevocationRequestCommandFactory)
+    private val revokeTokenCommand: RevokeTokenCommand by lazy(revokeTokenCommandFactory)
+    private val buildServerMetadataCommand: BuildServerMetadataCommand by lazy(buildServerMetadataCommandFactory)
+    private val verifyClientAuthenticationCommand: VerifyClientAuthenticationCommand by lazy(verifyClientAuthenticationCommandFactory)
+    private val createAttestationChallengeCommand: CreateAttestationChallengeCommand by lazy(createAttestationChallengeCommandFactory)
+    private val createIdTokenCommand: CreateIdTokenCommand by lazy(createIdTokenCommandFactory)
+    private val getUserInfoCommand: GetUserInfoCommand by lazy(getUserInfoCommandFactory)
+    private val getJwksCommand: GetJwksCommand by lazy(getJwksCommandFactory)
+
+    /** Source-compatible constructor for callers that already own these dependencies. */
+    constructor(
+        parseTokenRequestCommand: ParseTokenRequestCommand,
+        verifyAuthorizationCodeGrantCommand: VerifyAuthorizationCodeGrantCommand,
+        verifyRefreshTokenGrantCommand: VerifyRefreshTokenGrantCommand,
+        verifyClientCredentialsGrantCommand: VerifyClientCredentialsGrantCommand,
+        verifyPreAuthorizedCodeGrantCommand: VerifyPreAuthorizedCodeGrantCommand,
+        createAccessTokenCommand: CreateAccessTokenCommand,
+        createRefreshTokenCommand: CreateRefreshTokenCommand,
+        createTokenResponseCommand: CreateTokenResponseCommand,
+        parseAuthorizationRequestCommand: ParseAuthorizationRequestCommand,
+        verifyAuthorizationRequestCommand: VerifyAuthorizationRequestCommand,
+        createAuthorizationSessionCommand: CreateAuthorizationSessionCommand,
+        createAuthorizationCodeCommand: CreateAuthorizationCodeCommand,
+        createAuthorizationResponseCommand: CreateAuthorizationResponseCommand,
+        createAuthorizationErrorResponseCommand: CreateAuthorizationErrorResponseCommand,
+        parsePushedAuthorizationRequestCommand: ParsePushedAuthorizationRequestCommand,
+        verifyPushedAuthorizationRequestCommand: VerifyPushedAuthorizationRequestCommand,
+        createRequestUriCommand: CreateRequestUriCommand,
+        createPushedAuthorizationResponseCommand: CreatePushedAuthorizationResponseCommand,
+        retrieveAuthorizationRequestByUriCommand: RetrieveAuthorizationRequestByUriCommand,
+        parseIntrospectionRequestCommand: ParseIntrospectionRequestCommand,
+        introspectTokenCommand: IntrospectTokenCommand,
+        parseRevocationRequestCommand: ParseRevocationRequestCommand,
+        revokeTokenCommand: RevokeTokenCommand,
+        buildServerMetadataCommand: BuildServerMetadataCommand,
+        verifyClientAuthenticationCommand: VerifyClientAuthenticationCommand,
+        createAttestationChallengeCommand: CreateAttestationChallengeCommand,
+        createIdTokenCommand: CreateIdTokenCommand,
+        getUserInfoCommand: GetUserInfoCommand,
+        getJwksCommand: GetJwksCommand,
+    ) : this(
+        parseTokenRequestCommandFactory = { parseTokenRequestCommand },
+        verifyAuthorizationCodeGrantCommandFactory = { verifyAuthorizationCodeGrantCommand },
+        verifyRefreshTokenGrantCommandFactory = { verifyRefreshTokenGrantCommand },
+        verifyClientCredentialsGrantCommandFactory = { verifyClientCredentialsGrantCommand },
+        verifyPreAuthorizedCodeGrantCommandFactory = { verifyPreAuthorizedCodeGrantCommand },
+        createAccessTokenCommandFactory = { createAccessTokenCommand },
+        createRefreshTokenCommandFactory = { createRefreshTokenCommand },
+        createTokenResponseCommandFactory = { createTokenResponseCommand },
+        parseAuthorizationRequestCommandFactory = { parseAuthorizationRequestCommand },
+        verifyAuthorizationRequestCommandFactory = { verifyAuthorizationRequestCommand },
+        createAuthorizationSessionCommandFactory = { createAuthorizationSessionCommand },
+        createAuthorizationCodeCommandFactory = { createAuthorizationCodeCommand },
+        createAuthorizationResponseCommandFactory = { createAuthorizationResponseCommand },
+        createAuthorizationErrorResponseCommandFactory = { createAuthorizationErrorResponseCommand },
+        parsePushedAuthorizationRequestCommandFactory = { parsePushedAuthorizationRequestCommand },
+        verifyPushedAuthorizationRequestCommandFactory = { verifyPushedAuthorizationRequestCommand },
+        createRequestUriCommandFactory = { createRequestUriCommand },
+        createPushedAuthorizationResponseCommandFactory = { createPushedAuthorizationResponseCommand },
+        retrieveAuthorizationRequestByUriCommandFactory = { retrieveAuthorizationRequestByUriCommand },
+        parseIntrospectionRequestCommandFactory = { parseIntrospectionRequestCommand },
+        introspectTokenCommandFactory = { introspectTokenCommand },
+        parseRevocationRequestCommandFactory = { parseRevocationRequestCommand },
+        revokeTokenCommandFactory = { revokeTokenCommand },
+        buildServerMetadataCommandFactory = { buildServerMetadataCommand },
+        verifyClientAuthenticationCommandFactory = { verifyClientAuthenticationCommand },
+        createAttestationChallengeCommandFactory = { createAttestationChallengeCommand },
+        createIdTokenCommandFactory = { createIdTokenCommand },
+        getUserInfoCommandFactory = { getUserInfoCommand },
+        getJwksCommandFactory = { getJwksCommand },
+    )
+
     inner class CommandsImpl : AuthorizationServerService.Commands {
-        override val parseTokenRequest = this@AuthorizationServerServiceImpl.parseTokenRequestCommand
-        override val verifyAuthorizationCodeGrant = this@AuthorizationServerServiceImpl.verifyAuthorizationCodeGrantCommand
-        override val verifyRefreshTokenGrant = this@AuthorizationServerServiceImpl.verifyRefreshTokenGrantCommand
-        override val verifyClientCredentialsGrant = this@AuthorizationServerServiceImpl.verifyClientCredentialsGrantCommand
-        override val verifyPreAuthorizedCodeGrant = this@AuthorizationServerServiceImpl.verifyPreAuthorizedCodeGrantCommand
-        override val createAccessToken = this@AuthorizationServerServiceImpl.createAccessTokenCommand
-        override val createRefreshToken = this@AuthorizationServerServiceImpl.createRefreshTokenCommand
-        override val createTokenResponse = this@AuthorizationServerServiceImpl.createTokenResponseCommand
-        override val parseAuthorizationRequest = this@AuthorizationServerServiceImpl.parseAuthorizationRequestCommand
-        override val verifyAuthorizationRequest = this@AuthorizationServerServiceImpl.verifyAuthorizationRequestCommand
-        override val createAuthorizationSession = this@AuthorizationServerServiceImpl.createAuthorizationSessionCommand
-        override val createAuthorizationCode = this@AuthorizationServerServiceImpl.createAuthorizationCodeCommand
-        override val createAuthorizationResponse = this@AuthorizationServerServiceImpl.createAuthorizationResponseCommand
-        override val createAuthorizationErrorResponse = this@AuthorizationServerServiceImpl.createAuthorizationErrorResponseCommand
-        override val parsePushedAuthorizationRequest = this@AuthorizationServerServiceImpl.parsePushedAuthorizationRequestCommand
-        override val verifyPushedAuthorizationRequest = this@AuthorizationServerServiceImpl.verifyPushedAuthorizationRequestCommand
-        override val createRequestUri = this@AuthorizationServerServiceImpl.createRequestUriCommand
-        override val createPushedAuthorizationResponse = this@AuthorizationServerServiceImpl.createPushedAuthorizationResponseCommand
-        override val retrieveAuthorizationRequestByUri = this@AuthorizationServerServiceImpl.retrieveAuthorizationRequestByUriCommand
-        override val parseIntrospectionRequest = this@AuthorizationServerServiceImpl.parseIntrospectionRequestCommand
-        override val introspectToken = this@AuthorizationServerServiceImpl.introspectTokenCommand
-        override val parseRevocationRequest = this@AuthorizationServerServiceImpl.parseRevocationRequestCommand
-        override val revokeToken = this@AuthorizationServerServiceImpl.revokeTokenCommand
-        override val buildServerMetadata = this@AuthorizationServerServiceImpl.buildServerMetadataCommand
-        override val verifyClientAuthentication = this@AuthorizationServerServiceImpl.verifyClientAuthenticationCommand
-        override val createAttestationChallenge = this@AuthorizationServerServiceImpl.createAttestationChallengeCommand
-        override val createIdToken = this@AuthorizationServerServiceImpl.createIdTokenCommand
-        override val getUserInfo = this@AuthorizationServerServiceImpl.getUserInfoCommand
-        override val getJwks = this@AuthorizationServerServiceImpl.getJwksCommand
+        override val parseTokenRequest get() = this@AuthorizationServerServiceImpl.parseTokenRequestCommand
+        override val verifyAuthorizationCodeGrant get() = this@AuthorizationServerServiceImpl.verifyAuthorizationCodeGrantCommand
+        override val verifyRefreshTokenGrant get() = this@AuthorizationServerServiceImpl.verifyRefreshTokenGrantCommand
+        override val verifyClientCredentialsGrant get() = this@AuthorizationServerServiceImpl.verifyClientCredentialsGrantCommand
+        override val verifyPreAuthorizedCodeGrant get() = this@AuthorizationServerServiceImpl.verifyPreAuthorizedCodeGrantCommand
+        override val createAccessToken get() = this@AuthorizationServerServiceImpl.createAccessTokenCommand
+        override val createRefreshToken get() = this@AuthorizationServerServiceImpl.createRefreshTokenCommand
+        override val createTokenResponse get() = this@AuthorizationServerServiceImpl.createTokenResponseCommand
+        override val parseAuthorizationRequest get() = this@AuthorizationServerServiceImpl.parseAuthorizationRequestCommand
+        override val verifyAuthorizationRequest get() = this@AuthorizationServerServiceImpl.verifyAuthorizationRequestCommand
+        override val createAuthorizationSession get() = this@AuthorizationServerServiceImpl.createAuthorizationSessionCommand
+        override val createAuthorizationCode get() = this@AuthorizationServerServiceImpl.createAuthorizationCodeCommand
+        override val createAuthorizationResponse get() = this@AuthorizationServerServiceImpl.createAuthorizationResponseCommand
+        override val createAuthorizationErrorResponse get() = this@AuthorizationServerServiceImpl.createAuthorizationErrorResponseCommand
+        override val parsePushedAuthorizationRequest get() = this@AuthorizationServerServiceImpl.parsePushedAuthorizationRequestCommand
+        override val verifyPushedAuthorizationRequest get() = this@AuthorizationServerServiceImpl.verifyPushedAuthorizationRequestCommand
+        override val createRequestUri get() = this@AuthorizationServerServiceImpl.createRequestUriCommand
+        override val createPushedAuthorizationResponse get() = this@AuthorizationServerServiceImpl.createPushedAuthorizationResponseCommand
+        override val retrieveAuthorizationRequestByUri get() = this@AuthorizationServerServiceImpl.retrieveAuthorizationRequestByUriCommand
+        override val parseIntrospectionRequest get() = this@AuthorizationServerServiceImpl.parseIntrospectionRequestCommand
+        override val introspectToken get() = this@AuthorizationServerServiceImpl.introspectTokenCommand
+        override val parseRevocationRequest get() = this@AuthorizationServerServiceImpl.parseRevocationRequestCommand
+        override val revokeToken get() = this@AuthorizationServerServiceImpl.revokeTokenCommand
+        override val buildServerMetadata get() = this@AuthorizationServerServiceImpl.buildServerMetadataCommand
+        override val verifyClientAuthentication get() = this@AuthorizationServerServiceImpl.verifyClientAuthenticationCommand
+        override val createAttestationChallenge get() = this@AuthorizationServerServiceImpl.createAttestationChallengeCommand
+        override val createIdToken get() = this@AuthorizationServerServiceImpl.createIdTokenCommand
+        override val getUserInfo get() = this@AuthorizationServerServiceImpl.getUserInfoCommand
+        override val getJwks get() = this@AuthorizationServerServiceImpl.getJwksCommand
     }
 
     override val commands: AuthorizationServerService.Commands = CommandsImpl()

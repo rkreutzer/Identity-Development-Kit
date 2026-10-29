@@ -90,8 +90,9 @@ CreateRawSignatureArgs
 @ObjCName("CreateRawSignatureResult", exact = true)
 @JsExportCompat
 @Serializable
-data class CreateRawSignatureResult(
+data class CreateRawSignatureResult @JvmOverloads constructor(
     val signature: ByteArray,
+    val signatureEncoding: SignatureEncoding? = null,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) {
@@ -103,10 +104,10 @@ data class CreateRawSignatureResult(
 
         other as CreateRawSignatureResult
 
-        return signature.contentEquals(other.signature)
+        return signature.contentEquals(other.signature) && signatureEncoding == other.signatureEncoding
     }
 
-    override fun hashCode(): Int = signature.contentHashCode()
+    override fun hashCode(): Int = signature.contentHashCode() * 31 + (signatureEncoding?.hashCode() ?: 0)
 }
 
 /**

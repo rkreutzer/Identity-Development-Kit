@@ -84,6 +84,14 @@ class CommandInvocationContext private constructor(
                 boundary = CommandInvocationBoundary.INTERNAL,
                 commandDepth = 0,
             )
+
+        /**
+         * The context a command entered from [parent] runs in: one level below [parent], or an
+         * internal root when no invocation is active. Hooks that run before a command enters its
+         * lifecycle use this to apply the same root and boundary rules as lifecycle interceptors.
+         */
+        fun enteredFrom(parent: CommandInvocationContext?): CommandInvocationContext =
+            parent?.enterCommand() ?: internalRoot()
     }
 }
 

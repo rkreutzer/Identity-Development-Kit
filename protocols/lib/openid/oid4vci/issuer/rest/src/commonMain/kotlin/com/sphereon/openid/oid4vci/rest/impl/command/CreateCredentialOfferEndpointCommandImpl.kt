@@ -30,6 +30,8 @@ import com.sphereon.openid.oid4vci.rest.CreateCredentialOfferEndpointCommand
 import com.sphereon.openid.oid4vci.rest.CreateCredentialOfferInput
 import com.sphereon.openid.oid4vci.rest.CreateCredentialOfferOutput
 import com.sphereon.openid.oid4vci.rest.CreateCredentialOfferServiceCommand
+import com.sphereon.openid.oid4vci.rest.Oid4vciRestPaths
+import com.sphereon.openid.oid4vci.rest.withRouteParams
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -39,7 +41,8 @@ import kotlinx.serialization.json.Json
 /**
  * HTTP endpoint for creating credential offer sessions.
  *
- * POST /api/oid4vci/v1/backend/credential/offers
+ * POST /api/oid4vci/v1/instances/{instanceId}/backend/credential/offers, and the same route without the instance segment
+ * for callers that predate it.
  */
 @Inject
 @SingleIn(SessionScope::class)
@@ -62,11 +65,12 @@ class CreateCredentialOfferEndpointCommandImpl(
         args: GenericHttpRequest,
         applyDuring: (GenericHttpRequest) -> GenericHttpRequest,
     ): IdkResult<GenericHttpResponse, IdkError> {
-        val request = applyDuring(args)
+        val request = applyDuring(args).withRouteParams(endpoint)
 
-        val input =
+        val parsed =
             parseInput(request.body)
                 ?: return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Invalid or missing request body"))
+        val input = parsed.boundTo(request.pathParams[Oid4vciRestPaths.INSTANCE_ID_PARAM]).getOrElse { return Err(it) }
 
         val output =
             createCredentialOfferServiceCommand.execute(input).getOrElse { error ->
@@ -84,6 +88,15 @@ class CreateCredentialOfferEndpointCommandImpl(
                 body = json.encodeToString(CreateCredentialOfferOutput.serializer(), output),
             ),
         )
+    }
+
+    /** The route's instance is the instance of the offer, so a body that names another one is a conflicting request. */
+    private fun CreateCredentialOfferInput.boundTo(routeInstanceId: String?): IdkResult<CreateCredentialOfferInput, IdkError> {
+        if (routeInstanceId == null) return Ok(this)
+        if (issuerInstanceId != null && issuerInstanceId != routeInstanceId) {
+            return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "issuer_instance_id does not match the issuer instance of the request"))
+        }
+        return Ok(copy(issuerInstanceId = routeInstanceId))
     }
 
     private fun parseInput(body: String?): CreateCredentialOfferInput? {

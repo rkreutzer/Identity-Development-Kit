@@ -11,10 +11,8 @@
 package com.sphereon.oauth2.server.authorization.provider
 
 /**
- * Holds the symmetric secret used to seal the login form's CSRF token. Pluggable so that a
- * production deployment can override the default in-memory provider with one backed by the
- * configured [com.sphereon.core.api.conf.SecretProvider] (so multi-instance deployments share
- * a key and the form survives a 302 to a peer).
+ * Supplies a symmetric secret to HMAC-based login CSRF tokenizers. A deployment using this
+ * implementation must resolve the key through its configured secret authority.
  *
  * Multi-instance deployments MUST bind a shared secret because each instance's default key is
  * independent.
@@ -25,15 +23,15 @@ interface LoginCsrfKeyProvider {
 }
 
 /**
- * Mints + verifies the `(tab_id, session_code)` CSRF tuple bound to a `session_id` on the AS
+ * Mints and verifies an opaque `(tab_id, session_code)` CSRF tuple bound to a `session_id` on the
  * login form. Defends against capability-URL leak: an attacker who learns
- * `/login?session_id=<sid>` from a referrer log or browser history cannot fabricate a valid
- * `session_code` without the deployment's CSRF HMAC key.
+ * `/login?session_id=<sid>` from a referrer log or browser history cannot mint or discover
+ * a valid tuple for that session.
  *
  * Wire shape on the rendered form:
  *  - hidden `session_id` : opaque pending-auth-session id, already public.
- *  - hidden `tab_id`     : CSPRNG random, freshly minted per render.
- *  - hidden `session_code` : `BASE64URL(HMAC-SHA-256(key, sid || "|" || tab_id))`.
+ *  - hidden `tab_id`     : random, freshly minted per render.
+ *  - hidden `session_code` : opaque verifier value bound to the session and tab.
  *
  * The cookie binding (separate cookie holding the tab_id) is enforced at the HTTP layer; this
  * contract is the cryptographic core.
@@ -47,8 +45,10 @@ interface LoginCsrfTokenizer {
     suspend fun mint(sessionId: String): LoginCsrfToken
 
     /**
-     * Verify the `(tab_id, session_code)` submitted with [sessionId]. Returns true iff the
-     * recomputed code matches under a constant-time compare.
+     * Verify the tuple submitted with [sessionId]. Secret verifier comparisons must be
+     * constant-time. A durable single-use implementation consumes a matching tuple atomically
+     * with verification of the exact live pending authorization context. Invalid tuples must
+     * not consume valid state; storage failure must never succeed.
      */
     suspend fun verify(
         sessionId: String,

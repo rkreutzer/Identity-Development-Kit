@@ -86,10 +86,13 @@ class ParseAuthorizationRequestCommandImpl(
         applyDuring: (ParseAuthorizationRequestArgs) -> ParseAuthorizationRequestArgs,
     ): IdkResult<AuthorizationRequestData, IdkError> {
         val applied = applyDuring(args)
-        return executeInternal(applied.queryParameters).mapError { IdkError.fromDTO(it) }
+        return parseAuthorizationParameters(applied.queryParameters).mapError { IdkError.fromDTO(it) }
     }
 
-    private fun executeInternal(queryParameters: Map<String, String>): IdkResult<AuthorizationRequestData, AuthorizationServerError> {
+}
+
+/** Shared exact parser kernel: also binds process evidence to its signed effective parameters. */
+internal fun parseAuthorizationParameters(queryParameters: Map<String, String>): IdkResult<AuthorizationRequestData, AuthorizationServerError> {
         val clientId =
             queryParameters["client_id"]?.takeIf { it.isNotBlank() }
                 ?: return Err(AuthorizationServerError.InvalidRequest(details = "Missing required parameter: client_id"))
@@ -284,11 +287,8 @@ class ParseAuthorizationRequestCommandImpl(
         )
     }
 
-    private companion object {
-        // base64url alphabet for PKCE code_challenge per RFC 7636 §4.2
-        val PKCE_CHAR_REGEX = Regex("^[A-Za-z0-9._~-]+$")
-    }
-}
+// base64url alphabet for PKCE code_challenge per RFC 7636 §4.2
+private val PKCE_CHAR_REGEX = Regex("^[A-Za-z0-9._~-]+$")
 
 private fun String.splitToNonEmpty(): List<String> = split(" ").map { it.trim() }.filter { it.isNotEmpty() }
 
