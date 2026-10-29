@@ -23,6 +23,7 @@ import com.sphereon.oauth2.common.model.AuthorizationRequest
 import com.sphereon.oauth2.common.model.AuthorizationResponse
 import com.sphereon.openid.oid4vp.common.ResponseMode
 import kotlin.experimental.ExperimentalObjCName
+import kotlin.js.JsName
 import kotlin.native.ObjCName
 
 /**
@@ -116,6 +117,7 @@ interface Oid4vpHolderService {
      * Binding-aware overload. Legacy adapters remain source-compatible and refuse non-null
      * bindings rather than silently dropping the prepared-recipient constraint.
      */
+    @JsName("submitAuthorizationResponseWithBinding")
     suspend fun submitAuthorizationResponse(
         resolvedRequest: ResolvedOid4vpRequest,
         response: AuthorizationResponse,

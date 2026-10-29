@@ -185,6 +185,7 @@ data class DeviceAuthentication(
 
         /** Build DeviceAuthentication from mode-specific, validated OID4VP request context. */
         @JsStatic
+        @JsName("fromOid4vpContext")
         @JvmStatic
         fun fromOid4vp(
             context: Oid4vpDeviceAuthenticationContext,
