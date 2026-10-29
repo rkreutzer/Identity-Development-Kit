@@ -54,6 +54,7 @@ import com.sphereon.wallet.interaction.WalletCredentialSelection
 import com.sphereon.wallet.interaction.WalletEntryPoint
 import com.sphereon.wallet.interaction.WalletInteractionAction
 import com.sphereon.wallet.interaction.WalletInteractionClient
+import com.sphereon.wallet.interaction.WalletInteractionDiagnostics
 import com.sphereon.wallet.interaction.WalletInteractionInput
 import com.sphereon.wallet.interaction.WalletInteractionStatus
 import com.sphereon.wallet.interaction.WalletProtocol
@@ -103,7 +104,6 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import com.sphereon.openid.oid4vp.holder.WalletConfig as Oid4vpWalletConfig
-import com.sphereon.wallet.interaction.WalletInteractionDiagnostics
 
 @ContributesTo(SessionScope::class)
 interface WalletInteractionOid4vpStoreTestGraph {

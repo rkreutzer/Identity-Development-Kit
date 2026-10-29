@@ -34,6 +34,8 @@ if (osName.contains("mac") && arch == "aarch64") {
     logger.lifecycle("Using default Kotlin/Native toolchain for $osName ($arch)")
 }
 
+apply(from = rootDir.resolve("gradle/idk-npm-runtime.gradle.kts"))
+
 allprojects {
     group = "com.sphereon.idk"
     // version comes from platform-version.properties via settings.gradle.kts (gradle.beforeProject).

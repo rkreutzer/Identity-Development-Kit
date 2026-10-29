@@ -17,6 +17,7 @@ import com.sphereon.wallet.credential.IdentifierRef
 import com.sphereon.wallet.interaction.WalletAttendedAuthorizationRegistry
 import com.sphereon.wallet.interaction.WalletCounterpartyEncounterRegistry
 import com.sphereon.wallet.interaction.WalletInteractionClient
+import com.sphereon.wallet.interaction.WalletInteractionDiagnostics
 import com.sphereon.wallet.interaction.WalletInteractionPrivateSessionStore
 import com.sphereon.wallet.interaction.WalletInteractionSensitiveInputAuthority
 import com.sphereon.wallet.interaction.impl.DefaultWalletInteractionEngine
@@ -44,7 +45,6 @@ import dev.zacsweers.metro.binding
 import dev.zacsweers.metro.createGraphFactory
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import com.sphereon.wallet.interaction.WalletInteractionDiagnostics
 
 // This in-process fixture uses the existing Sphereon bridge contribution through its public SPI.
 @DependencyGraph(AppScope::class, excludes = [HttpAsBridge::class])

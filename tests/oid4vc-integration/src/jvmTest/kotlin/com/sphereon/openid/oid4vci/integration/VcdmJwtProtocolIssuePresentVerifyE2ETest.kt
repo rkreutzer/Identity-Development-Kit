@@ -60,6 +60,7 @@ import com.sphereon.wallet.interaction.WalletCredentialSelection
 import com.sphereon.wallet.interaction.WalletEntryPoint
 import com.sphereon.wallet.interaction.WalletInteractionAction
 import com.sphereon.wallet.interaction.WalletInteractionApiConstants
+import com.sphereon.wallet.interaction.WalletInteractionDiagnostics
 import com.sphereon.wallet.interaction.WalletInteractionInput
 import com.sphereon.wallet.interaction.WalletInteractionSession
 import com.sphereon.wallet.interaction.WalletInteractionSessionEnvelope
@@ -127,7 +128,6 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import com.sphereon.wallet.credential.CredentialFormat as WalletCredentialFormat
-import com.sphereon.wallet.interaction.WalletInteractionDiagnostics
 
 @ContributesTo(SessionScope::class)
 interface VcdmJwtProtocolStoreGraph {

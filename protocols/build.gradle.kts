@@ -30,6 +30,8 @@ plugins {
     alias(sphereonplug.plugins.org.jetbrains.kotlin.npm.publish.org.jetbrains.kotlin.npm.publish.gradle.plugin) apply false
 }
 
+apply(from = rootDir.resolve("../gradle/idk-npm-runtime.gradle.kts"))
+
 allprojects {
     group = "com.sphereon.idk"
 }

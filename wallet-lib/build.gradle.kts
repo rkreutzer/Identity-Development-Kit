@@ -25,6 +25,8 @@ plugins {
     alias(sphereonplug.plugins.io.kotest.io.kotest.gradle.plugin) apply false
 }
 
+apply(from = rootDir.resolve("../gradle/idk-npm-runtime.gradle.kts"))
+
 allprojects {
     group = "com.sphereon.idk"
 }

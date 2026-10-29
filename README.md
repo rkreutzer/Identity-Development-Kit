@@ -183,6 +183,8 @@ npm install @sphereon/idk-lib-core-api-public
 
 Snapshots use the `snapshot` dist-tag (`@sphereon/idk-foo@snapshot`); released versions are on `latest`.
 
+Each package is self-contained: the Kotlin/JS runtime modules it imports (`kotlin-stdlib`, `ktor`, `kotlinx-*`, ...) ship inside the package under `idk-runtime/`, so installing the `-public` and `-impl` packages you use is enough, with no extra runtime packages and no bootstrap package. The only external dependencies are the regular npm packages listed in each `package.json`. The staging is done by [`gradle/idk-npm-runtime.gradle.kts`](gradle/idk-npm-runtime.gradle.kts), which also fails the package assembly if an import would not resolve inside the package.
+
 ### Building from Source
 
 ```bash

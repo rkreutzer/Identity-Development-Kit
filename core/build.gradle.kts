@@ -26,6 +26,8 @@ plugins {
     alias(sphereonplug.plugins.org.jetbrains.kotlinx.kover) apply false
 }
 
+apply(from = rootDir.resolve("../gradle/idk-npm-runtime.gradle.kts"))
+
 allprojects {
     group = "com.sphereon.idk"
 }
