@@ -19,7 +19,7 @@ package com.sphereon.sdjwt.vc
 import com.sphereon.core.compat.JsExportCompat
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
-import io.ktor.client.statement.bodyAsText
+import io.ktor.client.statement.readRawBytes
 import io.ktor.http.isSuccess
 import kotlinx.serialization.json.Json
 
@@ -90,15 +90,15 @@ class UrlTypeMetadataResolver(
                 }
             }
 
-            val body = response.bodyAsText()
+            val body = response.readRawBytes()
             if (body.isEmpty()) {
                 return TypeMetadataResolutionResult.Failure(
                     TypeMetadataResolutionError.InvalidFormat("Empty response body"),
                 )
             }
 
-            val metadata = json.decodeFromString<SdJwtVcTypeMetadata>(body)
-            TypeMetadataResolutionResult.Success(metadata)
+            val metadata = json.decodeFromString<SdJwtVcTypeMetadata>(body.decodeToString())
+            TypeMetadataResolutionResult.Success(metadata, body)
         } catch (expected: Exception) {
             TypeMetadataResolutionResult.Failure(
                 TypeMetadataResolutionError.NetworkError(
@@ -123,12 +123,12 @@ class CachedTypeMetadataResolver(
     private val delegate: TypeMetadataResolver,
     private val maxSize: Int = 100,
 ) : TypeMetadataResolver {
-    private val cache = mutableMapOf<String, SdJwtVcTypeMetadata>()
+    private val cache = mutableMapOf<String, TypeMetadataResolutionResult.Success>()
 
     override suspend fun resolve(vct: String): TypeMetadataResolutionResult {
         // Check cache first
         cache[vct]?.let { cached ->
-            return TypeMetadataResolutionResult.Success(cached)
+            return cached
         }
 
         // Delegate to underlying resolver
@@ -141,7 +141,7 @@ class CachedTypeMetadataResolver(
                 val firstKey = cache.keys.first()
                 cache.remove(firstKey)
             }
-            cache[vct] = result.metadata
+            cache[vct] = result
         }
 
         return result
@@ -196,14 +196,29 @@ class CompositeTypeMetadataResolver(
  * Useful for testing or offline scenarios
  *
  * @property metadata Map of VCT to pre-configured metadata
+ * @property rawDocuments Optional original documents per VCT. Each must decode to the metadata registered
+ * for the same VCT, and is then the representation an `#integrity` expression is verified against.
  */
 class StaticTypeMetadataResolver(
     private val metadata: Map<String, SdJwtVcTypeMetadata>,
+    rawDocuments: Map<String, ByteArray> = emptyMap(),
 ) : TypeMetadataResolver {
+    private val rawDocuments: Map<String, ByteArray> = rawDocuments.mapValues { it.value.copyOf() }
+
+    init {
+        val json = Json { ignoreUnknownKeys = true }
+        for ((vct, raw) in this.rawDocuments) {
+            val registered = requireNotNull(metadata[vct]) { "Raw document supplied for unregistered vct '$vct'" }
+            require(json.decodeFromString<SdJwtVcTypeMetadata>(raw.decodeToString()) == registered) {
+                "Raw document for vct '$vct' does not decode to the registered metadata"
+            }
+        }
+    }
+
     override suspend fun resolve(vct: String): TypeMetadataResolutionResult {
         val found = metadata[vct]
         return if (found != null) {
-            TypeMetadataResolutionResult.Success(found)
+            TypeMetadataResolutionResult.Success(found, rawDocuments[vct])
         } else {
             TypeMetadataResolutionResult.Failure(TypeMetadataResolutionError.NotFound)
         }

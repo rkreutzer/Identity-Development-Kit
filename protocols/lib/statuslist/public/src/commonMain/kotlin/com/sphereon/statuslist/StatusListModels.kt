@@ -285,6 +285,8 @@ data class StatusListToken(
     val contentType: String,
     val ttlSeconds: Long? = null,
     val tokenBytes: ByteArray? = null,
+    /** Publication mode of the same persisted list that supplied this token. */
+    val hostingMode: StatusListHostingMode = StatusListHostingMode.HOSTED,
 ) {
     /** The exact bytes to serve: the binary [tokenBytes] when present (CWT), else the UTF-8 [token] (JWT/VC-JWT). */
     fun rawBytes(): ByteArray = tokenBytes ?: token.encodeToByteArray()

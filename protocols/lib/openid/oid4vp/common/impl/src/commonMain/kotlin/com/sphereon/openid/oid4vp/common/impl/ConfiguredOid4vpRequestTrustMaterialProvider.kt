@@ -8,7 +8,9 @@ package com.sphereon.openid.oid4vp.common.impl
 import com.sphereon.core.api.Err
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
+import com.sphereon.core.api.conf.ConfigLevel
 import com.sphereon.core.api.conf.PropertyResolver
+import com.sphereon.core.api.context.SessionExecution
 import com.sphereon.core.api.error.ErrorCategory
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.di.session.SessionScope
@@ -27,14 +29,20 @@ import dev.zacsweers.metro.SingleIn
  * PEM certificates. With no anchors configured the provider fails closed, so an x5c chain can
  * never be accepted against its own leaf.
  */
-@Inject
 @SingleIn(SessionScope::class)
 @ContributesBinding(SessionScope::class)
-class ConfiguredOid4vpRequestTrustMaterialProvider(
-    private val propertyResolver: PropertyResolver? = null,
+class ConfiguredOid4vpRequestTrustMaterialProvider private constructor(
+    private val resolverProvider: () -> PropertyResolver?,
 ) : Oid4vpRequestTrustMaterialProvider {
+    constructor(propertyResolver: PropertyResolver? = null) : this({ propertyResolver })
+
+    // IDK configuration is owned by the execution context; standalone wallet graphs do not
+    // publish an optional PropertyResolver binding. Use the principal's governed configuration.
+    @Inject
+    constructor(execution: SessionExecution) : this({ execution.conf.conf(ConfigLevel.PRINCIPAL) })
+
     override suspend fun resolve(): IdkResult<Oid4vpRequestTrustMaterial, IdkError> {
-        val resolver = propertyResolver ?: return Err(unavailable())
+        val resolver = resolverProvider() ?: return Err(unavailable())
         val values = buildList {
             resolver.getPropertyAsString(TRUST_ANCHORS_KEY)?.let(::add)
             addAll(

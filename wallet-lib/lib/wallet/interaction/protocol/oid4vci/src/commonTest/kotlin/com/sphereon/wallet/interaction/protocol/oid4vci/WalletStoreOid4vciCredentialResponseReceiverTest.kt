@@ -8,6 +8,7 @@ package com.sphereon.wallet.interaction.protocol.oid4vci
 
 import com.sphereon.cbor.CborByteString
 import com.sphereon.cbor.TDate
+import com.sphereon.cbor.tDateToEpochSeconds
 import com.sphereon.core.api.Err
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
@@ -128,6 +129,8 @@ import com.sphereon.wallet.interaction.WalletInteractionStatus
 import com.sphereon.wallet.interaction.WalletProtocol
 import com.sphereon.wallet.interaction.WalletIssuerAuthenticationProvenance
 import com.sphereon.wallet.interaction.WalletIssuerAuthenticationResult
+import com.sphereon.wallet.interaction.WalletIssuerAuthenticationRequest
+import com.sphereon.wallet.interaction.WalletIssuerAuthenticationResolver
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -356,6 +359,10 @@ class WalletStoreOid4vciCredentialResponseReceiverTest {
             assertTrue(thrown === resolverFailure, "logging must preserve the original failure")
             assertEquals("holder-verification-method", failureDetails.last()["stage"])
             assertEquals("IllegalStateException", failureDetails.last()["causeType"])
+            failureDetails.last()["failureSite"]?.let { site ->
+                assertTrue(Regex("""[A-Z][\w$]*\.[\w$<>-]+""").matches(site), "failure site is a closed Class.method: $site")
+                assertTrue("private" !in site, "failure site never carries the failure message")
+            }
             val cancellation = CancellationException("private-cancellation-details")
             val warningCount = failureDetails.size
             assertTrue(assertFailsWith<CancellationException> {
@@ -425,6 +432,108 @@ class WalletStoreOid4vciCredentialResponseReceiverTest {
             assertNotNull(stored)
             assertEquals(rawCredential, stored.instances.single().raw)
             assertEquals(listOf("did:example:v2-holder"), stored.subjectRefs.map { it.value })
+        }
+
+    @Test
+    fun receiverResolvesKeysForTheDidIssuerOfADidSignedVcdmCredential() =
+        runTest {
+            // OID4VCI 1.0 §14.4: the Credential Issuer Identifier is the HTTPS URL; a DID-signed
+            // VCDM credential names its DID, whose keys are resolved for that DID.
+            val did = "did:web:issuer.example"
+            val credentialStore =
+                BlobWalletCredentialStore(
+                    blobService = createOid4vciReceiverTestBlobService(),
+                    credentialBodyProtector = ReceiverTestCredentialBodyProtector,
+                )
+            val methodResolver = WalletHolderVerificationMethodResolver { _, _ ->
+                WalletHolderVerificationMethod(
+                    value = "https://wallet.example/jwks#holder-did-issuer",
+                    controller = "https://wallet.example/holders/did-issuer",
+                    kind = WalletHolderIdentifierKind.JWKS_KID,
+                    signingAlgorithm = SignatureAlgorithm.ECDSA_SHA256,
+                )
+            }
+            val sessionId = WalletInteractionSessionId("oid4vci-receiver-did-issuer-test")
+            val privateStore = ReceiverTestPrivateSessionStore()
+            privateStore.put(
+                sessionId,
+                WalletInteractionPrivateSessionData(
+                    namespace = Oid4vciWalletInteractionProtocolAdapter.ADAPTER_ID,
+                    values = oid4vciStateValues(
+                        Oid4vciPrivateSessionState(
+                            credentialConfigurationId = CREDENTIAL_CONFIGURATION_ID,
+                            holderKeyAliases = listOf("wallet-holder-key-did-issuer"),
+                        ),
+                    ),
+                ),
+            )
+            val requested = mutableListOf<String>()
+            var didAuthentication: WalletIssuerAuthenticationResult? =
+                WalletIssuerAuthenticationResult(
+                    issuer = did,
+                    trustedJwks = Json.parseToJsonElement("""{"keys":[{"kty":"EC","crv":"P-256","x":"x","y":"y","kid":"$did#key-1"}]}""").jsonObject,
+                    provenance = listOf(WalletIssuerAuthenticationProvenance("test", "did-issuer")),
+                )
+            val failureDetails = mutableListOf<Map<String, String>>()
+            val context =
+                WalletInteractionContext(
+                    sessionId = sessionId,
+                    walletUnitId = WALLET_UNIT_ID,
+                    executionOwner = ProtocolExecutionOwner.WALLET_BACKEND,
+                    privateSessionStore = privateStore,
+                    sensitiveInputAuthority = Oid4vciTestSensitiveInputAuthority,
+                    issuerAuthenticationResolver = object : WalletIssuerAuthenticationResolver {
+                        override suspend fun resolve(input: WalletIssuerAuthenticationRequest): WalletIssuerAuthenticationResult? {
+                            requested += input.counterparty.identifier
+                            return didAuthentication
+                        }
+                    },
+                    diagnostics = object : WalletInteractionDiagnostics {
+                        override fun warn(event: String, sessionId: WalletInteractionSessionId?, details: Map<String, String>) {
+                            failureDetails += details
+                        }
+                    },
+                )
+            val state =
+                WalletInteractionState(
+                    sessionId = sessionId,
+                    walletUnitId = WALLET_UNIT_ID,
+                    status = WalletInteractionStatus.Completed,
+                    flowKind = WalletInteractionFlowKind.CredentialReceive,
+                    protocol = WalletProtocol.OID4VCI,
+                    adapterId = Oid4vciWalletInteractionProtocolAdapter.ADAPTER_ID,
+                    // The offer-time authentication is bound to the HTTPS Credential Issuer; it must
+                    // not be used for a credential that names a different (DID) issuer.
+                    issuerAuthentication =
+                        WalletIssuerAuthenticationResult(
+                            issuer = "https://issuer.example",
+                            trustedJwks = Json.parseToJsonElement("""{"keys":[{"kty":"EC","crv":"P-256","x":"x","y":"y","kid":"issuer-url"}]}""").jsonObject,
+                            provenance = listOf(WalletIssuerAuthenticationProvenance("test", "url-issuer")),
+                        ),
+                )
+            val rawCredential =
+                buildTestCompactJwt(
+                    """{"@context":["https://www.w3.org/ns/credentials/v2"],"type":["VerifiableCredential","EmployeeCredential"],"issuer":"$did","iss":"$did","validFrom":"2026-01-01T00:00:00Z","credentialSubject":{"id":"did:example:did-issuer-holder","degree":"BSc"}}""",
+                )
+            val response = CredentialResponse(credentials = listOf(CredentialResponseItem(credential = JsonPrimitive(rawCredential))))
+            val receiver = WalletStoreOid4vciCredentialResponseReceiver(credentialStore, FakeWalletIssuanceSessionStore(), testAcceptance(), methodResolver)
+
+            didAuthentication = null
+            assertFailsWith<IllegalStateException> { receiver.receiveCredentialResponse(context, state, resolvedVcdm20Offer(), response) }
+            assertEquals("issuer_keys_missing", failureDetails.last()["reason"])
+            assertTrue(credentialStore.listMetadata(WALLET_UNIT_ID).getOrThrow().isEmpty())
+
+            didAuthentication =
+                WalletIssuerAuthenticationResult(
+                    issuer = did,
+                    trustedJwks = Json.parseToJsonElement("""{"keys":[{"kty":"EC","crv":"P-256","x":"x","y":"y","kid":"$did#key-1"}]}""").jsonObject,
+                    provenance = listOf(WalletIssuerAuthenticationProvenance("test", "did-issuer")),
+                )
+            val previews = receiver.receiveCredentialResponse(context, state, resolvedVcdm20Offer(), response)
+
+            assertEquals(listOf(did, did), requested)
+            assertEquals(1, previews.size)
+            assertEquals(1, credentialStore.listMetadata(WALLET_UNIT_ID).getOrThrow().size)
         }
 
     @Test
@@ -708,6 +817,9 @@ class WalletStoreOid4vciCredentialResponseReceiverTest {
                     .getOrThrow()
             assertNotNull(stored)
             assertEquals(rawMdocCredential, stored.instances.single().raw)
+            val expectedValidity = TDate("2025-01-20T12:00:00Z").tDateToEpochSeconds()
+            assertEquals(expectedValidity, stored.instances.single().validity.validFrom?.epochSeconds)
+            assertEquals(expectedValidity, stored.instances.single().validity.validUntil?.epochSeconds)
             assertEquals(MDOC_CREDENTIAL_CONFIGURATION_ID, stored.issuanceProvenance?.credentialConfigurationId)
             assertEquals(
                 MDOC_DOCTYPE,

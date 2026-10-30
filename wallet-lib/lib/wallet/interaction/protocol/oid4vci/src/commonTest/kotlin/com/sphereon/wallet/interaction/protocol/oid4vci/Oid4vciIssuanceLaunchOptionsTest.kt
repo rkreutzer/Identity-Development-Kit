@@ -5,6 +5,7 @@
 
 package com.sphereon.wallet.interaction.protocol.oid4vci
 
+import com.sphereon.oauth2.common.model.ClientAuthenticationMethod
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -27,6 +28,8 @@ class Oid4vciIssuanceLaunchOptionsTest {
                     Oid4vciInteractionLaunchAttributes.REDIRECT_URI to "https://suite.example/callback",
                     Oid4vciInteractionLaunchAttributes.CREDENTIAL_CONFIGURATION_ID to "pid",
                     Oid4vciInteractionLaunchAttributes.CREDENTIAL_BATCH_SIZE to "2",
+                    Oid4vciInteractionLaunchAttributes.CLIENT_AUTHENTICATION_METHOD to "private_key_jwt",
+                    Oid4vciInteractionLaunchAttributes.DPOP_ENABLED to "true",
                     Oid4vciInteractionLaunchAttributes.USE_PAR to "true",
                     Oid4vciInteractionLaunchAttributes.ENCRYPT_CREDENTIAL_REQUEST to "true",
                 ),
@@ -38,6 +41,8 @@ class Oid4vciIssuanceLaunchOptionsTest {
         assertEquals("https://suite.example/callback", applied.redirectUri)
         assertEquals("pid", applied.credentialConfigurationId)
         assertEquals(2, applied.batchSize)
+        assertEquals(ClientAuthenticationMethod.PRIVATE_KEY_JWT, applied.clientAuthenticationMethod)
+        assertTrue(applied.dpopEnabled)
         assertEquals(true, applied.usePar)
         assertEquals(true, applied.encryptCredentialRequest)
     }

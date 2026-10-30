@@ -16,6 +16,7 @@
 
 package com.sphereon.openid.oid4vci.rest
 
+import com.sphereon.core.api.http.GenericHttpRequest
 import com.sphereon.core.api.http.command.HttpEndpointCommand
 import com.sphereon.core.api.http.describe.HttpEndpointDescriptor
 import com.sphereon.core.api.http.describe.HttpMethod
@@ -24,9 +25,32 @@ import kotlin.experimental.ExperimentalObjCName
 import kotlin.native.ObjCName
 
 /**
+ * Route templates of the credential-offer backend API. The instance-scoped form is the published contract and is listed
+ * first. The form without an instance stays mounted for callers that predate it and is not part of the published
+ * OpenAPI, so such a caller selects the instance through the request body or the deployment's routing.
+ */
+object Oid4vciRestPaths {
+    const val INSTANCE_ID_PARAM: String = "instanceId"
+    const val CORRELATION_ID_PARAM: String = "correlation_id"
+
+    const val OFFERS: String = "/backend/credential/offers"
+    const val OFFER: String = "$OFFERS/{$CORRELATION_ID_PARAM}"
+
+    const val INSTANCE_OFFERS: String = "/instances/{$INSTANCE_ID_PARAM}$OFFERS"
+    const val INSTANCE_OFFER: String = "/instances/{$INSTANCE_ID_PARAM}$OFFER"
+}
+
+/**
+ * Extracts the path parameters of whichever of the [endpoint]'s routes this request was made on. A pattern the request
+ * does not match contributes nothing, so a request on the route without an instance carries no [Oid4vciRestPaths.INSTANCE_ID_PARAM].
+ */
+fun GenericHttpRequest.withRouteParams(endpoint: HttpEndpointDescriptor): GenericHttpRequest =
+    endpoint.pathPatterns.fold(this) { request, pattern -> request.withExtractedParams(pattern) }
+
+/**
  * HTTP endpoint command for creating credential offers.
  *
- * POST /api/oid4vci/v1/backend/credential/offers
+ * POST /api/oid4vci/v1/instances/{instanceId}/backend/credential/offers
  */
 @OptIn(ExperimentalObjCName::class)
 @ObjCName("CreateCredentialOfferEndpointCommand", exact = true)
@@ -37,7 +61,7 @@ interface CreateCredentialOfferEndpointCommand : HttpEndpointCommand {
         val ENDPOINT =
             HttpEndpointDescriptor(
                 method = HttpMethod.POST,
-                pathPattern = "/backend/credential/offers",
+                pathPatterns = listOf(Oid4vciRestPaths.INSTANCE_OFFERS, Oid4vciRestPaths.OFFERS),
                 consumes = setOf(MediaType.ApplicationJson),
                 produces = setOf(MediaType.ApplicationJson),
                 operationId = "createCredentialOffer",
@@ -52,7 +76,7 @@ interface CreateCredentialOfferEndpointCommand : HttpEndpointCommand {
 /**
  * HTTP endpoint command for getting credential offer status.
  *
- * GET /api/oid4vci/v1/backend/credential/offers/{correlation_id}
+ * GET /api/oid4vci/v1/instances/{instanceId}/backend/credential/offers/{correlation_id}
  */
 @OptIn(ExperimentalObjCName::class)
 @ObjCName("GetCredentialOfferStatusEndpointCommand", exact = true)
@@ -63,7 +87,7 @@ interface GetCredentialOfferStatusEndpointCommand : HttpEndpointCommand {
         val ENDPOINT =
             HttpEndpointDescriptor(
                 method = HttpMethod.GET,
-                pathPattern = "/backend/credential/offers/{correlation_id}",
+                pathPatterns = listOf(Oid4vciRestPaths.INSTANCE_OFFER, Oid4vciRestPaths.OFFER),
                 produces = setOf(MediaType.ApplicationJson),
                 operationId = "getCredentialOfferStatus",
                 commandId = COMMAND_ID,
@@ -77,7 +101,7 @@ interface GetCredentialOfferStatusEndpointCommand : HttpEndpointCommand {
 /**
  * HTTP endpoint command for deleting credential offers.
  *
- * DELETE /api/oid4vci/v1/backend/credential/offers/{correlation_id}
+ * DELETE /api/oid4vci/v1/instances/{instanceId}/backend/credential/offers/{correlation_id}
  */
 @OptIn(ExperimentalObjCName::class)
 @ObjCName("DeleteCredentialOfferEndpointCommand", exact = true)
@@ -88,7 +112,7 @@ interface DeleteCredentialOfferEndpointCommand : HttpEndpointCommand {
         val ENDPOINT =
             HttpEndpointDescriptor(
                 method = HttpMethod.DELETE,
-                pathPattern = "/backend/credential/offers/{correlation_id}",
+                pathPatterns = listOf(Oid4vciRestPaths.INSTANCE_OFFER, Oid4vciRestPaths.OFFER),
                 produces = setOf(MediaType.ApplicationJson),
                 operationId = "deleteCredentialOffer",
                 commandId = COMMAND_ID,

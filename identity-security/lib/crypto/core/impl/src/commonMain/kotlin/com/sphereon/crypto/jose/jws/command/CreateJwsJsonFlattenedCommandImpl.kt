@@ -63,6 +63,7 @@ class CreateJwsJsonFlattenedCommandImpl(
         // Create general JWS first
         val generalResult = createJwsJsonGeneralCommand.execute(appliedArgs)
         if (generalResult.isErr) {
+            log.error("JWS signing failed command=$commandId stage=general-signing")
             return IdkResult.err(generalResult.error)
         }
 
@@ -70,6 +71,7 @@ class CreateJwsJsonFlattenedCommandImpl(
 
         // Verify only one signature
         if (general.signatures.size != 1) {
+            log.error("JWS signing failed command=$commandId stage=signature-count count=${general.signatures.size}")
             return IdkResult.err(
                 IdkError.fromString("Flattened JWS must have exactly one signature, found ${general.signatures.size}"),
             )

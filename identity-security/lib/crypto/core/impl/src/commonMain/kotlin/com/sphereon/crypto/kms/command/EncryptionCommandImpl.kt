@@ -24,6 +24,7 @@ import com.sphereon.core.api.asErrorResult
 import com.sphereon.core.api.asOkResult
 import com.sphereon.core.api.binary.typeToken
 import com.sphereon.core.api.context.SessionExecution
+import kotlinx.coroutines.CancellationException
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.core.api.service.TypedServiceCommandAdapter
 import com.sphereon.crypto.core.kms.KmsProviderOperation
@@ -102,12 +103,9 @@ class EncryptCommandImpl(
                 authTag = result.authTag,
             ).asOkResult()
         } catch (expected: Exception) {
-            // Carry the cause class and message; some exceptions (e.g. resource-style
-            // NotFoundException) have a null message, which would otherwise surface as
-            // the undiagnosable "Encryption failed: null".
-            val detail = expected.message?.let { "${expected::class.simpleName}: $it" } ?: expected.toString()
-            log.warn("Encryption failed: $detail")
-            IdkError.fromString(message = "Encryption failed: $detail").asErrorResult()
+            if (expected is CancellationException) throw expected
+            log.warn("Encryption failed stage=provider-encrypt")
+            IdkError.fromString(message = "Encryption failed").asErrorResult()
         }
     }
 
@@ -158,10 +156,9 @@ class DecryptCommandImpl(
             log.debug("Decryption successful, plaintext length: ${plaintext.size} bytes")
             DecryptResult(plaintext).asOkResult()
         } catch (expected: Exception) {
-            // See the encrypt path: keep the cause class and never drop a null message.
-            val detail = expected.message?.let { "${expected::class.simpleName}: $it" } ?: expected.toString()
-            log.warn("Decryption failed: $detail")
-            IdkError.fromString(message = "Decryption failed: $detail").asErrorResult()
+            if (expected is CancellationException) throw expected
+            log.warn("Decryption failed stage=provider-decrypt")
+            IdkError.fromString(message = "Decryption failed").asErrorResult()
         }
     }
 
@@ -258,8 +255,9 @@ class UnwrapKeyCommandImpl(
             log.debug("Key unwrap successful, unwrapped key length: ${unwrappedKey.size} bytes")
             UnwrapKeyResult(unwrappedKey).asOkResult()
         } catch (expected: Exception) {
-            log.warn("Key unwrap failed: ${expected.message}")
-            IdkError.fromString(message = "Key unwrap failed: ${expected.message}").asErrorResult()
+            if (expected is CancellationException) throw expected
+            log.warn("Key unwrap failed stage=provider-key-unwrap")
+            IdkError.fromString(message = "Key unwrap failed").asErrorResult()
         }
     }
 

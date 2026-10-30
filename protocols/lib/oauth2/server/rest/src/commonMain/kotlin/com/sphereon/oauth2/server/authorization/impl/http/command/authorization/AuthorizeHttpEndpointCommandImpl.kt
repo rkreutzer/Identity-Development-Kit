@@ -62,14 +62,13 @@ import kotlinx.serialization.json.Json
  * query string; `POST` requires `application/x-www-form-urlencoded` and reads them from the body.
  * Both code paths converge on the same [HandleAuthorizeRequestArgs] dispatch.
  */
-@Inject
 @SingleIn(SessionScope::class)
 @ContributesIntoMap(SessionScope::class, binding = binding<HttpEndpointCommand>())
 @StringKey(AuthorizeHttpEndpointCommand.COMMAND_ID)
-class AuthorizeHttpEndpointCommandImpl(
+class AuthorizeHttpEndpointCommandImpl @Inject constructor(
     execution: SessionExecution,
     private val handleAuthorizeRequestCommands: Set<HandleAuthorizeRequestCommand>,
-    private val createAuthorizationErrorResponseCommand: CreateAuthorizationErrorResponseCommand,
+    createAuthorizationErrorResponseCommandFactory: () -> CreateAuthorizationErrorResponseCommand,
     private val configProvider: OAuth2ServersConfigProvider,
     private val baseUrlResolver: OAuth2ServerBaseUrlResolver,
     private val loginSessionIdProvider: MutableOidcLoginSessionIdProvider,
@@ -79,6 +78,25 @@ class AuthorizeHttpEndpointCommandImpl(
         endpoint = AuthorizeHttpEndpointCommand.ENDPOINT,
     ),
     AuthorizeHttpEndpointCommand {
+    private val createAuthorizationErrorResponseCommand: CreateAuthorizationErrorResponseCommand by lazy(createAuthorizationErrorResponseCommandFactory)
+
+    /** Source-compatible constructor for callers that already own these dependencies. */
+    constructor(
+        execution: SessionExecution,
+        handleAuthorizeRequestCommands: Set<HandleAuthorizeRequestCommand>,
+        createAuthorizationErrorResponseCommand: CreateAuthorizationErrorResponseCommand,
+        configProvider: OAuth2ServersConfigProvider,
+        baseUrlResolver: OAuth2ServerBaseUrlResolver,
+        loginSessionIdProvider: MutableOidcLoginSessionIdProvider,
+    ) : this(
+        execution = execution,
+        handleAuthorizeRequestCommands = handleAuthorizeRequestCommands,
+        createAuthorizationErrorResponseCommandFactory = { createAuthorizationErrorResponseCommand },
+        configProvider = configProvider,
+        baseUrlResolver = baseUrlResolver,
+        loginSessionIdProvider = loginSessionIdProvider,
+    )
+
     private val json =
         Json {
             prettyPrint = false
@@ -120,6 +138,10 @@ class AuthorizeHttpEndpointCommandImpl(
                 @Suppress("UNCHECKED_CAST")
                 request.queryParameters.filterValues { it != null } as Map<String, String>
             }
+
+        if (parameters.containsKey("request") && parameters.containsKey("request_uri")) {
+            return Ok(oauth2ErrorResponse(400, "invalid_request", "request and request_uri MUST NOT both be present", json))
+        }
 
         val baseUrl = baseUrlResolver.resolveBaseUrl(request, configProvider)
         val handleArgs =

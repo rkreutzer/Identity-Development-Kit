@@ -334,6 +334,9 @@ data class AuthorizationRequestData(
      * Additional parameters
      */
     val additionalParameters: Map<String, String> = emptyMap(),
+    /** Process-only verifier result; HTTP parsing never creates or reads this field. */
+    @kotlinx.serialization.Transient
+    val authorizationEvidence: com.sphereon.oauth2.server.authorization.command.jar.AuthorizationRequestEvidence? = null,
 )
 
 /**

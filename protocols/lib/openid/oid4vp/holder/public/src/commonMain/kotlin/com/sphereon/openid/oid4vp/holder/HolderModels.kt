@@ -21,6 +21,7 @@ import com.sphereon.mdoc.PreparedMdocDeviceAuthenticationSigning
 import com.sphereon.core.compat.JsExportCompat
 import com.sphereon.core.compat.JsExportIgnoreCompat
 import com.sphereon.oauth2.common.model.AuthorizationRequest
+import com.sphereon.oauth2.common.model.AuthorizationErrorResponse
 import com.sphereon.openid.oid4vc.common.CredentialFormat
 import com.sphereon.openid.oid4vc.common.PresentationFormat
 import com.sphereon.openid.oid4vp.common.ClientIdScheme
@@ -78,6 +79,8 @@ data class ResolvedOid4vpRequest(
     val verifierInfo: VerifierInfo,
     val transactionData: List<ParsedTransactionDataEntry>? = null,
     val verifierAttestations: List<VerifierAttestation>? = null,
+    /** Protocol error retained after client authentication, before any credential disclosure. */
+    val authorizationError: AuthorizationErrorResponse? = null,
 )
 
 /**

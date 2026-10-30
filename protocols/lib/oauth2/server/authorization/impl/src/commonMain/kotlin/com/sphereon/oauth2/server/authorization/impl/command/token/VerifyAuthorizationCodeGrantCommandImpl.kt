@@ -137,6 +137,7 @@ class VerifyAuthorizationCodeGrantCommandImpl(
         // This prevents replay attacks by ensuring the code can only be used once
         val codeData =
             authorizationCodeStorage.consumeAuthorizationCode(code).getOrElse { error ->
+                execution.log.error("Authorization code verification failed command=$commandId stage=code-storage")
                 return Err(
                     AuthorizationServerError.ServerError(
                         details = "Failed to retrieve authorization code: ${error.details}",
@@ -157,6 +158,7 @@ class VerifyAuthorizationCodeGrantCommandImpl(
             // `active = false` and rejects any in-flight access. Best-effort: a revoke
             // failure here is logged but does not change the InvalidGrant we return.
             val storedCode = authorizationCodeStorage.findAuthorizationCode(code).getOrElse { null }
+            logTokenRefusal(execution.log, "Authorization code verification refused command=$commandId stage=code-lookup stored=${storedCode != null} used=${storedCode?.used == true}")
             storedCode?.let { stored ->
                 if (stored.used) {
                     stored.issuedAccessToken?.let { tokenStorage.revokeAccessToken(it) }
@@ -181,6 +183,7 @@ class VerifyAuthorizationCodeGrantCommandImpl(
         // Verify code is not expired
         val now = artifactClock.now()
         if (codeData.expiresAt < now) {
+            logTokenRefusal(execution.log, "Authorization code verification refused command=$commandId stage=code-expired")
             return Err(
                 AuthorizationServerError.InvalidGrant(
                     details = "Authorization code has expired",
@@ -191,6 +194,7 @@ class VerifyAuthorizationCodeGrantCommandImpl(
 
         // Verify client_id matches
         if (codeData.clientId != clientId) {
+            logTokenRefusal(execution.log, "Authorization code verification refused command=$commandId stage=client-binding")
             return Err(
                 AuthorizationServerError.InvalidGrant(
                     details = "Authorization code was issued to a different client",
@@ -207,9 +211,11 @@ class VerifyAuthorizationCodeGrantCommandImpl(
                 GrantType.AUTHORIZATION_CODE !in admittedClient.grantTypes ||
                 !admittedClient.requirePkce
             ) {
+                logTokenRefusal(execution.log, "Authorization code verification refused command=$commandId stage=client-admission")
                 return Err(AuthorizationServerError.InvalidClient(details = "Authorization code admission does not match this client"))
             }
             if (codeData.codeChallenge.isNullOrBlank() || codeData.codeChallengeMethod != PkceMethod.S256) {
+                logTokenRefusal(execution.log, "Authorization code verification refused command=$commandId stage=admitted-pkce-method")
                 return Err(AuthorizationServerError.InvalidGrant(details = "Admitted wallet authorization code requires PKCE S256"))
             }
         } else if (clientAuthorization == null) {
@@ -230,6 +236,7 @@ class VerifyAuthorizationCodeGrantCommandImpl(
             return Err(AuthorizationServerError.InvalidTarget(resource = requestedResource.first(), reason = "resource must be a secure absolute URI without a fragment"))
         }
         if (requestedResource.isNotEmpty() && requestedResource != codeData.resource) {
+            logTokenRefusal(execution.log, "Authorization code verification refused command=$commandId stage=resource-binding")
             return Err(AuthorizationServerError.InvalidGrant(details = "resource does not match authorization request"))
         }
 
@@ -249,6 +256,7 @@ class VerifyAuthorizationCodeGrantCommandImpl(
             // every `redirect_uri` comparison going through ConstantTime — no exceptions to
             // explain in the code review.
             if (!ConstantTime.equalsCT(codeData.redirectUri, redirectUri)) {
+                logTokenRefusal(execution.log, "Authorization code verification refused command=$commandId stage=redirect-binding")
                 return Err(
                     AuthorizationServerError.InvalidGrant(
                         details = "redirect_uri does not match authorization request",
@@ -265,6 +273,7 @@ class VerifyAuthorizationCodeGrantCommandImpl(
         val storedCodeChallenge = codeData.codeChallenge
         if (storedCodeChallenge != null) {
             if (codeVerifier.isNullOrBlank()) {
+                logTokenRefusal(execution.log, "Authorization code verification refused command=$commandId stage=pkce-missing")
                 return Err(
                     AuthorizationServerError.InvalidGrant(
                         details = "Missing required parameter: code_verifier (PKCE required)",
@@ -276,6 +285,7 @@ class VerifyAuthorizationCodeGrantCommandImpl(
             // Verify code_verifier format (RFC 7636 Section 4.1)
             // Must be 43-128 characters, A-Z, a-z, 0-9, -, ., _, ~
             if (codeVerifier.length !in MIN_PKCE_LENGTH..MAX_PKCE_LENGTH) {
+                logTokenRefusal(execution.log, "Authorization code verification refused command=$commandId stage=pkce-format")
                 return Err(
                     AuthorizationServerError.InvalidGrant(
                         details = "code_verifier must be 43-128 characters",
@@ -302,6 +312,7 @@ class VerifyAuthorizationCodeGrantCommandImpl(
             // hit a valid prefix?" timing that, combined with retries, lets an attacker
             // recover the challenge byte-by-byte.
             if (!ConstantTime.equalsCT(computedChallenge, storedCodeChallenge)) {
+                logTokenRefusal(execution.log, "Authorization code verification refused command=$commandId stage=pkce-binding")
                 return Err(
                     AuthorizationServerError.InvalidGrant(
                         details = "PKCE verification failed: code_verifier does not match code_challenge",
@@ -310,6 +321,7 @@ class VerifyAuthorizationCodeGrantCommandImpl(
                 )
             }
         } else if (admittedClient != null) {
+            logTokenRefusal(execution.log, "Authorization code verification refused command=$commandId stage=admitted-pkce-missing")
             return Err(AuthorizationServerError.InvalidGrant(details = "Admitted wallet authorization code requires PKCE"))
         } else {
             // No PKCE was used - check if it's required for this client

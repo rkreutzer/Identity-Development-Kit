@@ -173,7 +173,7 @@ class SimpleParseTest {
                 parsedBrowserRequest.additionalParameters?.get(DIGITAL_CREDENTIAL_ORIGIN_PARAMETER)?.jsonPrimitive?.content,
             )
 
-            val injectedBrowserIdentity =
+            val unsignedRequestWithCallerIdentityFields =
                 command.parseDigitalCredentialsAuthorizationRequest(
                     request =
                         DigitalCredentialsAuthorizationRequest(
@@ -182,6 +182,7 @@ class SimpleParseTest {
                             data =
                                 buildJsonObject {
                                     put("client_id", "origin:https://attacker.example")
+                                    put("expected_origins", "https://attacker.example")
                                     put("response_type", "vp_token")
                                     put("response_mode", "dc_api")
                                     put("nonce", "nonce-12345678")
@@ -190,7 +191,10 @@ class SimpleParseTest {
                         ),
                     walletConfig = null,
                 )
-            assertTrue(injectedBrowserIdentity is com.sphereon.core.api.Err)
+            assertTrue(unsignedRequestWithCallerIdentityFields is Ok, unsignedRequestWithCallerIdentityFields.toString())
+            val callerIdentityIgnored = (unsignedRequestWithCallerIdentityFields as Ok).value
+            assertEquals("origin:https://wallet.example.com", callerIdentityIgnored.clientId)
+            assertTrue("expected_origins" !in callerIdentityIgnored.additionalParameters.orEmpty())
         }
 }
 

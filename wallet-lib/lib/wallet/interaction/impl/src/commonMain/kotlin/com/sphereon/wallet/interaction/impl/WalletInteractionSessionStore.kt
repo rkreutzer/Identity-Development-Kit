@@ -11,6 +11,7 @@ import com.sphereon.wallet.interaction.WalletInteractionActivityProjection
 import com.sphereon.wallet.interaction.WalletInteractionSessionId
 import com.sphereon.wallet.interaction.WalletInteractionState
 import com.sphereon.wallet.interaction.WalletInteractionStateEvent
+import com.sphereon.wallet.interaction.WalletInteractionTaskProjection
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.filter
@@ -46,6 +47,12 @@ interface WalletInteractionSessionStore {
         afterSequence: Long? = null,
         limit: Int = 100,
     ): List<WalletInteractionActivityProjection> = emptyList()
+
+    /** Open holder tasks of [walletUnitId], most recently updated first. */
+    suspend fun listTasks(
+        walletUnitId: String,
+        limit: Int = 100,
+    ): List<WalletInteractionTaskProjection> = emptyList()
 }
 
 interface WalletInteractionLiveEventBus {

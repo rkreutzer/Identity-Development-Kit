@@ -56,7 +56,7 @@ class TenantAwareSigningKeyLookupTest {
             seedActiveKey(store, tenantId = "beta", kid = "k-beta")
 
             val acmeExecution = TenantOverrideSessionExecution(ctx.execution, "acme")
-            val command = GetJwksCommandImpl(acmeExecution, store, ctx.identifierService)
+            val command = ctx.defaultSourceJwksCommand(acmeExecution, store)
 
             val result = command.execute(GetJwksArgs())
 
@@ -77,7 +77,7 @@ class TenantAwareSigningKeyLookupTest {
             val betaKey = seedActiveKey(store, tenantId = "beta", kid = "k-beta")
 
             val betaExecution = TenantOverrideSessionExecution(ctx.execution, "beta")
-            val command = GetJwksCommandImpl(betaExecution, store, ctx.identifierService)
+            val command = ctx.defaultSourceJwksCommand(betaExecution, store)
 
             val result = command.execute(GetJwksArgs())
 
@@ -100,7 +100,7 @@ class TenantAwareSigningKeyLookupTest {
             seedActiveKey(store, tenantId = "default", kid = "k-default")
 
             val blankExecution = TenantOverrideSessionExecution(ctx.execution, "")
-            val command = GetJwksCommandImpl(blankExecution, store, ctx.identifierService)
+            val command = ctx.defaultSourceJwksCommand(blankExecution, store)
 
             val result = command.execute(GetJwksArgs())
 

@@ -14,6 +14,7 @@ import com.sphereon.crypto.core.kms.KeyManagerService
 import com.sphereon.crypto.core.kms.asKeyManagerServiceGraph
 import com.sphereon.di.context.MutableResolvedTenantIdProvider
 import com.sphereon.di.session.SessionScope
+import com.sphereon.oauth2.common.config.MutableOAuth2ServerInstanceIdProvider
 import com.sphereon.oauth2.server.authorization.command.CreateAccessTokenArgs
 import com.sphereon.oauth2.server.authorization.command.CreateAccessTokenCommand
 import com.sphereon.oauth2.server.authorization.command.GetJwksArgs
@@ -38,6 +39,7 @@ import kotlin.test.assertTrue
 @ContributesTo(SessionScope::class)
 interface TenantOverrideSessionGraph {
     val mutableResolvedTenantIdProvider: MutableResolvedTenantIdProvider
+    val mutableOAuth2ServerInstanceIdProvider: MutableOAuth2ServerInstanceIdProvider
 }
 
 /**
@@ -186,6 +188,7 @@ class MultiTenantSigningKeyIsolationTest {
         commandGraph: OAuth2IntegrationSessionGraph,
     ): String {
         tenantOverrideGraph.mutableResolvedTenantIdProvider.setCurrentTenantId(tenantId)
+        tenantOverrideGraph.mutableOAuth2ServerInstanceIdProvider.setCurrentAsInstanceId("default")
         return try {
             val result =
                 commandGraph.createAccessTokenCommand.execute(
@@ -203,6 +206,7 @@ class MultiTenantSigningKeyIsolationTest {
             )
             result.value.value
         } finally {
+            tenantOverrideGraph.mutableOAuth2ServerInstanceIdProvider.clearCurrentAsInstanceId()
             tenantOverrideGraph.mutableResolvedTenantIdProvider.clearCurrentTenantId()
         }
     }
@@ -218,6 +222,7 @@ class MultiTenantSigningKeyIsolationTest {
         commandGraph: OAuth2IntegrationSessionGraph,
     ): List<JsonObject> {
         tenantOverrideGraph.mutableResolvedTenantIdProvider.setCurrentTenantId(tenantId)
+        tenantOverrideGraph.mutableOAuth2ServerInstanceIdProvider.setCurrentAsInstanceId("default")
         return try {
             val result = commandGraph.getJwksCommand.execute(GetJwksArgs())
             assertTrue(result.isOk, "GetJwksCommand must succeed for tenant '$tenantId'")
@@ -232,6 +237,7 @@ class MultiTenantSigningKeyIsolationTest {
                 json.parseToJsonElement(serialised) as JsonObject
             }
         } finally {
+            tenantOverrideGraph.mutableOAuth2ServerInstanceIdProvider.clearCurrentAsInstanceId()
             tenantOverrideGraph.mutableResolvedTenantIdProvider.clearCurrentTenantId()
         }
     }

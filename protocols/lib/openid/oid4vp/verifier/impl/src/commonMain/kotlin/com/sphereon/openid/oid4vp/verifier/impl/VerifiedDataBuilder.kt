@@ -14,11 +14,15 @@
  * limitations under the License.
  */
 
-package com.sphereon.openid.oid4vp.universal.impl.command
+package com.sphereon.openid.oid4vp.verifier.impl
 
 import com.sphereon.openid.oid4vp.universal.VerifiedClaimsValue
 import com.sphereon.openid.oid4vp.universal.VerifiedData
+import com.sphereon.openid.oid4vp.universal.VerifiedDataMode
+import com.sphereon.openid.oid4vp.verifier.ValidationResult
+import com.sphereon.openid.oid4vp.verifier.claimValueToJson
 import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSession
+import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSessionStatus
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -60,43 +64,60 @@ private val PROTECTED_CLAIMS =
         "...",
     )
 
-internal fun buildVerifiedData(session: AuthorizationSession): VerifiedData? {
+/**
+ * Builds the verified data of a verified [session], limited to the representations [modes] selects.
+ * No modes, a session that is not verified, or a validation that is missing or invalid yields null,
+ * and so does a selection that has nothing to carry. An unselected representation is not computed at all.
+ */
+internal fun buildVerifiedData(
+    session: AuthorizationSession,
+    modes: List<VerifiedDataMode>,
+): VerifiedData? {
+    if (session.status != AuthorizationSessionStatus.AUTHORIZATION_RESPONSE_VERIFIED || modes.isEmpty()) {
+        return null
+    }
     val validationResult = session.validationResult ?: return null
     if (!validationResult.valid) {
         return null
     }
 
     val claims =
-        validationResult.matchedCredentials.map { matched ->
-            val claimsMap =
-                matched.disclosedClaims
-                    .filterKeys { it !in PROTECTED_CLAIMS }
-                    .mapValues { (_, value) ->
-                        when (value) {
-                            is String -> JsonPrimitive(value)
-                            is Number -> JsonPrimitive(value)
-                            is Boolean -> JsonPrimitive(value)
-                            null -> JsonPrimitive(null as String?)
-                            else -> JsonPrimitive(value.toString())
-                        }
-                    }
-
-            VerifiedClaimsValue(
-                id = matched.credentialQueryId,
-                type = matched.credentialFormat.value,
-                claims = claimsMap,
-                presentation = matched.presentation,
-                verificationEvidence = matched.verificationEvidence?.let { evidence ->
-                    evidence.copy(trust = evidence.trust?.copy(details = null, diagnostics = emptyList()))
-                },
-            )
+        if (VerifiedDataMode.CREDENTIAL_CLAIMS_DESERIALIZED in modes) {
+            buildVerifiedClaims(validationResult)
+        } else {
+            null
         }
 
-    return VerifiedData(
-        credentialClaims = claims,
-        authorizationResponse = buildAuthorizationResponse(session),
-    )
+    val selectsAuthorizationResponse =
+        VerifiedDataMode.AUTHORIZATION_RESPONSE in modes || VerifiedDataMode.VP_TOKEN in modes
+    val authorizationResponse = if (selectsAuthorizationResponse) buildAuthorizationResponse(session) else null
+    if (claims == null && authorizationResponse == null) {
+        return null
+    }
+    return VerifiedData(credentialClaims = claims, authorizationResponse = authorizationResponse)
 }
+
+private fun buildVerifiedClaims(validationResult: ValidationResult): List<VerifiedClaimsValue> =
+    validationResult.matchedCredentials.map { matched ->
+        val claimsMap =
+            matched.disclosedClaims
+                .filterKeys { it !in PROTECTED_CLAIMS }
+                .mapValues { (_, value) -> claimValueToJson(value) }
+
+        VerifiedClaimsValue(
+            id = matched.credentialQueryId,
+            // Universal OID4VP VerifiedClaimsValue.type: "The digital credential type. Can be a vct
+            // value, or for instance a json-ld type". The format is only a fallback when untyped,
+            // and the detected format is always reported separately.
+            type = matched.credentialType ?: matched.credentialFormat.value,
+            format = matched.credentialFormat,
+            claims = claimsMap,
+            presentation = matched.presentation,
+            verificationEvidence = matched.verificationEvidence?.let { evidence ->
+                evidence.copy(trust = evidence.trust?.copy(details = null, diagnostics = emptyList()))
+            },
+        )
+    }
 
 private fun buildAuthorizationResponse(session: AuthorizationSession): JsonObject? {
     val parsedResponse = session.parsedResponse

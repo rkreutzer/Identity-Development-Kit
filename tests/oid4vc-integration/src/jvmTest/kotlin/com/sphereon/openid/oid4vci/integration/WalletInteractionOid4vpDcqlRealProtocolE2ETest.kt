@@ -16,9 +16,11 @@
 
 package com.sphereon.openid.oid4vci.integration
 
+import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
 import com.sphereon.core.api.conf.DefaultPrincipalMapPropertySource
 import com.sphereon.core.api.decodeFromBase64Url
+import com.sphereon.core.api.error.IdkError
 import com.sphereon.core.api.http.GenericHttpRequest
 import com.sphereon.core.defaults.random.defaultSecureRandom
 import com.sphereon.crypto.core.KeyVisibility
@@ -82,8 +84,12 @@ import com.sphereon.wallet.interaction.protocol.oid4vp.Oid4vpPresentationSecurit
 import com.sphereon.wallet.interaction.protocol.oid4vp.Oid4vpWalletConfigProvider
 import com.sphereon.wallet.interaction.protocol.oid4vp.Oid4vpWalletInteractionProtocolAdapter
 import com.sphereon.wallet.interaction.protocol.oid4vp.SecureComponentOid4vpSdJwtHolderBindingProvider
+import com.sphereon.wallet.unit.SecureComponentUsage
+import com.sphereon.wallet.unit.WalletAttestedKeyRef
 import com.sphereon.wallet.unit.attestation.LocalWalletProviderAttestationSignerResolver
 import com.sphereon.wallet.wsca.Wsca
+import com.sphereon.wallet.wsca.WscaPreparedSigning
+import com.sphereon.wallet.wsca.WscaSigningRequest
 import com.sphereon.wallet.wsca.impl.LocalWsca
 import com.sphereon.wallet.wsca.impl.WalletUserAuthenticator
 import com.sphereon.wallet.wscd.ActivationProof
@@ -99,9 +105,12 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import com.sphereon.openid.oid4vp.holder.WalletConfig as Oid4vpWalletConfig
 
@@ -297,8 +306,16 @@ class WalletInteractionOid4vpDcqlRealProtocolE2ETest {
                 ensureVerifierSigningKey()
 
                 val credentialStore = (ctx.session.graph as WalletInteractionOid4vpStoreTestGraph).walletCredentialStore
-                val wsca = createPromptlessWsca()
+                val wsca = RecordingWsca(createPromptlessWsca())
                 val sdJwtRecord = issueSdJwtCredential(credentialStore, wsca)
+                assertEquals(
+                    HOLDER_SIGNING_KEY_ALIAS,
+                    sdJwtRecord.instances
+                        .single()
+                        .holderKeyRef
+                        ?.alias,
+                )
+                wsca.clearRecordings()
                 // The verifier must receive an explicit issuer trust root. The issuer JWT only
                 // carries its key identifier; accepting the token-supplied JWK would make this
                 // proof meaningless. Keep the trust decision outside the credential itself.
@@ -407,13 +424,39 @@ class WalletInteractionOid4vpDcqlRealProtocolE2ETest {
                 assertTrue(completedState.terminal, "Wallet interaction session should be terminal after successful direct_post submission")
                 assertEquals(WalletSecurityOperation.PRESENT_CREDENTIALS, securityGate.lastRequest?.operation)
                 assertEquals(WalletSecurityAssurance.USER_PRESENT, securityGate.lastRequest?.requiredAssurance)
-                assertEquals(HOLDER_SIGNING_KEY_ALIAS, securityGate.lastRequest?.keyRef)
-                assertEquals(WALLET_UNIT_ID, securityGate.lastRequest?.walletUnitId)
-                assertEquals(WALLET_ACCOUNT_ID, securityGate.lastRequest?.walletAccountId)
-                assertEquals(ACTIVATION_DECISION_ID, securityGate.lastRequest?.activationDecisionId)
-                assertEquals(HSM_OPERATION_TYPE, securityGate.lastRequest?.operationType)
-                assertEquals(HSM_OPERATION_HASH, securityGate.lastRequest?.operationHash)
-                assertEquals(HSM_NONCE, securityGate.lastRequest?.nonce)
+                val approval = assertNotNull(securityGate.lastRequest)
+                assertEquals(SESSION_WALLET_UNIT_ID, approval.walletUnitId)
+                assertEquals(WALLET_ACCOUNT_ID, approval.walletAccountId)
+                assertNull(approval.keyRef, "listed approvals use each operation's actual secure-component key")
+                assertNull(approval.operationHash)
+                assertNull(approval.activationDecisionId)
+                assertNull(approval.operationType)
+                assertNull(approval.nonce)
+                val operation = approval.operations.single()
+                assertTrue(wsca.preparedCalls.isNotEmpty())
+                wsca.preparedCalls.forEach { call ->
+                    assertEquals(operation.keyRef, call.prepared.keyRef.keyRef ?: call.prepared.keyRef.keyId)
+                    assertEquals(operation.operationHash, call.prepared.digestBinding)
+                    assertFalse(call.prepared.digestBinding == HSM_OPERATION_HASH, "caller metadata cannot replace the prepared digest")
+                }
+                assertTrue(wsca.ensuredKeys.isNotEmpty())
+                wsca.ensuredKeys.forEach { (alias, key) ->
+                    assertEquals(HOLDER_SIGNING_KEY_ALIAS, alias)
+                    assertEquals(operation.keyRef, key.keyRef ?: key.keyId)
+                    assertNotNull(key.publicKeyJwk)
+                }
+                val signed = wsca.signedCalls.single()
+                assertTrue(signed.signature.isNotEmpty(), "the real WSCA/WSCD must produce the holder signature")
+                assertEquals(operation.operationHash, signed.prepared.digestBinding)
+                assertEquals(operation.keyRef, signed.request.keyRef.keyRef ?: signed.request.keyRef.keyId)
+                assertEquals(
+                    wsca.ensuredKeys
+                        .first()
+                        .second
+                        .publicKeyJwk,
+                    signed.request.keyRef.publicKeyJwk,
+                )
+                assertContentEquals(signed.prepared.signingInput, signed.request.signingInput)
 
                 val postPresentMetaResult = credentialStore.findByCredentialTypeRef(SESSION_WALLET_UNIT_ID, sdJwtRecord.credentialTypeRefs.first())
                 assertTrue(
@@ -460,12 +503,14 @@ class WalletInteractionOid4vpDcqlRealProtocolE2ETest {
             )
         assertTrue(offerResult.isOk, "Offer creation should succeed")
 
+        ctx.ensurePublicWalletClient(WALLET_CLIENT_ID)
         val adapter =
             Oid4vciWalletInteractionProtocolAdapter(
                 holder = holder,
                 issuanceExecutor =
                     Oid4vciHolderIssuanceExecutor(
                         holder = holder,
+                        tokenEndpointProofsProvider = integrationPublicWalletTokenEndpointProofs(WALLET_CLIENT_ID),
                         optionsProvider =
                             object : Oid4vciIssuanceOptionsProvider {
                                 override suspend fun options(
@@ -686,6 +731,55 @@ class WalletInteractionOid4vpDcqlRealProtocolE2ETest {
             result.isOk,
             "Verifier JAR signing key generation should succeed: ${if (result.isErr) result.error.message.defaultMessage else ""}",
         )
+    }
+
+    /** Observes the real secure-component calls without changing preparation, authentication or signing. */
+    private class RecordingWsca(
+        private val delegate: Wsca,
+    ) : Wsca by delegate {
+        data class PreparedCall(
+            val request: WscaSigningRequest,
+            val prepared: WscaPreparedSigning,
+        )
+
+        data class SignedCall(
+            val prepared: WscaPreparedSigning,
+            val request: WscaSigningRequest,
+            val signature: ByteArray,
+        )
+
+        val ensuredKeys = mutableListOf<Pair<String?, WalletAttestedKeyRef>>()
+        val preparedCalls = mutableListOf<PreparedCall>()
+        val signedCalls = mutableListOf<SignedCall>()
+
+        override suspend fun ensureKey(
+            walletUnitId: String,
+            usage: SecureComponentUsage,
+            algorithm: SignatureAlgorithm,
+            keyAlias: String?,
+        ): IdkResult<WalletAttestedKeyRef, IdkError> =
+            delegate.ensureKey(walletUnitId, usage, algorithm, keyAlias).also { result ->
+                if (result.isOk) ensuredKeys += keyAlias to result.value
+            }
+
+        override suspend fun prepareSign(request: WscaSigningRequest): IdkResult<WscaPreparedSigning, IdkError> =
+            delegate.prepareSign(request).also { result ->
+                if (result.isOk) preparedCalls += PreparedCall(request, result.value)
+            }
+
+        override suspend fun sign(
+            prepared: WscaPreparedSigning,
+            request: WscaSigningRequest,
+        ): IdkResult<ByteArray, IdkError> =
+            delegate.sign(prepared, request).also { result ->
+                if (result.isOk) signedCalls += SignedCall(prepared, request, result.value.copyOf())
+            }
+
+        fun clearRecordings() {
+            ensuredKeys.clear()
+            preparedCalls.clear()
+            signedCalls.clear()
+        }
     }
 
     private class RecordingSecurityGate : WalletSecurityGate {

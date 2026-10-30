@@ -28,6 +28,7 @@ enum class WalletCredentialProtectedDocumentRole {
     ISSUANCE_SESSION,
     DEFERRED_ACCESS_TOKEN,
     ISSUANCE_SESSION_TOMBSTONE,
+    REFRESH_TOKEN,
 }
 
 interface WalletCredentialBodyProtector {

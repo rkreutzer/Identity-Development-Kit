@@ -24,6 +24,7 @@ import com.sphereon.data.store.kv.impl.KvStoreService
 import com.sphereon.di.session.SessionScope
 import com.sphereon.openid.oid4vci.rest.CredentialOfferSession
 import com.sphereon.openid.oid4vci.rest.CredentialOfferSessionStore
+import com.sphereon.openid.oid4vci.rest.Oid4vciRestConfigProvider
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -54,8 +55,9 @@ class EventPublishingCredentialOfferSessionStore private constructor(
         execution: SessionExecution,
         appLogManager: AppLogManager,
         publisher: SessionStatusEventPublisher,
+        configProvider: Oid4vciRestConfigProvider,
     ) : this(
-        KvCredentialOfferSessionStore(kvStoreManager, kvStoreService, execution, appLogManager),
+        KvCredentialOfferSessionStore(kvStoreManager, kvStoreService, execution, appLogManager, configProvider),
         publisher,
         execution,
     )

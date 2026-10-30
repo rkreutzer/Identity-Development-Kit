@@ -30,6 +30,9 @@ import kotlinx.serialization.Serializable
  * RFC 7592: OAuth 2.0 Dynamic Client Registration Management Protocol
  */
 @Serializable
+enum class AuthorizationRequestProofPolicy { NONE, FEDERATED_RP_ASYMMETRIC }
+
+@Serializable
 data class ClientRegistration(
     /**
      * Unique client identifier
@@ -312,6 +315,9 @@ data class ClientRegistration(
      * configuration, are never accepted from dynamic registration and are never minted as claims.
      */
     val tokenExchangeAuthority: Map<String, String> = emptyMap(),
+    /** Process-owned external-source policy; never client metadata or durable registration authority. */
+    @kotlinx.serialization.Transient
+    val authorizationRequestProofPolicy: AuthorizationRequestProofPolicy = AuthorizationRequestProofPolicy.NONE,
 )
 
 /**

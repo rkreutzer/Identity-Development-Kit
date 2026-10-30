@@ -88,12 +88,13 @@ import com.sphereon.crypto.core.toKeyReference
 import com.sphereon.crypto.core.x509.Certificate
 import com.sphereon.data.store.party.model.IdentifierProtectionMode
 import com.sphereon.data.store.party.model.IdentifierType
+import com.sphereon.identity.matching.protection.IdentifierProtectionErrors
+import com.sphereon.identity.matching.protection.IdentifierProtectionKeyAccess
+import com.sphereon.identity.matching.protection.IdentifierProtectionKeyProvisioner
 import com.sphereon.identity.matching.protection.IdentifierProtectionPolicy
 import com.sphereon.identity.matching.protection.NormalizationProfile
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.yield
 import java.security.SecureRandom
@@ -111,10 +112,10 @@ import kotlin.test.assertTrue
  * under its alias BEFORE it can be used for MAC or encrypt operations. Crypto is real
  * (javax.crypto HMAC-SHA256 and AES-256-GCM); only the command-bus plumbing is bridged.
  *
- * Production symptom reproduced here: owner bootstrap on a fresh keystore fails with
- * "[owner-bootstrap] email protection failed: Encryption failed: ...". The blind-index half
- * succeeds because the protector lazily provisions "idfr:bi:&lt;tenantId&gt;"; the value-encryption
- * half must equally provision "idfr:enc:&lt;tenantId&gt;" before calling encrypt.
+ * Identifier keys are created only by [IdentifierProtectionKeyProvisioner.provisionKeys]. Blind
+ * indexing, protection and reveal refuse with [IdentifierProtectionErrors.KEY_NOT_PROVISIONED]
+ * when the tenant has no key and never create one, and an existing key is used through the
+ * provider it is recorded under.
  */
 class KmsBackedIdentifierProtectorKmsFlowTest {
     private val tenant = "application"
@@ -132,6 +133,7 @@ class KmsBackedIdentifierProtectorKmsFlowTest {
         macCommand: MapBackedGenerateMacCommand = MapBackedGenerateMacCommand(kms),
         listKeysCommand: ListKeysCommand = MapBackedListKeysCommand(kms),
         generateKeyCommand: GenerateKeyCommand = MapBackedGenerateKeyCommand(kms),
+        keyAccess: IdentifierProtectionKeyAccess? = null,
     ): KmsBackedIdentifierProtector =
         KmsBackedIdentifierProtector(
             generateKeyCommand = generateKeyCommand,
@@ -140,7 +142,132 @@ class KmsBackedIdentifierProtectorKmsFlowTest {
             encryptCommand = MapBackedEncryptCommand(kms),
             decryptCommand = MapBackedDecryptCommand(kms),
             providerId = providerId,
+            keyAccess = keyAccess,
         )
+
+    /** The protector's explicit key-creation seam; typed as [Any] so the lookup is a runtime check. */
+    private fun provisionerOf(protector: Any): IdentifierProtectionKeyProvisioner = protector as IdentifierProtectionKeyProvisioner
+
+    private suspend fun provision(
+        kms: InMemoryAesGcmKms,
+        providerId: String = "software",
+        tenantId: String = tenant,
+    ) {
+        val result = provisionerOf(newProtector(kms, providerId = providerId)).provisionKeys(tenantId)
+        assertTrue(result.isOk, "provisioning setup failed: ${result.errorOrNull()}")
+    }
+
+    private fun assertKeyNotProvisioned(error: IdkError?) {
+        assertEquals(IdentifierProtectionErrors.KEY_NOT_PROVISIONED, error?.code, "expected a typed refusal, got $error")
+    }
+
+    @Test
+    fun blindIndexOnFreshKmsRefusesWithTypedErrorAndCreatesNoKey() =
+        runTest {
+            val kms = InMemoryAesGcmKms()
+            val protector = newProtector(kms)
+
+            val result = protector.blindIndex(tenant, emailType, "Owner@Example.com", emailPolicy)
+
+            assertTrue(result.isErr, "blind indexing must fail closed when the tenant key is missing")
+            assertKeyNotProvisioned(result.errorOrNull())
+            assertEquals(0, kms.generateCount, "a blind-index read must never create a key")
+            assertTrue(kms.storedKeys.isEmpty(), "no key may appear as a side effect of a read: ${kms.storedKeys.keys}")
+        }
+
+    @Test
+    fun protectOnFreshKmsRefusesWithTypedErrorAndCreatesNoKey() =
+        runTest {
+            val kms = InMemoryAesGcmKms()
+            val protector = newProtector(kms)
+
+            val result = protector.protect(tenant, "identity-1", emailType, "Owner@Example.com", emailPolicy)
+
+            assertTrue(result.isErr, "protection must fail closed when the tenant keys are missing")
+            assertKeyNotProvisioned(result.errorOrNull())
+            assertEquals(0, kms.generateCount, "protection must never create identifier keys")
+        }
+
+    @Test
+    fun revealWithoutEncryptionKeyRefusesWithTypedError() =
+        runTest {
+            val kms = InMemoryAesGcmKms()
+            provision(kms)
+            val protected =
+                newProtector(kms).protect(tenant, "identity-1", emailType, "Owner@Example.com", emailPolicy)
+                    .getOrNull() ?: error("protection setup failed")
+            kms.storedKeys.remove("idfr:enc:$tenant")
+            val generatedBefore = kms.generateCount
+
+            val result = newProtector(kms).reveal(protected, tenant, "identity-1", emailType)
+
+            assertTrue(result.isErr)
+            assertKeyNotProvisioned(result.errorOrNull())
+            assertEquals(generatedBefore, kms.generateCount, "reveal must never create a key")
+        }
+
+    @Test
+    fun provisionKeysCreatesBothAliasesInTheConfiguredProviderAndIsIdempotent() =
+        runTest {
+            val kms = InMemoryAesGcmKms()
+            val listKeys = MapBackedListKeysCommand(kms)
+            val provisioner = provisionerOf(newProtector(kms, listKeysCommand = listKeys))
+
+            assertTrue(provisioner.provisionKeys(tenant).isOk)
+            assertEquals(setOf("idfr:bi:$tenant", "idfr:enc:$tenant"), kms.storedKeys.keys)
+            assertEquals(setOf("software"), kms.storedKeys.values.map { it.providerId }.toSet())
+            assertEquals(2, kms.generateCount)
+
+            assertTrue(provisionerOf(newProtector(kms)).provisionKeys(tenant).isOk)
+            assertEquals(2, kms.generateCount, "repeated provisioning must keep the existing keys")
+        }
+
+    @Test
+    fun provisionKeysRefusesWithoutConfiguredProvider() =
+        runTest {
+            val kms = InMemoryAesGcmKms()
+
+            val result = provisionerOf(newProtector(kms, providerId = null)).provisionKeys(tenant)
+
+            assertTrue(result.isErr, "provider selection by algorithm alone must never create tenant keys")
+            assertEquals(0, kms.generateCount)
+        }
+
+    @Test
+    fun blindIndexUsesBoundKeyAccessWithoutCallingRequestSessionCommands() = runTest {
+        val kms = InMemoryAesGcmKms()
+        provision(kms)
+        val original = newProtector(kms).protect(tenant, "identity-1", emailType, "Owner@Example.com", emailPolicy)
+            .getOrNull() ?: error("initial protection failed")
+        val lookups = mutableListOf<String>()
+        val macs = mutableListOf<String>()
+        val keyAccess = object : IdentifierProtectionKeyAccess {
+            override suspend fun listKeys(tenantId: String, args: ListKeysArgs): IdkResult<ListKeysResult, IdkError> {
+                assertEquals(tenant, tenantId)
+                assertEquals("software", args.providerId)
+                assertEquals("idfr:bi:$tenant", args.alias)
+                lookups += tenantId
+                return MapBackedListKeysCommand(kms).execute(args)
+            }
+            override suspend fun generateMac(tenantId: String, args: GenerateMacArgs): IdkResult<GenerateMacResult, IdkError> {
+                assertEquals(tenant, tenantId)
+                assertEquals("software", args.providerId)
+                assertEquals("idfr:bi:$tenant", args.keyId)
+                macs += tenantId
+                return MapBackedGenerateMacCommand(kms).execute(args)
+            }
+        }
+        val directLookup = object : ListKeysCommand by MapBackedListKeysCommand(kms) {
+            override suspend fun execute(args: ListKeysArgs): IdkResult<ListKeysResult, IdkError> =
+                error("request-session key lookup must not run")
+        }
+        val protector = newProtector(kms, listKeysCommand = directLookup, keyAccess = keyAccess)
+        val result = protector.blindIndex(tenant, emailType, "owner@example.com", emailPolicy)
+        assertTrue(result.isOk)
+        assertEquals(original.valueHmac, result.value)
+        assertEquals(listOf(tenant), lookups)
+        assertEquals(listOf(tenant), macs)
+    }
 
     @Test
     fun providerSelectionSeparatesApplicationAndCustomerTenants() {
@@ -161,58 +288,11 @@ class KmsBackedIdentifierProtectorKmsFlowTest {
     }
 
     @Test
-    fun protectOnFreshKmsProvisionsEncryptionKeyAndSucceeds() =
-        runTest {
-            val kms = InMemoryAesGcmKms()
-            val listKeys = MapBackedListKeysCommand(kms)
-            val protector = newProtector(kms, listKeysCommand = listKeys)
-
-            val result = protector.protect(tenant, "identity-1", emailType, "Owner@Example.com", emailPolicy)
-            val protected =
-                result.getOrNull()
-                    ?: error("protect() must succeed on a fresh KMS (lazy key provisioning), got: ${result.errorOrNull()}")
-
-            assertTrue(
-                kms.storedKeys.containsKey("idfr:bi:$tenant"),
-                "Blind-index key idfr:bi:$tenant must be provisioned lazily; provisioned: ${kms.storedKeys.keys}",
-            )
-            assertTrue(
-                kms.storedKeys.containsKey("idfr:enc:$tenant"),
-                "Encryption key idfr:enc:$tenant must be provisioned lazily before encrypt; provisioned: ${kms.storedKeys.keys}",
-            )
-            assertEquals("idfr:enc:$tenant", protected.encKeyRef)
-            assertEquals("idfr:bi:$tenant", protected.hmacKeyRef)
-            assertEquals(2, listKeys.calls, "Fresh protection resolves each exact alias once")
-            assertEquals(
-                listOf<String?>("idfr:bi:$tenant", "idfr:enc:$tenant"),
-                listKeys.requestedAliases,
-                "Key discovery must request only the two selected tenant aliases",
-            )
-        }
-
-    @Test
-    fun freshSearchableProtectionProvisionsIndependentKeysConcurrently() =
-        runTest {
-            val kms = InMemoryAesGcmKms()
-            val generator = ParallelGateGenerateKeyCommand(kms)
-            val protector = newProtector(kms, generateKeyCommand = generator)
-
-            val protected =
-                withTimeout(1_000) {
-                    protector.protect(tenant, "identity-1", emailType, "Owner@Example.com", emailPolicy)
-                }.getOrNull() ?: error("parallel fresh protection failed")
-
-            assertEquals(2, generator.calls, "fresh searchable protection must provision both independent aliases")
-            assertEquals("idfr:bi:$tenant", protected.hmacKeyRef)
-            assertEquals("idfr:enc:$tenant", protected.encKeyRef)
-        }
-
-    @Test
     fun protectThenRevealRoundTripsThroughRealAesGcm() =
         runTest {
             val kms = InMemoryAesGcmKms()
-            val listKeys = MapBackedListKeysCommand(kms)
-            val protector = newProtector(kms, listKeysCommand = listKeys)
+            provision(kms)
+            val protector = newProtector(kms)
 
             val protected =
                 protector
@@ -225,26 +305,33 @@ class KmsBackedIdentifierProtectorKmsFlowTest {
                     .getOrNull() ?: error("reveal failed")
 
             assertEquals("owner@example.com", revealed, "reveal must return the normalized plaintext")
+            assertEquals("idfr:enc:$tenant", protected.encKeyRef)
+            assertEquals("idfr:bi:$tenant", protected.hmacKeyRef)
         }
 
     @Test
     fun repeatedProtectReusesProvisionedKeys() =
         runTest {
             val kms = InMemoryAesGcmKms()
+            provision(kms)
             val listKeys = MapBackedListKeysCommand(kms)
             val protector = newProtector(kms, listKeysCommand = listKeys)
 
             protector.protect(tenant, "identity-1", emailType, "a@example.com", emailPolicy).getOrNull()
                 ?: error("first protect failed")
             val keysAfterFirst = kms.storedKeys.keys.toSet()
-            val firstGenerateCount = kms.generateCount
             val firstListCount = listKeys.calls
+            assertEquals(
+                listOf<String?>("idfr:bi:$tenant", "idfr:enc:$tenant"),
+                listKeys.requestedAliases.sortedBy { it },
+                "Key discovery must request only the two selected tenant aliases",
+            )
 
             protector.protect(tenant, "identity-2", emailType, "b@example.com", emailPolicy).getOrNull()
                 ?: error("second protect failed")
 
-            assertEquals(keysAfterFirst, kms.storedKeys.keys.toSet(), "Key provisioning must be idempotent per tenant")
-            assertEquals(firstGenerateCount, kms.generateCount, "Existing keys must be reused, not regenerated")
+            assertEquals(keysAfterFirst, kms.storedKeys.keys.toSet(), "Protection must not add keys")
+            assertEquals(2, kms.generateCount, "Only provisioning generates keys")
             assertEquals(firstListCount, listKeys.calls, "Session-owned key references must avoid repeated KMS discovery")
         }
 
@@ -260,9 +347,9 @@ class KmsBackedIdentifierProtectorKmsFlowTest {
                 override suspend fun execute(args: GenerateKeyArgs): IdkResult<GenerateKeyResult, IdkError> =
                     Ok(GenerateKeyResult())
             }
-            val protector = newProtector(kms, generateKeyCommand = generator)
+            val provisioner = provisionerOf(newProtector(kms, generateKeyCommand = generator))
 
-            val result = protector.protect(tenant, "identity-1", emailType, "Owner@Example.com", emailPolicy)
+            val result = provisioner.provisionKeys(tenant)
 
             assertTrue(result.isErr)
             assertTrue(result.error.message.defaultMessage.contains("metadata receipt"))
@@ -276,9 +363,9 @@ class KmsBackedIdentifierProtectorKmsFlowTest {
                 FixedReceiptGenerateKeyCommand(
                     ManagedKeyReference(alias = "unrelated", providerId = "software"),
                 )
-            val protector = newProtector(kms, generateKeyCommand = generator)
+            val provisioner = provisionerOf(newProtector(kms, generateKeyCommand = generator))
 
-            val result = protector.protect(tenant, "identity-1", emailType, "Owner@Example.com", emailPolicy)
+            val result = provisioner.provisionKeys(tenant)
 
             assertTrue(result.isErr)
             assertTrue(result.error.message.defaultMessage.contains("unexpected alias"))
@@ -292,9 +379,9 @@ class KmsBackedIdentifierProtectorKmsFlowTest {
                 FixedReceiptGenerateKeyCommand(
                     ManagedKeyReference(alias = "idfr:bi:$tenant", providerId = "other-provider"),
                 )
-            val protector = newProtector(kms, generateKeyCommand = generator)
+            val provisioner = provisionerOf(newProtector(kms, generateKeyCommand = generator))
 
-            val result = protector.protect(tenant, "identity-1", emailType, "Owner@Example.com", emailPolicy)
+            val result = provisioner.provisionKeys(tenant)
 
             assertTrue(result.isErr)
             assertTrue(result.error.message.defaultMessage.contains("unexpected provider"))
@@ -311,46 +398,43 @@ class KmsBackedIdentifierProtectorKmsFlowTest {
             val protector = newProtector(kms, listKeysCommand = listKeys)
 
             val result = protector.protect(tenant, "identity-1", emailType, "Owner@Example.com", emailPolicy)
+            val provisioning = provisionerOf(protector).provisionKeys(tenant)
 
             assertTrue(result.isErr)
             assertTrue(result.error.message.defaultMessage.contains("unrelated reference"))
+            assertTrue(provisioning.isErr, "an invalid lookup answer is an error, never a missing key")
             assertEquals(0, kms.generateCount, "An invalid exact-lookup response must never trigger key generation")
             assertEquals(
                 setOf("idfr:bi:$tenant", "idfr:enc:$tenant"),
                 listKeys.requestedAliases.toSet(),
-                "both selected aliases must be validated before any generation is allowed",
+                "both selected aliases must be validated",
             )
         }
 
     @Test
-    fun concurrentFirstUseAcrossProtectorInstancesGeneratesOneBlindIndexKey() =
+    fun concurrentProvisioningAcrossProtectorInstancesGeneratesEachKeyOnce() =
         runTest {
             val kms = InMemoryAesGcmKms()
             val listKeys = SnapshotYieldingListKeysCommand(kms)
-            val protectors =
+            val provisioners =
                 listOf(
-                    newProtector(kms, listKeysCommand = listKeys),
-                    newProtector(kms, listKeysCommand = listKeys),
+                    provisionerOf(newProtector(kms, listKeysCommand = listKeys)),
+                    provisionerOf(newProtector(kms, listKeysCommand = listKeys)),
                 )
 
-            val blindIndexes =
-                protectors
-                    .map { protector ->
-                        async {
-                            protector
-                                .blindIndex(tenant, emailType, "Owner@Example.com", emailPolicy)
-                                .getOrNull() ?: error("concurrent blind-index derivation failed")
-                        }
-                    }.awaitAll()
+            provisioners
+                .map { provisioner -> async { provisioner.provisionKeys(tenant) } }
+                .awaitAll()
+                .forEach { assertTrue(it.isOk, "concurrent provisioning failed: ${it.errorOrNull()}") }
 
-            assertEquals(1, kms.generateCount, "Concurrent first use must create the tenant blind-index key exactly once")
-            assertEquals(blindIndexes.first(), blindIndexes.last(), "Concurrent callers must derive the same blind index")
+            assertEquals(2, kms.generateCount, "Concurrent provisioning must create each tenant key exactly once")
         }
 
     @Test
     fun nullConfiguredProviderRoutesMacToResolvedKeyProvider() =
         runTest {
             val kms = InMemoryAesGcmKms()
+            provision(kms)
             val macCommand = MapBackedGenerateMacCommand(kms)
             val protector = newProtector(kms, providerId = null, macCommand = macCommand)
 
@@ -371,6 +455,7 @@ class KmsBackedIdentifierProtectorKmsFlowTest {
             // therefore have a different registry default, while the persisted identifier keys
             // must remain in (and be used from) the original software keystore.
             val kms = InMemoryAesGcmKms(defaultProviderIdValue = "platform")
+            provision(kms, providerId = "software")
             val legacyMacCommand = MapBackedGenerateMacCommand(kms)
             val legacyProtector = newProtector(kms, providerId = "software", macCommand = legacyMacCommand)
             val rc2Ciphertext =
@@ -395,6 +480,87 @@ class KmsBackedIdentifierProtectorKmsFlowTest {
             assertEquals("software", currentMacCommand.lastProviderId)
             assertEquals("software", kms.lastEncryptProviderId)
             assertEquals("software", kms.lastDecryptProviderId)
+        }
+
+    /**
+     * Upgrade safety: a tenant whose keys already exist (created at onboarding by an earlier
+     * release) keeps matching its stored blind indexes and decrypting its stored ciphertext, and
+     * nothing is generated by any operation, including a repeated provisioning call.
+     */
+    @Test
+    fun tenantWithExistingKeysKeepsWorkingWithoutAnyGeneration() =
+        runTest {
+            val kms = InMemoryAesGcmKms()
+            // Keys as an earlier release left them: generated in the configured provider.
+            kms.generateKey("software", "idfr:bi:$tenant", JwkUse.sig, null, SignatureAlgorithm.HMAC_SHA256, KeyVisibility.PRIVATE)
+            kms.generateKey(
+                "software",
+                "idfr:enc:$tenant",
+                JwkUse.enc,
+                arrayOf(KeyOperations.ENCRYPT, KeyOperations.DECRYPT),
+                null,
+                KeyVisibility.PRIVATE,
+            )
+            val existingKeys = kms.storedKeys.keys.toSet()
+            val generatedBefore = kms.generateCount
+            val stored =
+                newProtector(kms).protect(tenant, "identity-1", emailType, "Owner@Example.com", emailPolicy)
+                    .getOrNull() ?: error("existing tenant protection failed")
+
+            // A fresh process (new protector, empty cache) logs the same user in and reveals the value.
+            val afterRestart = newProtector(kms)
+            val loginIndex =
+                afterRestart.blindIndex(tenant, emailType, " owner@EXAMPLE.com", emailPolicy)
+                    .getOrNull() ?: error("existing tenant login lookup failed")
+            val revealed =
+                afterRestart.reveal(stored, tenant, "identity-1", emailType)
+                    .getOrNull() ?: error("existing tenant reveal failed")
+            assertTrue(provisionerOf(afterRestart).provisionKeys(tenant).isOk)
+
+            assertEquals(stored.valueHmac, loginIndex, "the stored blind index must keep matching")
+            assertEquals("owner@example.com", revealed)
+            assertEquals(generatedBefore, kms.generateCount, "no operation may create a key for a provisioned tenant")
+            assertEquals(existingKeys, kms.storedKeys.keys.toSet())
+        }
+
+    /**
+     * A tenant whose configured provider no longer holds its identifier keys (the provider binding
+     * moved to a keystore without the alias) still resolves the keys through the provider they are
+     * recorded under. Nothing is created in the new provider, so existing blind indexes and
+     * ciphertext keep working.
+     */
+    @Test
+    fun changedTenantProviderStillResolvesTheRecordedKey() =
+        runTest {
+            val kms = InMemoryAesGcmKms()
+            provision(kms, providerId = "software")
+            val stored =
+                newProtector(kms, providerId = "software")
+                    .protect(tenant, "identity-1", emailType, "Owner@Example.com", emailPolicy)
+                    .getOrNull() ?: error("initial protection failed")
+            val generatedBefore = kms.generateCount
+
+            val listKeys = MapBackedListKeysCommand(kms)
+            val macCommand = MapBackedGenerateMacCommand(kms)
+            // The configured provider is now "tenant-hsm", whose keystore does not hold the aliases.
+            val moved = newProtector(kms, providerId = "tenant-hsm", macCommand = macCommand, listKeysCommand = listKeys)
+
+            val loginIndex =
+                moved.blindIndex(tenant, emailType, "owner@example.com", emailPolicy)
+                    .getOrNull() ?: error("login lookup after a provider change must still succeed")
+            val revealed =
+                moved.reveal(stored, tenant, "identity-1", emailType)
+                    .getOrNull() ?: error("reveal after a provider change must still succeed")
+            val provisioning = provisionerOf(moved).provisionKeys(tenant)
+
+            assertEquals(stored.valueHmac, loginIndex, "the stored blind index must keep matching")
+            assertEquals("owner@example.com", revealed)
+            assertTrue(provisioning.isOk, "provisioning must accept the key recorded under another provider")
+            assertEquals(generatedBefore, kms.generateCount, "a provider change must never create a new identifier key")
+            assertEquals("software", macCommand.lastProviderId, "the MAC must use the key's recorded provider")
+            assertEquals("software", kms.lastDecryptProviderId, "decryption must use the key's recorded provider")
+            assertTrue("tenant-hsm" in listKeys.requestedProviders, "the configured provider is asked first")
+            assertTrue(null in listKeys.requestedProviders, "the key reference index is searched across providers")
         }
 }
 
@@ -864,38 +1030,6 @@ private class MapBackedGenerateKeyCommand(
         )
 }
 
-/**
- * The first generation suspends until the independent encryption-key generation arrives. A
- * sequential protector would time out, while per-alias provisioning allows both to proceed.
- */
-private class ParallelGateGenerateKeyCommand(
-    private val kms: InMemoryAesGcmKms,
-) : GenerateKeyCommand {
-    private val bothStarted = CompletableDeferred<Unit>()
-    var calls: Int = 0
-        private set
-
-    override val isEnabled: Boolean = true
-    override val inputTypeToken = typeToken<GenerateKeyArgs>()
-    override val outputTypeToken = typeToken<GenerateKeyResult>()
-
-    override suspend fun supports(args: Any): Boolean = args is GenerateKeyArgs
-
-    override suspend fun execute(args: GenerateKeyArgs): IdkResult<GenerateKeyResult, IdkError> {
-        calls += 1
-        if (calls == 2) bothStarted.complete(Unit)
-        bothStarted.await()
-        return kms.generateKeyResult(
-            providerId = args.providerId,
-            alias = args.alias,
-            use = args.use,
-            keyOperations = args.keyOperations,
-            alg = args.alg,
-            keyVisibility = args.keyVisibility,
-        )
-    }
-}
-
 private class FixedReceiptGenerateKeyCommand(
     private val reference: ManagedKeyReference,
 ) : GenerateKeyCommand {
@@ -915,6 +1049,7 @@ private class MapBackedListKeysCommand(
     var calls: Int = 0
         private set
     val requestedAliases = mutableListOf<String?>()
+    val requestedProviders = mutableListOf<String?>()
     override val isEnabled: Boolean = true
     override val inputTypeToken = typeToken<ListKeysArgs>()
     override val outputTypeToken = typeToken<ListKeysResult>()
@@ -924,9 +1059,8 @@ private class MapBackedListKeysCommand(
     override suspend fun execute(args: ListKeysArgs): IdkResult<ListKeysResult, IdkError> {
         calls += 1
         requestedAliases += args.alias
-        return kms.listKeysResult(args.providerId).map { result ->
-            ListKeysResult(result.keys.filter { args.alias == null || it.alias == args.alias }.toTypedArray())
-        }
+        requestedProviders += args.providerId
+        return kms.listKeysResult(args.providerId).map { result -> result.matching(args) }
     }
 }
 
@@ -957,9 +1091,7 @@ private class SnapshotYieldingListKeysCommand(
     override suspend fun supports(args: Any): Boolean = args is ListKeysArgs
 
     override suspend fun execute(args: ListKeysArgs): IdkResult<ListKeysResult, IdkError> {
-        val snapshot = kms.listKeysResult(args.providerId).map { result ->
-            ListKeysResult(result.keys.filter { args.alias == null || it.alias == args.alias }.toTypedArray())
-        }
+        val snapshot = kms.listKeysResult(args.providerId).map { result -> result.matching(args) }
         yield()
         return snapshot
     }
@@ -1002,3 +1134,15 @@ private class MapBackedDecryptCommand(
             additionalAuthenticatedData = args.additionalAuthenticatedData,
         )
 }
+
+/**
+ * Mirrors the managed key store: an exact provider id selects only that provider's keys, while a
+ * null provider id searches the key reference index across every provider.
+ */
+private fun ListKeysResult.matching(args: ListKeysArgs): ListKeysResult =
+    ListKeysResult(
+        keys
+            .filter { args.alias == null || it.alias == args.alias }
+            .filter { args.providerId == null || it.providerId == args.providerId }
+            .toTypedArray(),
+    )

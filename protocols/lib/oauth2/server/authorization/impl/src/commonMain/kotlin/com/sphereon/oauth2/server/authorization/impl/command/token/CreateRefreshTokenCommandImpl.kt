@@ -27,8 +27,14 @@ import com.sphereon.core.api.service.StringResult
 import com.sphereon.core.api.service.TypedServiceCommandAdapter
 import com.sphereon.di.session.SessionScope
 import com.sphereon.oauth2.common.config.OAuth2ServersConfigProvider
+import com.sphereon.oauth2.common.config.isRequired
+import com.sphereon.oauth2.common.model.GrantType
+import com.sphereon.oauth2.common.model.ClientAuthenticationConfig
 import com.sphereon.oauth2.server.authorization.command.CreateRefreshTokenArgs
 import com.sphereon.oauth2.server.authorization.command.CreateRefreshTokenCommand
+import com.sphereon.oauth2.server.authorization.command.VerifiedAuthorizationCodeGrant
+import com.sphereon.oauth2.server.authorization.command.VerifiedClientAuthorization
+import com.sphereon.oauth2.server.authorization.command.token.GrantContext
 import com.sphereon.oauth2.server.authorization.error.AuthorizationServerError
 import com.sphereon.oauth2.server.authorization.model.RefreshTokenData
 import com.sphereon.oauth2.server.authorization.storage.TokenStorage
@@ -93,6 +99,37 @@ class CreateRefreshTokenCommandImpl(
             .mapError { IdkError.fromDTO(it) }
     }
 
+    /**
+     * Built-in grant issuance after client authentication and one-time code verification.
+     * This seam is implementation-only; public command execution retains its policy lifecycle.
+     * All persisted grant fields are derived from the verified code, never arbitrary mint args.
+     */
+    internal suspend fun createAfterVerifiedAuthorizationCode(
+        verified: VerifiedAuthorizationCodeGrant,
+        context: GrantContext,
+        client: VerifiedClientAuthorization?,
+    ): IdkResult<StringResult, IdkError> {
+        if ((client != null && client.clientId != verified.clientId) || context.resolvedClientId != verified.clientId ||
+            context.tokenRequest.clientId != verified.clientId || context.tenantId != execution.tenantId ||
+            (client?.tenantId != null && client.tenantId != context.tenantId) ||
+            context.tokenRequest.grantType != GrantType.AUTHORIZATION_CODE ||
+            (client != null && GrantType.AUTHORIZATION_CODE !in client.grantTypes) ||
+            verified.codeData.clientId != verified.clientId ||
+            (client == null && (context.tokenRequest.clientAuthentication !is ClientAuthenticationConfig.None ||
+                verified.codeData.codeChallenge.isNullOrBlank()))) {
+            logTokenRefusal(execution.log, "Refresh token issuance refused stage=verified-grant-client-binding")
+            return Err(IdkError.fromDTO(AuthorizationServerError.InvalidGrant(details = "Verified grant client or tenant binding does not match")))
+        }
+        if ((context.proofJkt == null && (verified.dpopJkt != null || context.serverConfig.dpop.isRequired)) ||
+            (verified.dpopJkt != null && context.proofJkt != verified.dpopJkt)) {
+            logTokenRefusal(execution.log, "Refresh token issuance refused stage=verified-grant-proof-binding")
+            return Err(IdkError.fromDTO(AuthorizationServerError.InvalidGrant(details = "Verified grant proof binding does not match")))
+        }
+        return executeInternal(refreshTokenArgsForVerifiedCode(verified, context))
+            .map { StringResult(it) }
+            .mapError { IdkError.fromDTO(it) }
+    }
+
     private suspend fun executeInternal(args: CreateRefreshTokenArgs): IdkResult<String, AuthorizationServerError> {
         val now = Clock.System.now()
         val effectiveExpiresIn = args.expiresInSeconds ?: configProvider.serverConfig.refreshTokenLifetimeSeconds
@@ -131,9 +168,11 @@ class CreateRefreshTokenCommandImpl(
 
         // Store token
         tokenStorage.storeRefreshToken(refreshToken, tokenData).getOrElse { error ->
+            val code = error.code.takeIf { it.matches(Regex("[A-Za-z0-9_.:-]{1,160}")) } ?: "unavailable"
+            logTokenRefusal(execution.log, "Refresh token issuance failed stage=storage code=$code")
             return Err(
                 AuthorizationServerError.ServerError(
-                    details = "Failed to store refresh token: $error",
+                    details = "Failed to store refresh token",
                     exception = null,
                 ),
             )

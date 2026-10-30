@@ -379,10 +379,31 @@ data class StatusListReference(
  * Result of type metadata resolution
  */
 sealed interface TypeMetadataResolutionResult {
-    /** Successfully resolved metadata */
-    data class Success(
+    /**
+     * Successfully resolved metadata.
+     *
+     * @property rawDocument The exact octets the metadata was parsed from, which is the input an
+     * `#integrity` expression covers. Null when the resolver has no original representation, in which
+     * case an integrity pin cannot be verified.
+     */
+    class Success(
         val metadata: SdJwtVcTypeMetadata,
-    ) : TypeMetadataResolutionResult
+        rawDocument: ByteArray? = null,
+    ) : TypeMetadataResolutionResult {
+        private val raw: ByteArray? = rawDocument?.copyOf()
+
+        /** A copy of the retrieved octets, so callers cannot alter retained evidence. */
+        val rawDocument: ByteArray? get() = raw?.copyOf()
+
+        fun copy(metadata: SdJwtVcTypeMetadata = this.metadata): Success = Success(metadata, raw)
+
+        override fun equals(other: Any?): Boolean =
+            other is Success && metadata == other.metadata && raw.contentEquals(other.raw)
+
+        override fun hashCode(): Int = 31 * metadata.hashCode() + (raw?.contentHashCode() ?: 0)
+
+        override fun toString(): String = "Success(metadata=$metadata, rawDocument=${raw?.size ?: 0} bytes)"
+    }
 
     /** Failed to resolve metadata */
     data class Failure(

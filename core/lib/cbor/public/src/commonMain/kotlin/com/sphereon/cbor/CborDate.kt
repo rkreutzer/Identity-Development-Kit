@@ -22,11 +22,13 @@ import com.sphereon.core.compat.DateTimeUtilsDefault
 import com.sphereon.core.compat.JsExportCompat
 import com.sphereon.core.compat.LocalDateTimeKMP
 import com.sphereon.core.compat.toKotlin
+import com.sphereon.core.compat.toKMP
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.atTime
 import kotlinx.datetime.toInstant
+import kotlinx.datetime.toLocalDateTime
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
@@ -39,7 +41,7 @@ import kotlin.time.Instant
 @JsExportCompat
 class CborTDate(
     value: cddl_tdate,
-) : CborTagged<cddl_tdate>(CDDL.tdate.info!!, CborString(LocalDateTimeKMP.fromString(value).toMdocTdateString())) {
+) : CborTagged<cddl_tdate>(CDDL.tdate.info!!, CborString(value.toMdocTdateString())) {
     override fun toJsonSimple(): JsonElement = JsonPrimitive(toValue())
 }
 
@@ -57,10 +59,10 @@ value class TDate(
 ) {
     init {
         // for validation purposes only
-        LocalDateTimeKMP.fromString(value)
+        value.toCompatDateTimeKMP()
     }
 
-    override fun toString(): String = LocalDateTimeKMP.fromString(value).toMdocTdateString()
+    override fun toString(): String = value.toMdocTdateString()
 
     fun toCborItem(): CborTDate = CborTDate(toString())
 
@@ -94,15 +96,35 @@ fun CborFullDate.cborFullDateToLocalDateTime(
     timeZoneId: String? = null,
 ) = this.value.toLocalDateTime(utils, timeZoneId)
 
+private fun String.toKotlinDateTime(
+    utils: DateTimeUtils,
+    timeZoneId: String?,
+): LocalDateTime {
+    val instant = runCatching { Instant.parse(this) }.getOrNull()
+    return instant?.toLocalDateTime(utils.timeZone(timeZoneId))
+        ?: this.toCompatDateTimeKMP().toKotlin()
+}
+
+private fun String.toCompatDateTimeKMP(): LocalDateTimeKMP {
+    val instant = runCatching { Instant.parse(this) }.getOrNull()
+    return instant?.toLocalDateTime(DateTimeUtils.DEFAULTS.timeZone(null))?.toKMP() ?: LocalDateTimeKMP.fromString(this)
+}
+
+private fun String.toMdocTdateString(): String {
+    val instant = runCatching { Instant.parse(this) }.getOrNull()
+    return instant?.toString()?.substringBefore('.')?.removeSuffix("Z")?.plus("Z")
+        ?: this.toCompatDateTimeKMP().toMdocTdateString()
+}
+
 fun cddl_full_date.toLocalDateTime(
     utils: DateTimeUtils = DateTimeUtils.DEFAULTS,
     timeZoneId: String? = null,
-) = utils.dateTime(timeZoneId, LocalDateTimeKMP.fromString(this).toEpochSeconds(timeZoneId).toInt()).toKotlin()
+) = runCatching { LocalDate.parse(this).atTime(0, 0) }.getOrNull() ?: this.toKotlinDateTime(utils, timeZoneId)
 
 fun TDate.tDateToLocalDateTime(
     utils: DateTimeUtils = DateTimeUtils.DEFAULTS,
     timeZoneId: String? = null,
-) = utils.dateTime(timeZoneId, LocalDateTimeKMP.fromString(this.toString()).toEpochSeconds(timeZoneId).toInt()).toKotlin()
+) = this.toString().toKotlinDateTime(utils, timeZoneId)
 
 @JsExportCompat
 fun cddl_full_date.toCborFullDate(

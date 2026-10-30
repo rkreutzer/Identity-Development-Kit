@@ -15,6 +15,7 @@ import com.sphereon.wallet.interaction.WalletFailureDisposition
 import com.sphereon.wallet.interaction.WalletInteractionAction
 import com.sphereon.wallet.interaction.WalletInteractionActionType
 import com.sphereon.wallet.interaction.WalletInteractionActivityProjection
+import com.sphereon.wallet.interaction.WalletInteractionTaskProjection
 import com.sphereon.wallet.interaction.WalletInteractionClient
 import com.sphereon.wallet.interaction.WalletInteractionContext
 import com.sphereon.wallet.interaction.WalletInteractionDiagnostics
@@ -78,6 +79,12 @@ class DefaultWalletInteractionEngine(
         limit: Int = 100,
     ): List<WalletInteractionActivityProjection> =
         sessionStore.listActivity(walletUnitId, afterSequence, limit)
+
+    suspend fun listTasks(
+        walletUnitId: String,
+        limit: Int = 100,
+    ): List<WalletInteractionTaskProjection> =
+        sessionStore.listTasks(walletUnitId, limit)
 
     override suspend fun start(input: WalletInteractionInput): WalletInteractionSession {
         // Admission is before private input, session state, protocol matching or network work.

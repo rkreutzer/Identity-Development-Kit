@@ -16,6 +16,8 @@ import com.sphereon.wallet.interaction.WalletInteractionSessionId
 import com.sphereon.wallet.interaction.WalletInteractionState
 import com.sphereon.wallet.interaction.WalletInteractionStateEvent
 import com.sphereon.wallet.interaction.WalletInteractionActivityProjection
+import com.sphereon.wallet.interaction.WalletInteractionTaskProjection
+import com.sphereon.wallet.interaction.taskProjection
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
@@ -26,6 +28,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlin.time.Clock
 import kotlin.time.Duration
 
 /**
@@ -40,6 +43,7 @@ class KvWalletInteractionSessionStore(
     private val ttl: Duration = Duration.INFINITE,
     private val liveEventBus: WalletInteractionLiveEventBus = ProcessLocalWalletInteractionLiveEventBus(),
     json: Json = walletInteractionStoreJson,
+    private val clock: Clock = Clock.System,
 ) : WalletInteractionSessionStore {
     private val sessionNamespace =
         KvNamespace(
@@ -56,6 +60,11 @@ class KvWalletInteractionSessionStore(
             name = ACTIVITY_NAMESPACE,
             codec = KotlinxSerializationJsonKvCodec(json, WalletInteractionActivityProjection.serializer()),
         )
+    private val taskNamespace =
+        KvNamespace(
+            name = TASK_NAMESPACE,
+            codec = KotlinxSerializationJsonKvCodec(json, WalletInteractionTaskProjection.serializer()),
+        )
     private val activitySequenceNamespace =
         KvNamespace(
             name = ACTIVITY_SEQUENCE_NAMESPACE,
@@ -71,6 +80,7 @@ class KvWalletInteractionSessionStore(
             kv.put(eventNamespace, session.sessionId.value, history.copy(events = history.events + event), ttl).getOrThrow()
             liveEventBus.publish(event)
         }
+        recordTask(session.state)
         if (session.state.terminal) {
             val existing = kv.get(activityNamespace, session.sessionId.value).getOrThrow()
             if (existing?.status != session.state.status) {
@@ -123,6 +133,37 @@ class KvWalletInteractionSessionStore(
     override suspend fun remove(sessionId: WalletInteractionSessionId) {
         kv.delete(sessionNamespace, sessionId.value).getOrThrow()
         kv.delete(eventNamespace, sessionId.value).getOrThrow()
+        kv.delete(taskNamespace, sessionId.value).getOrThrow()
+    }
+
+    override suspend fun listTasks(
+        walletUnitId: String,
+        limit: Int,
+    ): List<WalletInteractionTaskProjection> {
+        val listing = kv as? KvStoreListing ?: error("wallet_interaction_task_listing_unavailable")
+        val tasks = mutableListOf<WalletInteractionTaskProjection>()
+        for (key in listing.listKeys(taskNamespace).getOrThrow()) {
+            kv.get(taskNamespace, key).getOrThrow()?.takeIf { it.walletUnitId == walletUnitId }?.let(tasks::add)
+        }
+        return tasks
+            .sortedWith(compareByDescending<WalletInteractionTaskProjection> { it.updatedAtEpochSeconds }.thenBy { it.sessionId })
+            .take(limit)
+    }
+
+    /**
+     * Keeps the task index in step with the session: a non-terminal state is an open task, a
+     * terminal one closes it. The index carries the times the state does not: when the task opened
+     * and when it last changed.
+     */
+    private suspend fun recordTask(state: WalletInteractionState) {
+        val now = clock.now().epochSeconds
+        val existing = kv.get(taskNamespace, state.sessionId.value).getOrThrow()
+        val task = state.taskProjection(openedAtEpochSeconds = existing?.openedAtEpochSeconds ?: now, nowEpochSeconds = now)
+        when {
+            task == null -> if (existing != null) kv.delete(taskNamespace, state.sessionId.value).getOrThrow()
+            existing == null || existing.revision != task.revision || existing.status != task.status ->
+                kv.put(taskNamespace, state.sessionId.value, task, ttl).getOrThrow()
+        }
     }
 
     override suspend fun listActivity(
@@ -180,6 +221,7 @@ class KvWalletInteractionSessionStore(
         const val EVENT_NAMESPACE = "wallet-interaction-events"
         const val ACTIVITY_NAMESPACE = "wallet-interaction-activity"
         const val ACTIVITY_SEQUENCE_NAMESPACE = "wallet-interaction-activity-sequence"
+        const val TASK_NAMESPACE = "wallet-interaction-tasks"
         const val MAX_ACTIVITY_SEQUENCE_ATTEMPTS = 32
     }
 }

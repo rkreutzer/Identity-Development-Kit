@@ -61,6 +61,9 @@ kotlin {
                 // Serialization
                 api(sphereonlib.org.jetbrains.kotlinx.serialization.json)
 
+                // Input validation
+                api(sphereonlib.io.konform.konform)
+
                 api(libs.bundles.app.platform.di)
                 api(sphereonlib.software.amazon.app.platform.metro.public)
             }

@@ -49,6 +49,49 @@ class VerifyPushedAuthorizationRequestRedirectUriTest {
     fun policyRejectsBlankRedirectUri() =
         verifyRequiredRedirectUriRejected("")
 
+    /**
+     * A pushed request carries the client's default access-token audience to code issuance, as the front-channel
+     * verification does. Without it a client that names no resource (an OpenID Federation client registered
+     * automatically, for example) gets no RFC 9068 audience and the token request fails with invalid_target.
+     */
+    @Test
+    fun pushedRequestKeepsTheClientDefaultAccessTokenAudience() =
+        runTest {
+            val client =
+                ClientRegistration(
+                    clientId = CLIENT_ID,
+                    grantTypes = listOf(GrantType.AUTHORIZATION_CODE),
+                    responseTypes = listOf(ResponseType.CODE),
+                    redirectUris = listOf(REGISTERED_REDIRECT_URI),
+                    requirePkce = false,
+                    defaultAccessTokenAudience = DEFAULT_AUDIENCE,
+                )
+            val command =
+                VerifyPushedAuthorizationRequestCommandImpl(
+                    execution = ctx.execution,
+                    clientRegistry = StubClientRegistry(mapOf(CLIENT_ID to client)),
+                    configProvider = StubOAuth2ServersConfigProvider(),
+                    credentialIssuerAudienceResolver = com.sphereon.oauth2.server.authorization.impl.provider.NoCredentialIssuerAudienceResolver(),
+                    unregisteredClientAdmissionRule = com.sphereon.oauth2.server.authorization.impl.command.authorization.Oid4vciUnregisteredWalletAdmissionRule(),
+                )
+
+            val result =
+                command.execute(
+                    VerifyPushedAuthorizationRequestArgs(
+                        request =
+                            AuthorizationRequestData(
+                                clientId = CLIENT_ID,
+                                redirectUri = REGISTERED_REDIRECT_URI,
+                                responseType = listOf(ResponseType.CODE),
+                            ),
+                        clientId = CLIENT_ID,
+                    ),
+                )
+
+            assertTrue(result.isOk, "expected success but got ${if (result.isErr) result.error else "ok"}")
+            assertEquals(DEFAULT_AUDIENCE, result.value.defaultAccessTokenAudience)
+        }
+
     private fun verifySoleRegisteredUriFallback(redirectUri: String?) =
         runTest {
             val client =
@@ -129,5 +172,6 @@ class VerifyPushedAuthorizationRequestRedirectUriTest {
     private companion object {
         const val CLIENT_ID = "oidf-client"
         const val REGISTERED_REDIRECT_URI = "https://suite.example.test/callback"
+        const val DEFAULT_AUDIENCE = "https://as.example.test/issuer"
     }
 }

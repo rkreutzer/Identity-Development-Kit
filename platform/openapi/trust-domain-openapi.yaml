@@ -405,7 +405,7 @@ paths:
                   url: "https://issuer.example.com/mdoc/vical"
                   signerAnchorIds: ["anchor-vical-signer"]
                   issuerAnchorIds: ["anchor-iaca-example"]
-                  requiredCertificateProfiles: ["mdoc-dsc"]
+                  requiredCertificateProfiles: []
                   enabled: true
       responses:
         '200':
@@ -421,7 +421,7 @@ paths:
                   url: "https://issuer.example.com/mdoc/vical"
                   signerAnchorIds: ["anchor-vical-signer"]
                   issuerAnchorIds: ["anchor-iaca-example"]
-                  requiredCertificateProfiles: ["mdoc-dsc"]
+                  requiredCertificateProfiles: []
                   enabled: true
         '400':
           $ref: './trust-domain-components.yml#/components/responses/BadRequest'

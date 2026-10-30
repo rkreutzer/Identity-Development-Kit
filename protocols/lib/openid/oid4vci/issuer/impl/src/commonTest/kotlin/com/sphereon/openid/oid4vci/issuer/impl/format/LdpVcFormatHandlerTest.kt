@@ -239,6 +239,28 @@ class LdpVcFormatHandlerTest {
     }
 
     @Test
+    fun federationEntityIssuerSignsOpenIdFederationTermsOfUseForBothVcdmVersions() = runTest {
+        for (baseContext in listOf(VcdmProfiles.V1_1_CONTEXT, VcdmProfiles.V2_0_CONTEXT)) {
+            val command = RecordingAddProofCommand()
+            val result =
+                LdpVcFormatHandler(command).issueCredential(
+                    CredentialRequest(format = CredentialFormat.LDP_VC.value),
+                    context(baseContext).copy(federationEntityIdentifier = "https://issuer.example/oid4vci"),
+                )
+
+            assertTrue(result.isOk, "VCDM $baseContext issuance must succeed: ${if (result.isErr) result.error else ""}")
+            val expected =
+                buildJsonObject {
+                    put("type", "OpenIDFederation")
+                    put("policyId", "https://issuer.example/oid4vci")
+                }
+            // Part of the document handed to AddProof, so the proof covers it.
+            assertEquals(expected, command.lastInput!!.unsecuredDocument["termsOfUse"])
+            assertEquals("did:example:issuer", result.value.credential.jsonObject["issuer"]!!.jsonPrimitive.content)
+        }
+    }
+
+    @Test
     fun rejectsProtectedVcdmPropertyBeforeStatusReservationOrProof() = runTest {
         val command = RecordingAddProofCommand()
         val status = RecordingStatusEnricher()

@@ -23,9 +23,19 @@ data class CredentialRequestProofPreparationRequest(
     val keyInclusionMode: String = "KID",
     val keyAttestationJwt: String? = null,
     val iatEpochSeconds: Long,
+    /**
+     * The holder's DID verification method the credential is to be bound to (OID4VCI 1.0
+     * Appendix F.1: "the kid refers to a DID URL which identifies a particular key"). Only a
+     * did:jwk `#0` URL that encodes the signing key is accepted, so it requires DID mode and
+     * exactly one signing key.
+     */
+    val holderDidVerificationMethod: String? = null,
 ) {
     init {
         require(walletUnitId.isNotBlank()) { "walletUnitId must not be blank" }
+        require(holderDidVerificationMethod == null || (keyInclusionMode == "DID" && signingKeyIds.size == 1)) {
+            "holderDidVerificationMethod requires DID key inclusion and exactly one signing key"
+        }
         require(operationBinding.isNotBlank()) { "operationBinding must not be blank" }
         require(issuerUrl.isNotBlank()) { "issuerUrl must not be blank" }
         require(signingKeyIds.isNotEmpty() && signingKeyIds.all { it.isNotBlank() }) { "signingKeyIds must be non-empty and non-blank" }
@@ -59,6 +69,8 @@ data class PreparedCredentialRequestProof(
     val keyAttestationJwt: String? = null,
     /** Digest over the complete snapshot, used to detect accidental field-level mutation. */
     val integrityBinding: String,
+    /** The DID URL put in the proof `kid` in DID mode, when it is not the WSCA key id itself. */
+    val holderDidVerificationMethod: String? = null,
 ) {
     init {
         require(walletUnitId.isNotBlank() && operationBinding.isNotBlank()) { "wallet proof identity and binding must not be blank" }

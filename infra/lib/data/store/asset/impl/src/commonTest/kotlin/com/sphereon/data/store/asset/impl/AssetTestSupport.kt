@@ -18,6 +18,11 @@ package com.sphereon.data.store.asset.impl
 
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
+import com.sphereon.core.api.conf.AppConfigService
+import com.sphereon.core.api.conf.ConfigLevel
+import com.sphereon.core.api.conf.ConfigService
+import com.sphereon.core.api.conf.PrincipalConfigService
+import com.sphereon.core.api.conf.TenantConfigService
 import com.sphereon.core.api.context.ContextConfig
 import com.sphereon.core.api.context.IdkScope
 import com.sphereon.core.api.context.SessionExecution
@@ -113,8 +118,16 @@ class TestSessionExecution(
     override val sessionContextManager: SessionContextManager
         get() = throw NotImplementedError("Not needed for unit tests")
     override val log: SessionLogService = NoOpSessionLogService(sessionContext)
-    override val conf: ContextConfig
-        get() = throw NotImplementedError("Not needed for unit tests")
+    override val conf: ContextConfig = object : ContextConfig {
+        override val app: AppConfigService
+            get() = error("Unexpected application configuration read")
+        override val tenant: TenantConfigService
+            get() = error("Unexpected tenant configuration read")
+        override val principal: PrincipalConfigService
+            get() = error("Unexpected principal configuration read")
+
+        override fun conf(level: ConfigLevel): ConfigService = error("Unexpected configuration read at $level")
+    }
 }
 
 /**

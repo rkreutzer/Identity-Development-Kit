@@ -26,14 +26,10 @@ import dev.zacsweers.metro.binding
 import kotlin.random.Random
 
 /**
- * Default in-memory implementation. Generates a fresh 32-byte secret at construction time
- * via Kotlin's [Random.nextBytes]. Acceptable for single-instance dev / staging; production
- * multi-instance deployments override the binding via the EDK to load the secret from
- * [com.sphereon.core.api.conf.SecretProvider].
- *
- * The key is held only in process memory and rotated on AS restart, which is intentional.
- * The CSRF token is short-lived (one login round-trip) so a key rotation only invalidates
- * in-flight login forms, which the user's browser naturally retries.
+ * Process-local fixture implementation using [Random.nextBytes]. It provides neither
+ * cryptographic entropy nor persistence across instances or restarts. Production assemblies
+ * must replace the tokenizer with a durable implementation using the platform CSPRNG;
+ * this provider must not establish production or conformance acceptance.
  */
 @Inject
 @SingleIn(AppScope::class)
@@ -41,12 +37,8 @@ import kotlin.random.Random
 class InMemoryLoginCsrfKeyProvider(
     secureRandom: com.sphereon.core.api.random.SecureRandom,
 ) : LoginCsrfKeyProvider {
-    // Kotlin Random because we are inside an AppScope-singleton constructor and the SecureRandom
-    // SPI is a suspend service; the ServiceFacade pattern requires either runBlocking (jvmMain
-    // only) or a synchronous shim. Random.Default on JVM uses ThreadLocalRandom (not
-    // cryptographically strong), so we initialise from a small CSPRNG seed via secureRandom's
-    // suspend-free `kotlin.random.Random.nextBytes` and rely on construction-time entropy from
-    // the Random pool. Good enough for an in-memory default; real deployments override this.
+    // Random.nextBytes does not invoke the injected CSPRNG. Production tokenizers must
+    // obtain entropy through SecureRandom and persist their verification authority.
     @Suppress("unused") // injected so Metro's graph proves the SecureRandom dependency exists.
     private val secureRandomHoldRef = secureRandom
 

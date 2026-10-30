@@ -56,8 +56,8 @@ interface ClientRegistrationStore {
     /**
      * Inserts a new registration or replaces the existing one for the same
      * `(tenantId, authorizationServerId, clientId)`. Implementations MUST reject saving over a
-     * REVOKED row unless the saved record itself carries [ClientRegistrationStatus.ACTIVE]
-     * (revocation is one-way through [revoke]).
+     * REVOKED row when the saved record carries [ClientRegistrationStatus.ACTIVE]
+     * (revocation is one-way through [revoke], including when save races with revoke).
      */
     suspend fun save(
         tenantId: String,

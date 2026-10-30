@@ -11,6 +11,8 @@ import com.sphereon.crypto.core.generic.DigestAlg
 import com.sphereon.crypto.core.generic.SignatureAlgorithm
 import com.sphereon.crypto.core.generic.hash
 import com.sphereon.crypto.core.jose.JwaAlgorithm
+import com.sphereon.crypto.core.jose.Jwk
+import com.sphereon.crypto.core.jose.tryGenerateJwkThumbprint
 import com.sphereon.crypto.jose.jws.JwsIdentifierMode
 import com.sphereon.openid.oid4vci.common.model.CredentialRequestProofs
 import com.sphereon.openid.oid4vci.holder.CredentialRequestProofPreparation
@@ -151,6 +153,7 @@ class CredentialRequestProofPreparationImpl(
                 iatEpochSeconds = request.iatEpochSeconds,
                 keyAttestationJwt = keyAttestationJwt,
                 integrityBinding = "pending",
+                holderDidVerificationMethod = request.holderDidVerificationMethod,
             )
         return Ok(snapshot.copy(integrityBinding = fingerprint(snapshot)))
     }
@@ -210,7 +213,11 @@ class CredentialRequestProofPreparationImpl(
             }
         when (mode) {
             JwsIdentifierMode.KID, JwsIdentifierMode.DID -> {
-                if (!exactStringMember(header, "kid", snapshot.keyRef.keyId) || (mode == JwsIdentifierMode.DID && !snapshot.keyRef.keyId.startsWith("did:"))) {
+                val expectedKid = snapshot.holderDidVerificationMethod ?: snapshot.keyRef.keyId
+                if (!exactStringMember(header, "kid", expectedKid) || (mode == JwsIdentifierMode.DID && !expectedKid.startsWith("did:")) ||
+                    (snapshot.holderDidVerificationMethod != null &&
+                        (mode != JwsIdentifierMode.DID || !didJwkVerificationMethodNamesKey(expectedKid, snapshot.keyRef.publicKeyJwk)))
+                ) {
                     return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Credential proof JOSE kid does not match the selected key mode"))
                 }
             }
@@ -280,8 +287,16 @@ class CredentialRequestProofPreparationImpl(
                     }
                     JwsIdentifierMode.KID -> put("kid", JsonPrimitive(keyRef.keyId))
                     JwsIdentifierMode.DID -> {
-                        if (!keyRef.keyId.startsWith("did:")) return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "DID proof mode requires the holder key id to be a DID URL"))
-                        put("kid", JsonPrimitive(keyRef.keyId))
+                        val holderDidUrl = request.holderDidVerificationMethod
+                        if (holderDidUrl != null) {
+                            if (!didJwkVerificationMethodNamesKey(holderDidUrl, keyRef.publicKeyJwk)) {
+                                return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Holder DID verification method is not the did:jwk #0 of the signing key"))
+                            }
+                            put("kid", JsonPrimitive(holderDidUrl))
+                        } else {
+                            if (!keyRef.keyId.startsWith("did:")) return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "DID proof mode requires the holder key id to be a DID URL"))
+                            put("kid", JsonPrimitive(keyRef.keyId))
+                        }
                     }
                     JwsIdentifierMode.X5C -> return Err(IdkError.INVALID_STATE(message = "X5C proof mode requires a certificate chain surfaced by the selected secure component"))
                 }
@@ -322,8 +337,33 @@ class CredentialRequestProofPreparationImpl(
 
     private data class JoseSegments(val protectedHeader: String, val payload: String)
 
+    /**
+     * did:jwk: the method-specific id is the base64url UTF-8 JSON of a public JWK and the only
+     * verification method is `#0`; a JWK with private material must be rejected. The URL names
+     * the signing key when both JWKs have the same RFC 7638 thumbprint: the thumbprint covers
+     * exactly the key's required members, while did:jwk encoders may drop or keep optional members
+     * such as `kid`, `alg` or `use`.
+     */
+    private fun didJwkVerificationMethodNamesKey(didUrl: String, publicJwk: String?): Boolean {
+        if (publicJwk == null || !didUrl.startsWith(DID_JWK_PREFIX) || didUrl.substringAfter('#', "") != "0") return false
+        val encoded = didUrl.removePrefix(DID_JWK_PREFIX).substringBefore('#')
+        return try {
+            val didJwk = json.parseToJsonElement(encoded.decodeFromBase64Url().decodeToString()).jsonObject
+            if (PRIVATE_JWK_MEMBERS.any(didJwk::containsKey)) return false
+            val didThumbprint = tryGenerateJwkThumbprint(Jwk.tryFromJsonObject(didJwk).getOrElse { return false }).getOrElse { return false }
+            val keyThumbprint =
+                tryGenerateJwkThumbprint(Jwk.tryFromJsonObject(json.parseToJsonElement(publicJwk).jsonObject).getOrElse { return false })
+                    .getOrElse { return false }
+            didThumbprint == keyThumbprint
+        } catch (expected: Exception) {
+            false
+        }
+    }
+
     private companion object {
         const val PROOF_JWT_TYP = "openid4vci-proof+jwt"
+        const val DID_JWK_PREFIX = "did:jwk:"
+        val PRIVATE_JWK_MEMBERS = setOf("d", "p", "q", "dp", "dq", "qi", "k", "oth")
         val json = Json { encodeDefaults = false; explicitNulls = false }
     }
 }

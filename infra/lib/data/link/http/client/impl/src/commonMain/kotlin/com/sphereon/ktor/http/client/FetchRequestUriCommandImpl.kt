@@ -29,18 +29,19 @@ import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import dev.zacsweers.metro.binding
+import io.ktor.client.request.accept
+import io.ktor.client.request.forms.FormDataContent
 import io.ktor.client.request.get
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
+import io.ktor.http.Parameters
 import io.ktor.http.Url
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 
 /**
  * Implementation of FetchRequestUriCommand using HttpClientFactory.
@@ -111,22 +112,20 @@ class FetchRequestUriCommandImpl(
                     }
 
                     RequestUriMethod.POST -> {
-                        // Per OpenID4VP 1.0 Section 5.2, POST can include wallet_metadata and wallet_nonce
+                        // OpenID4VP 1.0 Section 5.10 requires form encoding even without optional fields.
                         httpClient.post(processedArgs.requestUri) {
-                            // Build POST body if wallet_metadata or wallet_nonce is provided
-                            if (processedArgs.walletMetadataJson != null || processedArgs.walletNonce != null) {
-                                contentType(ContentType.Application.Json)
-                                val postBody =
-                                    buildJsonObject {
+                            accept(ContentType.parse("application/oauth-authz-req+jwt"))
+                            setBody(
+                                FormDataContent(
+                                    Parameters.build {
                                         processedArgs.walletMetadataJson?.let {
-                                            put("wallet_metadata", Json.parseToJsonElement(it))
+                                            Json.parseToJsonElement(it)
+                                            append("wallet_metadata", it)
                                         }
-                                        processedArgs.walletNonce?.let {
-                                            put("wallet_nonce", it)
-                                        }
-                                    }
-                                setBody(postBody.toString())
-                            }
+                                        processedArgs.walletNonce?.let { append("wallet_nonce", it) }
+                                    },
+                                ),
+                            )
                         }
                     }
                 }

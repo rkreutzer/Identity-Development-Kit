@@ -39,6 +39,7 @@ import com.sphereon.openid.oid4vci.issuer.lifecycle.Oid4vciCompletenessLifecycle
 import com.sphereon.openid.oid4vci.issuer.lifecycle.Oid4vciIssuanceLifecycleHook
 import com.sphereon.openid.oid4vci.issuer.lifecycle.Oid4vciIssuancePhase
 import com.sphereon.openid.oid4vci.issuer.lifecycle.Oid4vciPhaseLifecycleArgs
+import com.sphereon.openid.oid4vci.issuer.spi.IssuerFederationEntityResolver
 import com.sphereon.openid.oid4vci.issuer.store.CredentialIssuanceSessionStore
 import com.sphereon.openid.oid4vci.issuer.store.DeferredCredentialEntry
 import com.sphereon.openid.oid4vci.issuer.store.DeferredCredentialStatus
@@ -67,6 +68,7 @@ class DeferredPipelineReExecutor(
     private val credentialDesignService: CredentialDesignService?,
     private val tenantIdProvider: () -> String?,
     private val businessModeProvider: () -> String? = { null },
+    private val federationEntityResolver: IssuerFederationEntityResolver? = null,
 ) {
     /**
      * Run the DEFERRED pipeline phase, re-check completeness, and if every binding is complete
@@ -272,6 +274,12 @@ class DeferredPipelineReExecutor(
         val signingConfig = issuerConfigProvider.signingConfigReloadingOnMiss(inputs.configId) ?: return null
         val expirationInDays = signingConfig.expirationInDays ?: return null
         val designContext = resolveDesignContext(inputs.configId)
+        // DIIP v5 Appendix B, as on the immediate path. A membership that cannot be determined
+        // keeps the transaction pending, like every other re-execution failure, so the next poll
+        // retries instead of issuing a credential without the required federation content.
+        val federationEntityIdentifier =
+            resolveIssuerFederationEntityIdentifier(federationEntityResolver, issuerConfigProvider.issuerIdentifier)
+                .getOrElse { return null }
         return IssuanceContext(
             subject = tokenContext.subject,
             clientId = tokenContext.clientId,
@@ -295,6 +303,7 @@ class DeferredPipelineReExecutor(
             signingX5c = signingConfig.signingX5c,
             issuanceClockSkewInSeconds = issuerConfigProvider.issuanceClockSkewInSeconds,
             expirationInDays = expirationInDays,
+            federationEntityIdentifier = federationEntityIdentifier,
         )
     }
 

@@ -16,6 +16,8 @@ import kotlin.test.assertTrue
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -92,6 +94,47 @@ class CallbackOptsOpenApiParityTest {
                 (schemas.mapValue("VerifiedDataMode")["enum"] as List<*>).map { it.toString() }.toSet(),
                 "VerifiedDataMode drifted from the spec enum in $spec",
             )
+        }
+    }
+
+    @Test
+    fun shouldDocumentOnlyDefinedVerifiedDataModesInEveryMirror() {
+        val definedModes = setOf("authorization_response", "vp_token", "credential_claims_deserialized")
+
+        for (spec in openApiMirrors()) {
+            val schemas = parseSchemas(spec)
+            val modeEnum = (schemas.mapValue("VerifiedDataMode")["enum"] as List<*>).map { it.toString() }.toSet()
+            assertEquals(definedModes, modeEnum, "VerifiedDataMode must name exactly the defined modes in $spec")
+
+            val description = schemas.mapValue("VerifiedDataOpts").stringValue("description")
+            assertFalse(
+                Regex("""\bcredentials_deserialized\b""").containsMatchIn(description),
+                "The description names an undefined mode in $spec",
+            )
+            for (mode in definedModes) {
+                assertTrue(description.contains(mode), "The description must name $mode in $spec")
+            }
+        }
+    }
+
+    @Test
+    fun shouldUseAValidVerifiedDataOptsObjectExample() {
+        val definedModes = setOf("authorization_response", "vp_token", "credential_claims_deserialized")
+
+        for (spec in openApiMirrors()) {
+            val opts = parseSchemas(spec).mapValue("VerifiedDataOpts")
+            assertEquals("object", opts.stringValue("type"), "VerifiedDataOpts must be an object in $spec")
+
+            val example = opts["example"] as? Map<*, *> ?: error("VerifiedDataOpts example must be an object in $spec")
+            assertEquals(setOf("modes"), example.keys.map { it.toString() }.toSet(), "Example members drifted in $spec")
+            val exampleModes = (example["modes"] as? List<*>)?.map { it.toString() } ?: error("Example modes must be an array in $spec")
+            assertEquals(definedModes, exampleModes.toSet(), "Example must use only defined modes in $spec")
+
+            val decoded = json.decodeFromString(
+                VerifiedDataOpts.serializer(),
+                JsonObject(mapOf("modes" to JsonArray(exampleModes.map { JsonPrimitive(it) }))).toString(),
+            )
+            assertEquals(3, decoded.modes.size, "Example must deserialize as VerifiedDataOpts in $spec")
         }
     }
 

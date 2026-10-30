@@ -62,6 +62,12 @@ class StorageProfileRoutingWalletCredentialStore(
         credentialRecordId: String,
     ): IdkResult<CredentialRecord?, IdkError> = delegateFor(walletUnitId).flatMap { it.getCredentialEnvelope(walletUnitId, credentialRecordId) }
 
+    override suspend fun updateCredentialEnvelope(
+        walletUnitId: String,
+        credentialRecordId: String,
+        transform: (CredentialRecord) -> CredentialRecord,
+    ): IdkResult<CredentialRecord?, IdkError> = delegateFor(walletUnitId).flatMap { it.updateCredentialEnvelope(walletUnitId, credentialRecordId, transform) }
+
     override suspend fun getMetadata(
         walletUnitId: String,
         credentialRecordId: String,

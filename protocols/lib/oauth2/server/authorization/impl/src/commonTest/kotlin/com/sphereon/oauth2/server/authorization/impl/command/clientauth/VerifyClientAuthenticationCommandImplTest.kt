@@ -1090,7 +1090,7 @@ class VerifyClientAuthenticationCommandImplTest {
         }
 
     @Test
-    fun assertion_audienceTokenEndpoint_rejects() =
+    fun assertion_audienceTrustedConfiguredTokenEndpoint_accepts() =
         runTest {
             val command =
                 createCommand(
@@ -1100,8 +1100,7 @@ class VerifyClientAuthenticationCommandImplTest {
                 )
 
             val result = command.execute(task25Args())
-            assertTrue(result.isErr)
-            assertEquals("invalid_client", result.error.code)
+            assertTrue(result.isOk)
         }
 
     @Test

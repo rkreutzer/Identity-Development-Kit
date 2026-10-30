@@ -55,6 +55,51 @@ enum class WalletInteractionCaptureSource {
     API,
 }
 
+/** Non-secret protocol preferences that a policy-locked captured interaction may carry. */
+object CapturedInteractionLaunchAttributes {
+    const val OID4VCI_CLIENT_AUTHENTICATION_METHOD: String = "oid4vci.client.authentication.method"
+    const val OID4VCI_DPOP_ENABLED: String = "oid4vci.dpop.enabled"
+    const val OID4VCI_CREDENTIAL_BATCH_SIZE: String = "oid4vci.credential.batch.size"
+    const val OID4VCI_USE_PAR: String = "oid4vci.use.par"
+    const val OID4VCI_ENCRYPT_CREDENTIAL_REQUEST: String = "oid4vci.credential.request.encrypt"
+
+    private val names: Set<String> = setOf(
+        OID4VCI_CLIENT_AUTHENTICATION_METHOD,
+        OID4VCI_DPOP_ENABLED,
+        OID4VCI_CREDENTIAL_BATCH_SIZE,
+        OID4VCI_USE_PAR,
+        OID4VCI_ENCRYPT_CREDENTIAL_REQUEST,
+    )
+    val maximumAttributes: Int = names.size
+
+    // Keep this list aligned with ClientAuthenticationMethod's serialized protocol values.
+    private val clientAuthenticationMethods: Set<String> = setOf(
+        "client_secret_basic",
+        "client_secret_post",
+        "client_secret_jwt",
+        "private_key_jwt",
+        "none",
+        "attest_jwt_client_auth",
+        "tls_client_auth",
+        "self_signed_tls_client_auth",
+    )
+
+    fun allows(name: String): Boolean = name in names
+
+    fun isValid(name: String, value: String): Boolean =
+        allows(name) && value.isNotBlank() && value.length <= 256 && '\u0000' !in value &&
+            when (name) {
+                OID4VCI_DPOP_ENABLED,
+                OID4VCI_USE_PAR,
+                OID4VCI_ENCRYPT_CREDENTIAL_REQUEST ->
+                    value.equals("true", ignoreCase = true) || value.equals("false", ignoreCase = true)
+
+                OID4VCI_CREDENTIAL_BATCH_SIZE -> value.toIntOrNull()?.let { it > 0 } == true
+                OID4VCI_CLIENT_AUTHENTICATION_METHOD -> value in clientAuthenticationMethods
+                else -> false
+            }
+}
+
 /**
  * Opaque handoff used when protocol ownership is resolved before any parsing or dereferencing.
  * The raw bytes are intentionally separate from [WalletEntryPoint], whose kind is already a
@@ -70,6 +115,8 @@ data class CapturedInteractionInput(
     val captureBinding: String,
     val expectedPolicyRevision: Long,
     val idempotencyKey: String,
+    /** Allowlisted non-secret protocol preferences; identity, key and secret overrides are excluded. */
+    val launchAttributes: Map<String, String> = emptyMap(),
 ) {
     init {
         require(walletProfileRef.isNotBlank()) { "wallet_interaction_profile_ref_blank" }
@@ -79,6 +126,15 @@ data class CapturedInteractionInput(
         require(captureBinding.isNotBlank()) { "wallet_interaction_capture_binding_blank" }
         require(expectedPolicyRevision > 0) { "wallet_interaction_policy_revision_invalid" }
         require(idempotencyKey.isNotBlank()) { "wallet_interaction_idempotency_key_blank" }
+        require(launchAttributes.size <= CapturedInteractionLaunchAttributes.maximumAttributes) {
+            "wallet_interaction_capture_launch_attributes_too_many"
+        }
+        require(launchAttributes.keys.all(CapturedInteractionLaunchAttributes::allows)) {
+            "wallet_interaction_capture_launch_attribute_not_allowed"
+        }
+        require(launchAttributes.all { (name, value) -> CapturedInteractionLaunchAttributes.isValid(name, value) }) {
+            "wallet_interaction_capture_launch_attribute_invalid"
+        }
     }
 
     override fun equals(other: Any?): Boolean {
@@ -91,7 +147,8 @@ data class CapturedInteractionInput(
             payloadDigest == other.payloadDigest &&
             captureBinding == other.captureBinding &&
             expectedPolicyRevision == other.expectedPolicyRevision &&
-            idempotencyKey == other.idempotencyKey
+            idempotencyKey == other.idempotencyKey &&
+            launchAttributes == other.launchAttributes
     }
 
     override fun hashCode(): Int {
@@ -103,6 +160,7 @@ data class CapturedInteractionInput(
         result = 31 * result + captureBinding.hashCode()
         result = 31 * result + expectedPolicyRevision.hashCode()
         result = 31 * result + idempotencyKey.hashCode()
+        result = 31 * result + launchAttributes.hashCode()
         return result
     }
 }
@@ -287,6 +345,10 @@ enum class WalletInteractionStatus {
     Failed,
 }
 
+/** Nonsecret transport of the opaque completion value; the value remains private. */
+@Serializable
+enum class WalletInteractionCompletionTransport { BROWSER_REDIRECT, DIGITAL_CREDENTIALS_API }
+
 @Serializable
 data class WalletInteractionState(
     val sessionId: WalletInteractionSessionId,
@@ -317,6 +379,7 @@ data class WalletInteractionState(
     val authorizationHandoffRef: WalletInteractionSensitiveInputRef? = null,
     /** Optional post-completion user-agent handoff, kept opaque outside the private session store. */
     val completionHandoffRef: WalletInteractionSensitiveInputRef? = null,
+    val completionHandoffTransport: WalletInteractionCompletionTransport? = null,
     val txCode: WalletTxCodeSpec? = null,
     val deferred: WalletDeferredRetrievalSummary? = null,
     val message: WalletDisplayMessage? = null,

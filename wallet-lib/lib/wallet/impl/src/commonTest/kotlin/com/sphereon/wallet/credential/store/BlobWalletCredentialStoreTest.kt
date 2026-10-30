@@ -41,6 +41,7 @@ import com.sphereon.data.store.party.model.IdentifierType
 import com.sphereon.wallet.credential.BodyStorageKind
 import com.sphereon.wallet.credential.BodyStorageRef
 import com.sphereon.wallet.credential.CredentialFormat
+import com.sphereon.wallet.credential.CredentialBindingRef
 import com.sphereon.wallet.credential.CredentialInstance
 import com.sphereon.wallet.credential.CredentialLifecycleState
 import com.sphereon.wallet.credential.CredentialMetadata
@@ -85,6 +86,7 @@ import com.sphereon.wallet.credential.walletCredentialInstanceBodyPath
 import com.sphereon.wallet.credential.walletCredentialMetadataPath
 import com.sphereon.wallet.credential.walletCredentialRecordEnvelopePath
 import com.sphereon.wallet.credential.walletDeferredAccessTokenPath
+import com.sphereon.wallet.credential.walletRefreshTokenPath
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -216,9 +218,15 @@ private class BodyReadTrackingBlobService(
 ) : BlobService by delegate {
     var bodyReadCount: Int = 0
         private set
+    var bodyWriteCount: Int = 0
+        private set
 
     fun resetBodyReadCount() {
         bodyReadCount = 0
+    }
+
+    fun resetBodyWriteCount() {
+        bodyWriteCount = 0
     }
 
     override suspend fun getBlob(info: BlobInfoType): IdkResult<ResolvedBlobInfo, IdkError> {
@@ -227,6 +235,18 @@ private class BodyReadTrackingBlobService(
             bodyReadCount++
         }
         return delegate.getBlob(info)
+    }
+
+    override suspend fun storeBlob(
+        target: BlobInfo,
+        data: ByteArray,
+        options: PutOptions,
+    ): IdkResult<BlobDescriptor, IdkError> {
+        val path = target.path
+        if (path?.startsWith("wallet-units/") == true && path.endsWith("/body")) {
+            bodyWriteCount++
+        }
+        return delegate.storeBlob(target, data, options)
     }
 }
 
@@ -242,6 +262,25 @@ private class FailingGetBlobService(
     }
 }
 
+private class ConcurrentEnvelopeWriteBlobService(
+    private val delegate: DefaultBlobService,
+    private val beforeFirstConditionalEnvelopeWrite: suspend () -> Unit,
+) : BlobService by delegate {
+    private var injectedConcurrentWrite = false
+
+    override suspend fun storeBlob(
+        target: BlobInfo,
+        data: ByteArray,
+        options: PutOptions,
+    ): IdkResult<BlobDescriptor, IdkError> {
+        if (!injectedConcurrentWrite && target.path?.endsWith("/record") == true && options.expectedRevision != null) {
+            injectedConcurrentWrite = true
+            beforeFirstConditionalEnvelopeWrite()
+        }
+        return delegate.storeBlob(target, data, options)
+    }
+}
+
 private fun createTrackingStore(): Pair<BodyReadTrackingBlobService, BlobWalletCredentialStore> {
     val tracking = BodyReadTrackingBlobService(createTestBlobService())
     return tracking to BlobWalletCredentialStore(tracking, TestWalletCredentialBodyProtector)
@@ -254,6 +293,13 @@ private fun typeRef(value: String = "https://credentials.example.com/employee") 
         value = value,
         source = CredentialTypeRefSource.CREDENTIAL_PAYLOAD,
         primary = true,
+    )
+
+private fun testBindingRef() =
+    CredentialBindingRef(
+        verifierRef = IdentifierRef(type = IdentifierType.DID, value = "did:example:verifier"),
+        boundAt = NOW,
+        presentationId = "presentation-test",
     )
 
 private fun makeRecord(
@@ -314,6 +360,127 @@ class BlobWalletCredentialStoreTest {
             assertTrue(getResult.isOk)
             assertNotNull(getResult.value)
             assertEquals(record, getResult.value)
+        }
+
+    @Test
+    fun envelopeUpdateChangesPresentationHistoryWithoutOpeningOrRewritingBodies() =
+        runTest {
+            val (blobService, store) = createTrackingStore()
+            val recordId = "record-many-instances"
+            val base = makeRecord(recordId)
+            val first = base.instances.single()
+            val record =
+                base.copy(
+                    instances =
+                        (1..63).map { index ->
+                            val instanceId = "$recordId-instance-$index"
+                            first.copy(
+                                id = instanceId,
+                                raw = "raw-$instanceId",
+                                bodyStorageRef =
+                                    BodyStorageRef(
+                                        kind = BodyStorageKind.BLOB,
+                                        path = walletCredentialInstanceBodyPath(WALLET_A, recordId, instanceId),
+                                        storeRef = StoreRef(id = "memory", type = "blob"),
+                                    ),
+                            )
+                        },
+                )
+            assertTrue(store.putCredential(WALLET_A, record).isOk)
+            blobService.resetBodyReadCount()
+            blobService.resetBodyWriteCount()
+
+            val updateResult =
+                store.updateCredentialEnvelope(WALLET_A, recordId) { envelope ->
+                    envelope.copy(
+                        instances =
+                            envelope.instances.mapIndexed { index, instance ->
+                                if (index == 0) instance.copy(bindingRefs = instance.bindingRefs + testBindingRef()) else instance
+                            },
+                        updatedAt = NOW,
+                        syncState = envelope.syncState.copy(localRevision = envelope.syncState.localRevision + 1),
+                    )
+                }
+
+            assertTrue(updateResult.isOk)
+            assertEquals(63, updateResult.value?.instances?.size)
+            assertEquals(0, blobService.bodyReadCount)
+            assertEquals(0, blobService.bodyWriteCount)
+
+            val hydrated = store.getCredential(WALLET_A, recordId).value
+            assertEquals(record.instances.map { it.id }, hydrated?.instances?.map { it.id })
+            assertEquals(record.instances.map { it.raw }, hydrated?.instances?.map { it.raw })
+            assertEquals(listOf("presentation-test"), hydrated?.instances?.first()?.bindingRefs?.map { it.presentationId })
+            assertEquals(63, blobService.bodyReadCount)
+        }
+
+    @Test
+    fun envelopeUpdateRejectsInstanceInventoryChanges() =
+        runTest {
+            val store = buildStore()
+            val record = makeRecord("record-envelope-inventory")
+            assertTrue(store.putCredential(WALLET_A, record).isOk)
+
+            val updateResult =
+                store.updateCredentialEnvelope(WALLET_A, record.id) { envelope ->
+                    envelope.copy(instances = emptyList())
+                }
+
+            assertTrue(updateResult.isErr)
+            assertEquals(listOf(record.instances.single().id), store.getCredentialEnvelope(WALLET_A, record.id).value?.instances?.map { it.id })
+        }
+
+    @Test
+    fun envelopeUpdateRetriesAgainstConcurrentInstanceAddition() =
+        runTest {
+            val delegate = createTestBlobService()
+            val existingStore = BlobWalletCredentialStore(delegate, TestWalletCredentialBodyProtector)
+            val record = makeRecord("record-concurrent-envelope")
+            assertTrue(existingStore.putCredential(WALLET_A, record).isOk)
+
+            val racingBlobService =
+                ConcurrentEnvelopeWriteBlobService(delegate) {
+                    val current = existingStore.getCredential(WALLET_A, record.id).value ?: error("record missing")
+                    val original = current.instances.single()
+                    val addedId = "${record.id}-concurrent-instance"
+                    val added =
+                        original.copy(
+                            id = addedId,
+                            raw = "raw-$addedId",
+                            bodyStorageRef =
+                                BodyStorageRef(
+                                    kind = BodyStorageKind.BLOB,
+                                    path = walletCredentialInstanceBodyPath(WALLET_A, record.id, addedId),
+                                    storeRef = StoreRef(id = "memory", type = "blob"),
+                                ),
+                        )
+                    assertTrue(existingStore.putCredential(WALLET_A, current.copy(instances = current.instances + added)).isOk)
+                }
+            val store = BlobWalletCredentialStore(racingBlobService, TestWalletCredentialBodyProtector)
+
+            val updateResult =
+                store.updateCredentialEnvelope(WALLET_A, record.id) { envelope ->
+                    envelope.copy(
+                        instances =
+                            envelope.instances.map { instance ->
+                                if (instance.id == record.instances.single().id) {
+                                    instance.copy(bindingRefs = instance.bindingRefs + testBindingRef())
+                                } else {
+                                    instance
+                                }
+                            },
+                        updatedAt = NOW,
+                        syncState = envelope.syncState.copy(localRevision = envelope.syncState.localRevision + 1),
+                    )
+                }
+
+            assertTrue(updateResult.isOk)
+            assertEquals(setOf("${record.id}-instance", "${record.id}-concurrent-instance"), updateResult.value?.instances?.map { it.id }?.toSet())
+            assertEquals(listOf("presentation-test"), updateResult.value?.instances?.first()?.bindingRefs?.map { it.presentationId })
+            assertEquals(
+                "raw-${record.id}-concurrent-instance",
+                existingStore.getCredential(WALLET_A, record.id).value?.instances?.last()?.raw,
+            )
         }
 
     @Test
@@ -593,6 +760,7 @@ class BlobWalletCredentialStoreTest {
 
             val refreshRef = store.storeRefreshToken(WALLET_A, credentialRecordId, "refresh-token-a")
             assertTrue(refreshRef.isOk)
+            assertEquals(walletRefreshTokenPath(WALLET_A, credentialRecordId), refreshRef.value.id)
             assertTrue(refreshRef.value.id.endsWith("/refresh-token"))
             assertTrue(refreshRef.value.id != deferredRef.value.id, "Refresh token blob path must not collide with the deferred access token blob path")
 

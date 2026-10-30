@@ -167,6 +167,14 @@ class DirectPostResponseEndpointCommandImpl(
                 ?: federationSession(responseParams["response"], correlationId)
                 ?: return Err(IdkError.NOT_FOUND_ERROR(message = "Authorization session not found: $correlationId"))
 
+        // In DC API the browser receives the response and relays only the encrypted JWT.
+        // `state` is not a DC API wire parameter (OID4VP Appendix A.2); the JWE kid
+        // already selected this persisted session before any private-key operation.
+        if (session.authorizationRequest.responseMode == ResponseMode.DC_API_JWT.value &&
+            responseParams.keys != setOf("response")) {
+            return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "dc_api.jwt response must contain only the encrypted response parameter"))
+        }
+
         // Per OID4VP §7.2 redirect_uri is OPTIONAL in the response, and this response-endpoint
         // redirect is distinct from the authorization request's `redirect_uri`: direct_post uses
         // `response_uri` for wallet submission and the two request parameters are mutually
@@ -181,7 +189,8 @@ class DirectPostResponseEndpointCommandImpl(
         // ParseAuthorizationResponseCommandImpl → VerifyJarmResponseCommandImpl) hands the KMS for
         // the ECDH key agreement. PRIVATE expresses the intended operation; it does not request key
         // export, and no key material crosses this boundary.
-        val encryptedResponse = session.authorizationRequest.responseMode == ResponseMode.DIRECT_POST_JWT.value
+        val encryptedResponse = session.authorizationRequest.responseMode in
+            setOf(ResponseMode.DIRECT_POST_JWT.value, ResponseMode.DC_API_JWT.value)
         val jarmDecryptionKeyName =
             if (encryptedResponse) {
                 responseEncryptionKeyConfig.resolveEncryptionKeyName(session.instanceId)
@@ -316,12 +325,15 @@ class DirectPostResponseEndpointCommandImpl(
             return Err(IdkError.fromString("credential issuer authentication resolver returned holder material", code = "TRUST_AUTHENTICATION_PURPOSE_MISMATCH"))
         }
         val trustedAuthentications = holderAuthentications + issuerAuthentications
+        val issuerAuthenticationLookup = authenticationResolver?.credentialIssuerAuthenticationLookup(trustRequest)
 
         // Build args for the direct_post handler
         val directPostArgs =
             HandleDirectPostResponseArgs(
                 responseParams = responseParams,
                 originalRequest = session.authorizationRequest,
+                sessionCorrelationId =
+                    if (session.authorizationRequest.responseMode == ResponseMode.DC_API_JWT.value) session.correlationId else null,
                 dcqlQuery = session.dcqlQuery,
                 redirectUri = sessionRedirectUri,
                 jarmDecryptionKey = jarmDecryptionKey,
@@ -330,6 +342,7 @@ class DirectPostResponseEndpointCommandImpl(
                 dcqlQueryId = session.dcqlQueryId,
                 templateId = session.templateId,
                 trustedAuthentications = trustedAuthentications,
+                credentialIssuerAuthenticationLookup = issuerAuthenticationLookup,
                 iso18013MdocGeneratedNonce = iso18013MdocGeneratedNonce,
             )
 

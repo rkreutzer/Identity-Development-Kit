@@ -50,7 +50,12 @@ class MultiExternalIdentifierResolutionServiceImpl(
             log.debug(
                 "Using external identifier resolution service: ${it::class.simpleName} for identifier method: ${args.method?.methodName ?: "not specified"}",
             )
-            return it.resolve(args)
+            val result = it.resolve(args)
+            if (result.isErr) {
+                val code = result.error.code.takeIf { value -> value.matches(Regex("[A-Za-z0-9_.:-]{1,160}")) } ?: "unavailable"
+                log.warn("EXTERNAL_IDENTIFIER_RESOLUTION_REFUSED stage=resolver-result code=$code")
+            }
+            return result
         }
 
         // Log detailed information about why no resolver was found
@@ -60,15 +65,7 @@ class MultiExternalIdentifierResolutionServiceImpl(
         val availableResolvers = external.map { it::class.simpleName }.joinToString(", ")
         val supportedMethods = external.flatMap { it.supportedIdentifierMethods }.map { it.methodName }.joinToString(", ")
 
-        log.warn(
-            "No external identifier resolution service found for identifier. " +
-                "Args type: $argsType, " +
-                "Identifier type: $identifierType, " +
-                "Method: $identifierMethod, " +
-                "Identifier value (truncated): ${args.identifier.toString().take(100)}. " +
-                "Available resolvers: [$availableResolvers]. " +
-                "Supported methods: [$supportedMethods]",
-        )
+        log.warn("EXTERNAL_IDENTIFIER_RESOLUTION_REFUSED stage=resolver-selection reason=unsupported_identifier")
 
         return IdkError
             .COMMAND_ARG_NOT_SUPPORTED_ERROR(

@@ -13,6 +13,7 @@ import at.asitplus.awesn1.crypto.pki.X509TbsCertificate
 import at.asitplus.awesn1.encoding.parse
 import at.asitplus.awesn1.serialization.DER
 import com.sphereon.cbor.CborByteString
+import com.sphereon.core.api.decodeFromBase64
 import com.sphereon.core.api.session.asCoreApiServiceGraph
 import com.sphereon.core.compat.LocalDateTimeKMP
 import com.sphereon.crypto.core.CoseJoseKeyMappingService
@@ -169,7 +170,109 @@ class AuthenticatedVicalIacaValidatorTest {
         assertTrue(result.error.message.defaultMessage.contains("COSE_Sign1 signature", ignoreCase = true), result.error.message.defaultMessage)
     }
 
-    private suspend fun fixture(embeddedIaca: Certificate? = null): Fixture {
+    @Test
+    fun nextUpdateCutoffIsExplicitLocalPolicy() = runTest {
+        val fixture = fixture(nextUpdate = "2020-01-02T00:00:00Z")
+        val strict = validator.validate(fixture.signedVical, fixture.policy())
+        assertTrue(strict.isErr)
+        assertTrue(strict.error.message.defaultMessage.contains("freshness cutoff"))
+
+        val advisory = validator.validate(
+            fixture.signedVical,
+            fixture.policy().copy(rejectPastNextUpdate = false),
+        )
+        assertTrue(advisory.isOk, if (advisory.isErr) advisory.error.message.defaultMessage else null)
+
+        // Requiring presence and rejecting a missed publication time are independent policies.
+        assertTrue(validator.validate(fixture.signedVical, fixture.policy().copy(requireNextUpdate = false)).isErr)
+    }
+
+    @Test
+    fun missingNextUpdateRequiresExplicitPolicyOptOut() = runTest {
+        val fixture = fixture(nextUpdate = null)
+        assertTrue(validator.validate(fixture.signedVical, fixture.policy()).isErr)
+        assertTrue(validator.validate(fixture.signedVical, fixture.policy().copy(rejectPastNextUpdate = false)).isErr)
+        assertTrue(validator.validate(fixture.signedVical, fixture.policy().copy(requireNextUpdate = false)).isOk)
+    }
+
+    @Test
+    fun certificateMetadataMustEqualAuthenticatedDer() = runTest {
+        val cases: List<Pair<String, (VicalCertificateInfo) -> VicalCertificateInfo>> = listOf(
+            "notBefore" to { it.copy(notBefore = "2021-01-01T00:00:00Z") },
+            "notAfter" to { it.copy(notAfter = "2099-01-01T00:00:00Z") },
+            "issuer" to { it.copy(issuer = byteArrayOf(0x30, 0x00)) },
+            "subject" to { it.copy(subject = byteArrayOf(0x30, 0x00)) },
+        )
+        for ((field, amend) in cases) {
+            val fixture = fixture(amendEntry = amend)
+            val result = validator.validate(fixture.signedVical, fixture.policy())
+            assertTrue(result.isErr, "$field mismatch must be rejected")
+            assertTrue(result.error.message.defaultMessage.contains("$field does not match certificate"), result.error.message.defaultMessage)
+        }
+    }
+
+    @Test
+    fun signerChainUsesPolicyVerificationTime() = runTest {
+        val fixture = fixture()
+        val result = validator.validate(fixture.signedVical, fixture.policy().copy(verificationTimeEpochSeconds = 0))
+        assertTrue(result.isErr)
+        assertTrue(result.error.message.defaultMessage.contains("signer certificate chain"), result.error.message.defaultMessage)
+    }
+
+    @Test
+    fun profileFilteredSnapshotsAllowWithdrawalButConcreteLookupsStillRequireAMatch() = runTest {
+        val policy = VicalValidationPolicy(
+            trustedCerts = arrayOf(VicalSignerFixtures.root),
+            verificationTimeEpochSeconds = kotlin.time.Instant.parse("2026-10-22T00:00:00Z").epochSeconds,
+            embeddedIacaTrustMode = VicalEmbeddedIacaTrustMode.AUTHENTICATED_VICAL,
+            signerCertificateProfile = VicalSignerCertificateProfile.ISO_18013_5_ANNEX_C,
+            requiredCertificateProfiles = setOf("urn:example:issuer"),
+        )
+        val empty = validator.validate(VicalSignerFixtures.valid.decodeFromBase64(), policy)
+        assertTrue(empty.isOk, if (empty.isErr) empty.error.message.defaultMessage else null)
+        assertTrue(empty.value.matchingCertificateInfos.isEmpty())
+        assertTrue(validator.validate(VicalSignerFixtures.valid.decodeFromBase64(), policy.copy(expectedDocType = "org.iso.18013.5.1.mDL")).isErr)
+        val populated = fixture()
+        val filtered = validator.validate(populated.signedVical, populated.policy().copy(requiredCertificateProfiles = setOf("urn:example:other")))
+        assertTrue(filtered.isOk, if (filtered.isErr) filtered.error.message.defaultMessage else null)
+        assertTrue(filtered.value.matchingCertificateInfos.isEmpty())
+    }
+
+    @Test
+    fun dedicatedSignerProfileAcceptsIndependentCoseFixtureAndRejectsInvalidCertificates() = runTest {
+        val policy = VicalValidationPolicy(
+            trustedCerts = arrayOf(VicalSignerFixtures.root),
+            verificationTimeEpochSeconds = kotlin.time.Instant.parse("2026-10-22T00:00:00Z").epochSeconds,
+            embeddedIacaTrustMode = VicalEmbeddedIacaTrustMode.AUTHENTICATED_VICAL,
+            signerCertificateProfile = VicalSignerCertificateProfile.ISO_18013_5_ANNEX_C,
+        )
+        val valid = validator.validate(VicalSignerFixtures.valid.decodeFromBase64(), policy)
+        assertTrue(valid.isOk, if (valid.isErr) valid.error.message.defaultMessage else null)
+        assertTrue(valid.value.matchingCertificateInfos.isEmpty(), "a valid empty VICAL removes all material")
+        val invalid = mapOf(
+            "wrong KU" to VicalSignerFixtures.wrongKeyUsage,
+            "missing KU" to VicalSignerFixtures.missingKeyUsage,
+            "wrong EKU" to VicalSignerFixtures.wrongEku,
+            "missing EKU" to VicalSignerFixtures.missingEku,
+            "validity" to VicalSignerFixtures.longValidity,
+            "AKI" to VicalSignerFixtures.missingAki,
+            "CRL" to VicalSignerFixtures.missingCrl,
+            "subject" to VicalSignerFixtures.missingOrganization,
+            "serial" to VicalSignerFixtures.shortSerial,
+        )
+        for ((name, encoded) in invalid) {
+            assertTrue(validator.validate(encoded.decodeFromBase64(), policy).isErr, "$name must be rejected")
+        }
+        val tagged = validator.validate(byteArrayOf(0xd2.toByte()) + VicalSignerFixtures.valid.decodeFromBase64(), policy)
+        assertTrue(tagged.isErr)
+        assertTrue(tagged.error.message.defaultMessage.contains("untagged"))
+    }
+
+    private suspend fun fixture(
+        embeddedIaca: Certificate? = null,
+        nextUpdate: String? = "2100-01-01T00:00:00Z",
+        amendEntry: (VicalCertificateInfo) -> VicalCertificateInfo = { it },
+    ): Fixture {
         val iaca = embeddedIaca ?: iaca()
         val signerKey = kms.generateKey(alg = SignatureAlgorithm.ECDSA_SHA256, keyVisibility = KeyVisibility.PRIVATE)
         val signerAnchor = signerKey.jose.publicJwk.x5c?.singleOrNull() ?: fail("VICAL signer has no certificate")
@@ -179,14 +282,14 @@ class AuthenticatedVicalIacaValidatorTest {
         val vical = Vical(
             vicalProvider = "https://vical.example.test",
             date = "2020-01-01T00:00:00Z",
-            nextUpdate = "2100-01-01T00:00:00Z",
+            nextUpdate = nextUpdate,
             certificateInfos = listOf(
-                VicalCertificateInfo(
+                amendEntry(VicalCertificateInfo(
                     certificate = iaca.der,
                     serialNumber = byteArrayOf(1),
                     ski = ski,
                     docTypes = listOf("org.iso.18013.5.1.mDL"),
-                ),
+                )),
             ),
         )
         val signed = signer.sign(vical, CoseJoseKeyMappingService.toCoseKeyInfo(signerKey.joseToManagedKeyInfo(KeyVisibility.PRIVATE)))

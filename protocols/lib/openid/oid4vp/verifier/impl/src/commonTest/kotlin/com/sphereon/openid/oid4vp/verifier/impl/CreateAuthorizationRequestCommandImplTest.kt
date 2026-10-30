@@ -16,6 +16,9 @@
 
 package com.sphereon.openid.oid4vp.verifier.impl
 
+import com.sphereon.core.api.IdkResult
+import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSession
+import com.sphereon.openid.oid4vp.verifier.store.AuthorizationSessionStore
 import com.sphereon.core.api.Err
 import com.sphereon.core.api.Ok
 import com.sphereon.core.api.error.IdkError
@@ -48,6 +51,80 @@ class CreateAuthorizationRequestCommandImplTest {
     private val testContext = Oid4vpVerifierTestContext("create-auth-req-test", this)
     private val sessionStore = TestAuthorizationSessionStore()
     private val command = createTestCommand(sessionStore)
+
+    @Test
+    fun claimedReplayReturnsPersistedCorrelationAndOriginalRequest() = runTest {
+        val legacy = AuthorizationSessionStore.LEGACY_CLAIMED_CORRELATION_PREFIX + "operation"
+        val urlSafe = AuthorizationSessionStore.CLAIMED_CORRELATION_PREFIX + "operation"
+        val replayStore = object : AuthorizationSessionStore by sessionStore {
+            override suspend fun createClaimedSession(
+                session: AuthorizationSession,
+                fingerprint: String,
+                ttlSeconds: Long,
+            ): IdkResult<AuthorizationSession, IdkError> {
+                assertEquals(urlSafe, session.correlationId)
+                assertEquals(urlSafe, session.authorizationRequest.state)
+                return Ok(session.copy(correlationId = legacy,
+                    authorizationRequest = session.authorizationRequest.copy(state = legacy, nonce = "originalNonce123")))
+            }
+        }
+        val result = createTestCommand(replayStore).createAuthorizationRequest(CreateAuthorizationRequestArgs(
+            instanceId = "verifier-claimed-replay",
+            dcqlQuery = DcqlQuery(credentials = listOf(DcqlCredentialQuery(
+                id = "identity", format = "dc+sd-jwt", meta = sdJwtVcMeta("urn:test:identity"),
+            ))),
+            clientId = "https://verifier.example.com",
+            responseUri = "https://verifier.example.com/response",
+            responseMode = ResponseMode.DIRECT_POST,
+            nonce = "replacementNonce123",
+            state = urlSafe,
+            operationFingerprint = "fingerprint",
+        ))
+        assertIs<Ok<*>>(result)
+        assertEquals(legacy, result.value.sessionId)
+        assertEquals(legacy, result.value.request.state)
+        assertEquals("originalNonce123", result.value.request.nonce)
+    }
+
+    @Test
+    fun digitalCredentialsSignedRequestKeepsCorrelationOffTheWire() = runTest {
+        val result = command.createAuthorizationRequest(
+            CreateAuthorizationRequestArgs(
+                instanceId = "dc-api-verifier",
+                dcqlQuery = DcqlQuery(
+                    credentials = listOf(DcqlCredentialQuery(id = "identity", format = "dc+sd-jwt", meta = sdJwtVcMeta("urn:test:identity"))),
+                ),
+                clientId = "x509_hash:verifier-key",
+                responseMode = ResponseMode.DC_API_JWT,
+                expectedOrigins = listOf("https://verifier.example.com"),
+                nonce = "nonce12345678",
+                state = "private-correlation-id",
+            ),
+        )
+
+        assertIs<Ok<*>>(result)
+        val request = result.value.request
+        assertEquals("dc_api.jwt", request.responseMode)
+        assertNull(request.state)
+        assertNull(request.redirectUri)
+        assertNull(request.additionalParameters["response_uri"])
+        assertEquals("[\"https://verifier.example.com\"]", request.additionalParameters["expected_origins"].toString())
+        assertEquals("origin:https://verifier.example.com", holderBindingClientId(request))
+        assertEquals(
+            "origin:https://verifier.example.com",
+            holderBindingClientId(request.copy(responseMode = ResponseMode.DC_API.value)),
+        )
+        assertNull(
+            holderBindingClientId(
+                request.copy(
+                    responseMode = ResponseMode.DC_API.value,
+                    additionalParameters = request.additionalParameters - "expected_origins",
+                ),
+            ),
+        )
+        assertEquals("private-correlation-id", result.value.sessionId)
+        assertNotNull(sessionStore.get("private-correlation-id").getOrNull())
+    }
 
     @Test
     fun `test create basic authorization request`() =
@@ -626,7 +703,7 @@ class CreateAuthorizationRequestCommandImplTest {
         return ClientIdScheme.entries.first { it.prefix == scheme }
     }
 
-    private fun createTestCommand(sessionStore: TestAuthorizationSessionStore): CreateAuthorizationRequestCommandImpl =
+    private fun createTestCommand(sessionStore: AuthorizationSessionStore): CreateAuthorizationRequestCommandImpl =
         CreateAuthorizationRequestCommandImpl(
             execution = testContext.execution,
             authorizationSessionStore = sessionStore,

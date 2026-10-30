@@ -30,6 +30,7 @@ import com.sphereon.openid.oid4vp.dcql.store.DcqlQueryConfigurationStore
 import com.sphereon.openid.oid4vp.verifier.ParsedAuthorizationResponse
 import com.sphereon.openid.oid4vp.verifier.ValidationResult
 import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionCallbackDispatcher
+import com.sphereon.openid.oid4vp.verifier.callback.AuthorizationSessionStatusResponseMapper
 import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSession
 import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSessionCreateArgs
 import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSessionError
@@ -64,6 +65,7 @@ class EventPublishingAuthorizationSessionStore private constructor(
         kvStoreService: KvStoreService,
         dcqlQueryConfigurationStore: DcqlQueryConfigurationStore,
         callbackDispatcher: AuthorizationSessionCallbackDispatcher,
+        statusResponseMapper: AuthorizationSessionStatusResponseMapper,
         appLogManager: AppLogManager,
         execution: SessionExecution,
         clock: Clock,
@@ -75,6 +77,7 @@ class EventPublishingAuthorizationSessionStore private constructor(
             kvStoreService,
             dcqlQueryConfigurationStore,
             callbackDispatcher,
+            statusResponseMapper,
             appLogManager,
             execution,
             clock,

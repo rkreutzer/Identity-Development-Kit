@@ -9,6 +9,7 @@ package com.sphereon.oauth2.client.impl.token
 import com.sphereon.core.api.Err
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
+import com.sphereon.core.api.log.Log
 import com.sphereon.oauth2.client.token.DefaultOAuth2TokenEndpointSelector
 import com.sphereon.oauth2.client.token.OAuth2AccessTokenBindingMode
 import com.sphereon.oauth2.client.token.OAuth2AccessTokenCacheCoordinator
@@ -30,6 +31,7 @@ import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import io.ktor.http.Url
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -68,7 +70,10 @@ class LocalMemoryOAuth2AccessTokenCacheCoordinator(
         key: OAuth2AccessTokenCacheKey,
         transportArgs: OAuth2TokenEndpointTransportArgs,
     ): IdkResult<OAuth2CachedAccessToken, Oauth2Error> {
-        validateAcquisition(key, transportArgs)?.let { return Err(it) }
+        validateAcquisition(key, transportArgs)?.let {
+            Log.app().withTag("OAuth2AccessTokenCoordinator").warn("OAuth2 acquisition refused stage=validation")
+            return Err(it)
+        }
 
         return when (val decision = lookup(key)) {
             is LookupDecision.Hit -> Ok(decision.token)
@@ -138,6 +143,7 @@ class LocalMemoryOAuth2AccessTokenCacheCoordinator(
         return try {
             val transported = tokenEndpointTransport.exchange(transportArgs)
             val result = if (transported.isErr) {
+                Log.app().withTag("OAuth2AccessTokenCoordinator").warn("OAuth2 acquisition refused stage=token-transport")
                 Err(transported.error)
             } else {
                 val acquiredAt = clock.now()
@@ -154,6 +160,12 @@ class LocalMemoryOAuth2AccessTokenCacheCoordinator(
             completion = result
             result
         } catch (expected: Throwable) {
+            if (expected !is CancellationException) {
+                val type = expected::class.simpleName?.takeIf { it.matches(Regex("[A-Za-z][A-Za-z0-9_]{0,79}")) } ?: "unavailable"
+                Log.app().withTag("OAuth2AccessTokenCoordinator").warn(
+                    "OAuth2 acquisition failed stage=acquire error_type=$type",
+                )
+            }
             failure = expected
             throw expected
         } finally {

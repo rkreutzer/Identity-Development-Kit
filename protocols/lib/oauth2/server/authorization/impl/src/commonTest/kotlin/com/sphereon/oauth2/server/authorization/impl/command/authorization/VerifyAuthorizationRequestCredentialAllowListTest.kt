@@ -59,6 +59,7 @@ class VerifyAuthorizationRequestCredentialAllowListTest {
             emptySet(),
             com.sphereon.oauth2.server.authorization.impl.provider.NoCredentialIssuerAudienceResolver(),
             Oid4vciUnregisteredWalletAdmissionRule(),
+            com.sphereon.oauth2.server.authorization.impl.testutil.fixedAsInstanceIdProvider(),
         )
     }
 

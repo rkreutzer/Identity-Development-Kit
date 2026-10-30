@@ -39,6 +39,9 @@ import com.sphereon.wallet.interaction.GetWalletInteractionStateCommand
 import com.sphereon.wallet.interaction.ListWalletInteractionActivityArgs
 import com.sphereon.wallet.interaction.ListWalletInteractionActivityCommand
 import com.sphereon.wallet.interaction.ListWalletInteractionActivityResult
+import com.sphereon.wallet.interaction.ListWalletInteractionTasksArgs
+import com.sphereon.wallet.interaction.ListWalletInteractionTasksCommand
+import com.sphereon.wallet.interaction.ListWalletInteractionTasksResult
 import com.sphereon.wallet.interaction.ObserveWalletInteractionEventsCommand
 import com.sphereon.wallet.interaction.RegisterWalletInteractionSensitiveInputArgs
 import com.sphereon.wallet.interaction.RegisterWalletInteractionSensitiveInputCommand
@@ -541,6 +544,30 @@ class ListWalletInteractionActivityCommandImpl(
         }
 }
 
+@Inject
+@SingleIn(SessionScope::class)
+class ListWalletInteractionTasksCommandImpl(
+    execution: SessionExecution,
+    private val engine: DefaultWalletInteractionEngine,
+) : TypedServiceCommandAdapter<ListWalletInteractionTasksArgs, ListWalletInteractionTasksResult, IdkError>(
+        commandId = ListWalletInteractionTasksCommand.COMMAND_ID,
+        execution = execution,
+        inputTypeToken = typeToken<ListWalletInteractionTasksArgs>(),
+        outputTypeToken = typeToken<ListWalletInteractionTasksResult>(),
+    ),
+    ListWalletInteractionTasksCommand {
+    override val commandId: String get() = ListWalletInteractionTasksCommand.COMMAND_ID
+
+    override suspend fun doExecute(
+        args: ListWalletInteractionTasksArgs,
+        applyDuring: (ListWalletInteractionTasksArgs) -> ListWalletInteractionTasksArgs,
+    ): IdkResult<ListWalletInteractionTasksResult, IdkError> =
+        walletInteractionCommand {
+            val input = applyDuring(args)
+            ListWalletInteractionTasksResult(engine.listTasks(input.walletUnitId, input.limit))
+        }
+}
+
 @ContributesTo(SessionScope::class)
 interface WalletInteractionCommandDescriptors {
     @Provides
@@ -609,6 +636,11 @@ interface WalletInteractionCommandDescriptors {
     @IntoMap
     @StringKey(ListWalletInteractionActivityCommand.COMMAND_ID)
     fun listWalletInteractionActivity(impl: ListWalletInteractionActivityCommandImpl): ServiceCommand<*, *, *> = impl
+
+    @Provides
+    @IntoMap
+    @StringKey(ListWalletInteractionTasksCommand.COMMAND_ID)
+    fun listWalletInteractionTasks(impl: ListWalletInteractionTasksCommandImpl): ServiceCommand<*, *, *> = impl
 }
 
 private suspend fun <T : Any> walletInteractionCommand(block: suspend () -> T): IdkResult<T, IdkError> =

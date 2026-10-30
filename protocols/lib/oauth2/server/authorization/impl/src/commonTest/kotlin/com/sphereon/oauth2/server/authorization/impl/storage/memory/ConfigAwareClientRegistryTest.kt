@@ -325,10 +325,10 @@ class ConfigAwareClientRegistryTest {
                             override fun currentAsInstanceId(): String? = null
                         },
                     serversConfigProvider = TestOAuth2ServersConfigProvider(OAuth2ServersConfig()),
-                    opaqueInternalClientSecretVerifier = DefaultOpaqueInternalClientSecretVerifier(secrets),
+                    opaqueInternalClientSecretVerifier = lazyOf(DefaultOpaqueInternalClientSecretVerifier(secrets)),
                     clientRegistrationStore = InMemoryClientRegistrationStore(),
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                 )
 
             val operator = assertNotNull(registry.getClient("operator-cli").value)
@@ -397,10 +397,10 @@ class ConfigAwareClientRegistryTest {
                             override fun currentAsInstanceId(): String? = null
                         },
                     serversConfigProvider = TestOAuth2ServersConfigProvider(OAuth2ServersConfig()),
-                    opaqueInternalClientSecretVerifier = DefaultOpaqueInternalClientSecretVerifier(secrets),
+                    opaqueInternalClientSecretVerifier = lazyOf(DefaultOpaqueInternalClientSecretVerifier(secrets)),
                     clientRegistrationStore = InMemoryClientRegistrationStore(),
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                 )
             }
 
@@ -461,10 +461,10 @@ class ConfigAwareClientRegistryTest {
                                 servers = mapOf("platform" to OAuth2ServerInstanceConfig()),
                             ),
                         ),
-                    opaqueInternalClientSecretVerifier = DefaultOpaqueInternalClientSecretVerifier(secrets),
+                    opaqueInternalClientSecretVerifier = lazyOf(DefaultOpaqueInternalClientSecretVerifier(secrets)),
                     clientRegistrationStore = InMemoryClientRegistrationStore(),
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                 )
 
             val viewResult = registry.resolveClientRegistryRequestView()
@@ -509,12 +509,12 @@ class ConfigAwareClientRegistryTest {
                         },
                     serversConfigProvider = serversConfigProvider,
                     opaqueInternalClientSecretVerifier =
-                        DefaultOpaqueInternalClientSecretVerifier(
+                        lazyOf(DefaultOpaqueInternalClientSecretVerifier(
                             resolvingOpaqueSecrets(mapOf(secretId to "shared-secret")),
-                        ),
+                        )),
                     clientRegistrationStore = InMemoryClientRegistrationStore(),
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                 )
 
             val clientId = "tenant-as-service:$tenantId"
@@ -578,10 +578,10 @@ class ConfigAwareClientRegistryTest {
                             override fun currentAsInstanceId(): String? = null
                         },
                     serversConfigProvider = TestOAuth2ServersConfigProvider(OAuth2ServersConfig()),
-                    opaqueInternalClientSecretVerifier = DefaultOpaqueInternalClientSecretVerifier(secrets),
+                    opaqueInternalClientSecretVerifier = lazyOf(DefaultOpaqueInternalClientSecretVerifier(secrets)),
                     clientRegistrationStore = InMemoryClientRegistrationStore(),
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                 )
 
             assertNotNull(registry.getClient("operator-client").value)
@@ -617,10 +617,10 @@ class ConfigAwareClientRegistryTest {
                             override fun currentAsInstanceId(): String? = null
                         },
                     serversConfigProvider = TestOAuth2ServersConfigProvider(OAuth2ServersConfig()),
-                    opaqueInternalClientSecretVerifier = DefaultOpaqueInternalClientSecretVerifier(secrets),
+                    opaqueInternalClientSecretVerifier = lazyOf(DefaultOpaqueInternalClientSecretVerifier(secrets)),
                     clientRegistrationStore = InMemoryClientRegistrationStore(),
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                     // A new inbound request receives a new SessionScope memoizer. This models a
                     // just-provisioned docs client whose invalidation event has not yet advanced
                     // the old request's property-source revision.
@@ -678,10 +678,10 @@ class ConfigAwareClientRegistryTest {
                             override fun currentAsInstanceId(): String? = null
                         },
                     serversConfigProvider = TestOAuth2ServersConfigProvider(OAuth2ServersConfig()),
-                    opaqueInternalClientSecretVerifier = DefaultOpaqueInternalClientSecretVerifier(secrets),
+                    opaqueInternalClientSecretVerifier = lazyOf(DefaultOpaqueInternalClientSecretVerifier(secrets)),
                     clientRegistrationStore = InMemoryClientRegistrationStore(),
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                     configuredClientSetMemoizer = memoizer,
                 )
             }
@@ -724,10 +724,10 @@ class ConfigAwareClientRegistryTest {
                         },
                     serversConfigProvider = OAuth2ServersConfigBinder(execution, com.sphereon.oauth2.common.config.DefaultOAuth2ServerInstanceIdProvider()),
                     opaqueInternalClientSecretVerifier =
-                        DefaultOpaqueInternalClientSecretVerifier(rejectingOpaqueSecrets),
+                        lazyOf(DefaultOpaqueInternalClientSecretVerifier(rejectingOpaqueSecrets)),
                     clientRegistrationStore = InMemoryClientRegistrationStore(),
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                 )
 
             assertTrue(registry.getClient("tenant-as-service:tenant-123").isErr)
@@ -766,12 +766,12 @@ class ConfigAwareClientRegistryTest {
                         },
                     serversConfigProvider = TestOAuth2ServersConfigProvider(OAuth2ServersConfig()),
                     opaqueInternalClientSecretVerifier =
-                        DefaultOpaqueInternalClientSecretVerifier(
+                        lazyOf(DefaultOpaqueInternalClientSecretVerifier(
                             resolvingOpaqueSecrets(resolvedSecrets),
-                        ),
+                        )),
                     clientRegistrationStore = InMemoryClientRegistrationStore(),
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                 )
 
             assertTrue(registry.verifyClientCredentials("issuer-service", "initial-secret").value)
@@ -879,10 +879,10 @@ class ConfigAwareClientRegistryTest {
                         ),
                     ),
                 opaqueInternalClientSecretVerifier =
-                    DefaultOpaqueInternalClientSecretVerifier(rejectingOpaqueSecrets),
+                    lazyOf(DefaultOpaqueInternalClientSecretVerifier(rejectingOpaqueSecrets)),
                 clientRegistrationStore = InMemoryClientRegistrationStore(),
                 clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                externalClientSources = emptySet(),
+                externalClientSources = lazyOf(emptySet()),
             )
 
         val registration = assertNotNull(registry.getClient("platform-operator-cli").value)
@@ -932,10 +932,10 @@ class ConfigAwareClientRegistryTest {
                         },
                     serversConfigProvider = TestOAuth2ServersConfigProvider(config),
                     opaqueInternalClientSecretVerifier =
-                        DefaultOpaqueInternalClientSecretVerifier(rejectingOpaqueSecrets),
+                        lazyOf(DefaultOpaqueInternalClientSecretVerifier(rejectingOpaqueSecrets)),
                     clientRegistrationStore = InMemoryClientRegistrationStore(),
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                 )
 
             val result = registry.getClient("tenant-as-service")
@@ -999,10 +999,10 @@ class ConfigAwareClientRegistryTest {
                                 servers = mapOf(SERVER_ID to OAuth2ServerInstanceConfig()),
                             ),
                         ),
-                    opaqueInternalClientSecretVerifier = DefaultOpaqueInternalClientSecretVerifier(rejectingOpaqueSecrets),
+                    opaqueInternalClientSecretVerifier = lazyOf(DefaultOpaqueInternalClientSecretVerifier(rejectingOpaqueSecrets)),
                     clientRegistrationStore = store,
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                 )
             val registration =
                 ClientRegistration(
@@ -1355,10 +1355,10 @@ class ConfigAwareClientRegistryTest {
                         servers = mapOf(SERVER_ID to OAuth2ServerInstanceConfig(clientRegistrySourcePrecedence = precedence)),
                     ),
                 ),
-            opaqueInternalClientSecretVerifier = DefaultOpaqueInternalClientSecretVerifier(secrets),
+            opaqueInternalClientSecretVerifier = lazyOf(DefaultOpaqueInternalClientSecretVerifier(secrets)),
             clientRegistrationStore = store,
             clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-            externalClientSources = externalClientSources,
+            externalClientSources = lazyOf(externalClientSources),
         )
     }
 
@@ -1404,10 +1404,10 @@ class ConfigAwareClientRegistryTest {
                             override fun currentAsInstanceId(): String? = null
                         },
                     serversConfigProvider = serversConfigProvider,
-                    opaqueInternalClientSecretVerifier = DefaultOpaqueInternalClientSecretVerifier(secrets),
+                    opaqueInternalClientSecretVerifier = lazyOf(DefaultOpaqueInternalClientSecretVerifier(secrets)),
                     clientRegistrationStore = store,
                     clientSecretHasher = ClientSecretHasher(defaultSecureRandom()),
-                    externalClientSources = emptySet(),
+                    externalClientSources = lazyOf(emptySet()),
                 )
             storeClient(store, clientName = "persisted", secret = "persisted-secret")
 

@@ -159,7 +159,7 @@ class MdocDeviceSigningKeySelectionTest {
             }
 
         assertEquals(
-            "Managed mdoc device signing requires a kid in the Mobile Security Object device key",
+            "Managed mdoc device signing without an MSO kid requires resolved public key material",
             exception.message,
         )
     }

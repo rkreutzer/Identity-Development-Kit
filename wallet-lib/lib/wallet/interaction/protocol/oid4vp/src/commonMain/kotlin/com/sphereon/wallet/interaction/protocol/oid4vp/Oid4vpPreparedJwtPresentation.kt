@@ -4,13 +4,17 @@ package com.sphereon.wallet.interaction.protocol.oid4vp
 import com.sphereon.core.api.encodeToHex
 import com.sphereon.crypto.core.generic.DigestAlg
 import com.sphereon.crypto.core.generic.hash
+import com.sphereon.crypto.core.jose.Jwk
+import com.sphereon.crypto.core.jose.tryGenerateJwkThumbprint
 import com.sphereon.openid.oid4vp.holder.*
 import com.sphereon.openid.oid4vp.common.ResponseMode
 import com.sphereon.openid.oid4vp.common.responseUri
+import com.sphereon.openid.oid4vp.common.selectEncryptedResponseJwk
 import com.sphereon.wallet.interaction.*
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 
 /** Private protocol facts, not authorization. The existing listed grant authorizes every signature. */
 @Serializable
@@ -95,3 +99,30 @@ internal data class Oid4vpPreparedJwtPresentation(
 
 internal fun Oid4vpPreparedJwtSigning.approvalOperation(): WalletApprovalOperation =
     WalletApprovalOperation(keyRef = key.keyRef ?: key.keyId, operationHash = operationHash)
+
+/**
+ * The holder approval for these prepared signings, naming the one wallet account that owns their
+ * keys; null when the prepared signings disagree on that account.
+ */
+internal fun Oid4vpPreparedJwtPresentation.approvalRequired(): Oid4vpPresentationPreparation.ApprovalRequired? {
+    val accounts = (signing.map { it.walletAccountId } + mdocSigning.map { it.walletAccountId }).filterNotNull().distinct()
+    if (accounts.size > 1) return null
+    return Oid4vpPresentationPreparation.ApprovalRequired(operations, accounts.singleOrNull())
+}
+
+/**
+ * Whether this prepared JWE recipient binding still names the verifier's response-encryption key.
+ *
+ * OID4VP 1.0 Annex B.2.6.1 binds the mdoc SessionTranscript to the RFC 7638 SHA-256 thumbprint of
+ * the verifier JWK the response is encrypted to, and §8.3 takes that key from the request's
+ * `client_metadata.jwks`. The stored thumbprint must therefore be the thumbprint of the stored
+ * public JWK, and that JWK must be the request's selected encryption key.
+ */
+internal fun PreparedOid4vpJweRecipientBinding.matchesVerifierEncryptionKey(request: ResolvedOid4vpRequest): Boolean {
+    val stored = runCatching { Json.parseToJsonElement(publicJwkJson).jsonObject }.getOrNull() ?: return false
+    val storedJwk = Jwk.tryFromJsonObject(stored).getOrElse { return false }
+    val requestJwk = request.clientMetadata?.selectEncryptedResponseJwk() ?: return false
+    val storedThumbprint = tryGenerateJwkThumbprint(storedJwk).getOrElse { return false }
+    val requestThumbprint = tryGenerateJwkThumbprint(requestJwk).getOrElse { return false }
+    return storedThumbprint == rfc7638Thumbprint && requestThumbprint == rfc7638Thumbprint
+}

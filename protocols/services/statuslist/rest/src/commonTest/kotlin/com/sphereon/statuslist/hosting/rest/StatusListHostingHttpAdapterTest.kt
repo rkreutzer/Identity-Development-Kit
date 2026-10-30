@@ -13,18 +13,21 @@ import com.sphereon.core.api.http.describe.HttpAdapterMount
 import com.sphereon.core.api.http.dispatch.HttpAdapterRouteMatch
 import com.sphereon.core.api.service.TypedServiceCommandAdapter
 import com.sphereon.statuslist.StatusListContentTypes
+import com.sphereon.statuslist.CreateStatusListArgs
 import com.sphereon.statuslist.StatusListHostingMode
 import com.sphereon.statuslist.StatusListRef
-import com.sphereon.statuslist.StatusListResult
 import com.sphereon.statuslist.StatusListSpec
 import com.sphereon.statuslist.StatusListToken
 import com.sphereon.statuslist.StatusProofFormat
-import com.sphereon.statuslist.StatusPurpose
-import com.sphereon.statuslist.command.GetStatusListCommand
 import com.sphereon.statuslist.command.GetStatusListTokenCommand
 import com.sphereon.statuslist.hosting.rest.command.GetStatusListTokenByCorrelationIdEndpointCommandImpl
 import com.sphereon.statuslist.hosting.rest.test.createTestAppConfigService
 import com.sphereon.statuslist.hosting.rest.test.createTestSessionExecution
+import com.sphereon.statuslist.impl.command.GetStatusListTokenCommandImpl
+import com.sphereon.statuslist.impl.driver.InMemoryStatusListDriver
+import com.sphereon.statuslist.impl.driver.InMemoryStatusListStore
+import com.sphereon.statuslist.spi.SignStatusListTokenArgs
+import com.sphereon.statuslist.spi.StatusListSigner
 import dev.zacsweers.metro.Provider
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
@@ -50,7 +53,6 @@ class StatusListHostingHttpAdapterTest {
         hostedToken: StatusListToken? = null,
     ) {
         val execution: SessionExecution = createTestSessionExecution()
-        val metadataStub = StubGetStatusList(execution, hostingMode)
         val tokenStub =
             StubGetToken(
                 execution,
@@ -58,6 +60,7 @@ class StatusListHostingHttpAdapterTest {
                     token = signedToken,
                     contentType = StatusListContentTypes.STATUSLIST_JWT,
                     ttlSeconds = ttlSeconds,
+                    hostingMode = hostingMode,
                 ),
             )
         val adapter =
@@ -67,7 +70,6 @@ class StatusListHostingHttpAdapterTest {
                     listOf(
                         GetStatusListTokenByCorrelationIdEndpointCommandImpl(
                             execution,
-                            metadataStub,
                             tokenStub,
                             hostingConfig,
                         ),
@@ -76,6 +78,76 @@ class StatusListHostingHttpAdapterTest {
     }
 
     private fun base(suffix: String) = StatusListHostingApiConstants.BASE_PATH + suffix
+
+    @Test
+    fun publicHostingResolvesTokenAndBitstringListsAcrossTenantContexts() =
+        runTest {
+            for ((spec, format, contentType) in listOf(
+                Triple(StatusListSpec.TOKEN_STATUS_LIST, StatusProofFormat.JWT, StatusListContentTypes.STATUSLIST_JWT),
+                Triple(StatusListSpec.BITSTRING_STATUS_LIST, StatusProofFormat.VC_JWT, StatusListContentTypes.VC_JWT),
+            )) {
+                for (mode in listOf(StatusListHostingMode.HOSTED, StatusListHostingMode.EXPORT)) {
+                    val store = InMemoryStatusListStore()
+                    val ownerExecution = createTestSessionExecution(tenantId = "owner-tenant")
+                    val publicExecution = createTestSessionExecution(tenantId = "public-tenant")
+                    val signer = object : StatusListSigner {
+                        override suspend fun signStatusListToken(args: SignStatusListTokenArgs): IdkResult<StatusListToken, IdkError> =
+                            Ok(StatusListToken(token = signedToken, contentType = contentType, ttlSeconds = 300))
+                    }
+                    val owner = InMemoryStatusListDriver(store, signer, ownerExecution)
+                    val publicDriver = InMemoryStatusListDriver(store, signer, publicExecution)
+                    val ref = StatusListRef(
+                        correlationId = "example-list",
+                        statusListUri = "https://issuer.example/public/statuslists/example-list",
+                    )
+                    val created = owner.createStatusList(CreateStatusListArgs(
+                        correlationId = "example-list",
+                        spec = spec,
+                        proofFormat = format,
+                        hostingMode = mode,
+                        issuer = "did:example:issuer",
+                        statusListUri = ref.statusListUri!!,
+                    ))
+                    assertEquals(true, created.isOk)
+                    // Public reads must not depend on management access to the owning tenant.
+                    assertNull(publicDriver.getStatusList(ref).getOrElse { error(it.toString()) })
+                    val token = assertNotNull(publicDriver.getStatusListToken(ref).getOrElse { error(it.toString()) })
+                    val adapter = TestAdapter(publicExecution, listOf(
+                        GetStatusListTokenByCorrelationIdEndpointCommandImpl(
+                            publicExecution,
+                            GetStatusListTokenCommandImpl(publicExecution, publicDriver),
+                            StatusListHostingConfig(),
+                        ),
+                    ))
+                    val response = adapter.dispatch(GenericHttpRequest.withTextBody(
+                        method = "GET",
+                        path = base("/example-list"),
+                        body = null,
+                        headers = mapOf("Host" to "issuer.example", "X-Forwarded-Proto" to "https"),
+                    ))
+                    assertEquals(if (mode == StatusListHostingMode.HOSTED) 200 else 404, response.statusCode, "$spec / $mode")
+                    if (mode == StatusListHostingMode.HOSTED) {
+                        assertEquals(contentType, response.contentType)
+                        assertEquals(token.rawBytes().toList(), response.bodyBytes?.toList())
+                        assertEquals("public, max-age=300", response.headers["Cache-Control"])
+                    }
+                    // A same-named list in the request tenant must not supply the publication mode.
+                    assertEquals(true, publicDriver.createStatusList(CreateStatusListArgs(
+                        correlationId = "example-list",
+                        spec = spec,
+                        proofFormat = format,
+                        hostingMode = if (mode == StatusListHostingMode.HOSTED) StatusListHostingMode.EXPORT else StatusListHostingMode.HOSTED,
+                        issuer = "did:example:other-issuer",
+                        statusListUri = "https://other.example/public/statuslists/example-list",
+                    )).isOk)
+                    val collisionResponse = adapter.dispatch(GenericHttpRequest.withTextBody(
+                        method = "GET", path = base("/example-list"), body = null,
+                        headers = mapOf("Host" to "issuer.example", "X-Forwarded-Proto" to "https"),
+                    ))
+                    assertEquals(response.statusCode, collisionResponse.statusCode, "same correlation id must not change $spec / $mode hosting")
+                }
+            }
+        }
 
     @Test
     fun cwtHostingPreservesTaggedBinaryAndContentType() =
@@ -141,9 +213,8 @@ class StatusListHostingHttpAdapterTest {
             assertEquals(404, response.statusCode)
             assertEquals(
                 StatusListRef(correlationId = "export-only", statusListUri = "http://localhost/public/statuslists/export-only"),
-                f.metadataStub.captured,
+                f.tokenStub.captured,
             )
-            assertEquals(null, f.tokenStub.captured)
         }
 
     @Test
@@ -199,45 +270,6 @@ class StatusListHostingHttpAdapterTest {
             assertFailsWith<IllegalArgumentException>("configuration '$configured' must fail closed") {
                 config.cacheMaxAgeSeconds
             }
-        }
-    }
-
-    private inner class StubGetStatusList(
-        execution: SessionExecution,
-        private val hostingMode: StatusListHostingMode,
-    ) : TypedServiceCommandAdapter<StatusListRef, StatusListResult, IdkError>(
-            commandId = GetStatusListCommand.COMMAND_ID,
-            execution = execution,
-            inputTypeToken = typeToken<StatusListRef>(),
-            outputTypeToken = typeToken<StatusListResult>(),
-        ),
-        GetStatusListCommand {
-        override val commandId: String get() = GetStatusListCommand.COMMAND_ID
-        var captured: StatusListRef? = null
-
-        override suspend fun doExecute(
-            args: StatusListRef,
-            applyDuring: (StatusListRef) -> StatusListRef,
-        ): IdkResult<StatusListResult, IdkError> {
-            val ref = applyDuring(args)
-            captured = ref
-            val correlationId = ref.correlationId ?: "sl-1"
-            return Ok(
-                StatusListResult(
-                    id = "sl-1",
-                    correlationId = correlationId,
-                    spec = StatusListSpec.TOKEN_STATUS_LIST,
-                    purposes = listOf(StatusPurpose.REVOCATION),
-                    proofFormat = StatusProofFormat.JWT,
-                    hostingMode = hostingMode,
-                    bitsPerStatus = 1,
-                    length = 131_072,
-                    issuer = "did:example:issuer",
-                    statusListUri = ref.statusListUri ?: "http://localhost/public/statuslists/$correlationId",
-                    signedToken = signedToken,
-                    contentType = StatusListContentTypes.STATUSLIST_JWT,
-                ),
-            )
         }
     }
 

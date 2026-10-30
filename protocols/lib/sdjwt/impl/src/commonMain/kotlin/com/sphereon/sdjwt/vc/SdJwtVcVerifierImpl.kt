@@ -79,7 +79,7 @@ internal class SdJwtVcVerifierImpl(
         }
 
         // Step 2: Extract and validate VCT claim
-        val vct = fullPayload["vct"]?.jsonPrimitive?.content
+        val vct = SdJwtVcClaims.vct(fullPayload)
         if (vct.isNullOrBlank()) {
             return IdkResult.err(
                 SdJwtVcVerificationError.InvalidVct("VCT claim is missing or empty"),
@@ -207,7 +207,7 @@ internal class SdJwtVcVerifierImpl(
         }
 
         // Step 3: Extract and validate VCT claim
-        val vct = fullPayload["vct"]?.jsonPrimitive?.content
+        val vct = SdJwtVcClaims.vct(fullPayload)
         if (vct.isNullOrBlank()) {
             return IdkResult.err(
                 SdJwtVcVerificationError.InvalidVct("VCT claim is missing or empty"),

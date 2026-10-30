@@ -38,7 +38,7 @@ import com.sphereon.crypto.core.KeyType
 import com.sphereon.crypto.resolution.managed.ManagedOptsKeyInfo
 import com.sphereon.di.session.SessionScope
 import com.sphereon.oauth2.common.config.OAuth2ServersConfigProvider
-import com.sphereon.oauth2.common.config.OAuth2ServerInstanceIdProvider
+import com.sphereon.oauth2.common.config.MutableOAuth2ServerInstanceIdProvider
 import com.sphereon.oauth2.common.config.TokenFormat
 import com.sphereon.oauth2.server.authorization.command.CreateAccessTokenArgs
 import com.sphereon.oauth2.server.authorization.command.CreateAccessTokenCommand
@@ -51,11 +51,14 @@ import com.sphereon.oauth2.server.authorization.impl.config.OAuth2SigningKeyUnav
 import com.sphereon.oauth2.server.authorization.model.AccessTokenData
 import com.sphereon.oauth2.server.authorization.signing.AsServerSigningIdentifierResolver
 import com.sphereon.oauth2.server.authorization.signing.AsSigningRequirement
+import com.sphereon.oauth2.server.authorization.signing.AsServerJwsSigner
 import com.sphereon.oauth2.server.authorization.signing.CapturedAsServerConfig
 import com.sphereon.oauth2.server.authorization.storage.TokenStorage
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.Named
 import dev.zacsweers.metro.SingleIn
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -103,9 +106,11 @@ class CreateAccessTokenCommandImpl(
     private val tokenStorage: TokenStorage,
     private val secureRandom: SecureRandom,
     private val configProvider: OAuth2ServersConfigProvider,
-    private val asInstanceIdProvider: OAuth2ServerInstanceIdProvider,
+    private val asInstanceIdProvider: MutableOAuth2ServerInstanceIdProvider,
     private val signingIdentifierResolver: AsServerSigningIdentifierResolver,
     private val eventService: SessionEventService? = null,
+    private val asServerJwsSigner: AsServerJwsSigner =
+        AsServerJwsSigner { _, args -> jwtService.createJwsCompact(args) },
 ) : TypedServiceCommandAdapter<CreateAccessTokenArgs, StringResult, IdkError>(
         commandId = CreateAccessTokenCommand.COMMAND_ID,
         execution = execution,
@@ -113,6 +118,10 @@ class CreateAccessTokenCommandImpl(
         outputTypeToken = typeToken<StringResult>(),
     ),
     CreateAccessTokenCommand {
+    // The selected server is shared with signing collaborators for this session. Keep
+    // capture, temporary selection and restoration within one invocation boundary.
+    private val issuanceMutex = Mutex()
+
     override val commandId: String get() = CreateAccessTokenCommand.COMMAND_ID
 
     override suspend fun supports(args: Any): Boolean = args is CreateAccessTokenArgs
@@ -120,15 +129,24 @@ class CreateAccessTokenCommandImpl(
     override suspend fun doExecute(
         args: CreateAccessTokenArgs,
         applyDuring: (CreateAccessTokenArgs) -> CreateAccessTokenArgs,
+    ): IdkResult<StringResult, IdkError> = issuanceMutex.withLock {
+        executeSelected(args, applyDuring)
+    }
+
+    private suspend fun executeSelected(
+        args: CreateAccessTokenArgs,
+        applyDuring: (CreateAccessTokenArgs) -> CreateAccessTokenArgs,
     ): IdkResult<StringResult, IdkError> {
         val applied = applyDuring(args)
         val root = configProvider.getConfig()
         val captured =
             try {
-                CapturedAsServerConfig.select(root, asInstanceIdProvider.currentAsInstanceId())
+                CapturedAsServerConfig.select(root, applied.serverId ?: asInstanceIdProvider.currentAsInstanceId())
             } catch (expected: IllegalArgumentException) {
+                log.error("OAuth2 token issuance failed command=$commandId stage=server-selection error_type=IllegalArgumentException")
                 return Err(IdkError.INVALID_STATE(message = expected.message ?: "Invalid authorization server selection"))
             } catch (expected: IllegalStateException) {
+                log.error("OAuth2 token issuance failed command=$commandId stage=server-selection error_type=IllegalStateException")
                 return Err(IdkError.INVALID_STATE(message = expected.message ?: "Authorization server selection failed"))
             }
         val config = captured.server
@@ -167,7 +185,9 @@ class CreateAccessTokenCommandImpl(
             }
 
         val timings = TokenPathStageTimings(operation = "access-token-mint")
-        val result =
+        val previousServerId = asInstanceIdProvider.currentAsInstanceId()
+        captured.serverKey?.let(asInstanceIdProvider::setCurrentAsInstanceId)
+        val result = try {
             executeInternal(
                 timings,
                 applied.subject,
@@ -184,6 +204,10 @@ class CreateAccessTokenCommandImpl(
                 issuerUrl,
                 captured,
             ).map { StringResult(it) }.mapError { IdkError.fromDTO(it) }
+        } finally {
+            if (previousServerId == null) asInstanceIdProvider.clearCurrentAsInstanceId()
+            else asInstanceIdProvider.setCurrentAsInstanceId(previousServerId)
+        }
         timings.report(log, if (result.isOk) "success" else "failed")
         emitOutcome(applied, result)
         return result
@@ -390,8 +414,9 @@ class CreateAccessTokenCommandImpl(
 
             val jwtResult =
                 timings
-                    .record(TokenPathStage.JWS_SIGNING) { jwtService.createJwsCompact(jwsArgs) }
+                    .record(TokenPathStage.JWS_SIGNING) { asServerJwsSigner.sign(captured, jwsArgs) }
                     .mapError { error ->
+                        log.error("OAuth2 token issuance failed command=$commandId stage=access-token-signing idk_code=${error.code}")
                         AuthorizationServerError.ServerError(
                             details = "Failed to sign access token: ${error.message.defaultMessage}",
                             exception = error.exception,
@@ -428,6 +453,7 @@ class CreateAccessTokenCommandImpl(
             timings
                 .record(TokenPathStage.TOKEN_STORAGE) { tokenStorage.storeAccessToken(accessToken, tokenData) }
                 .mapError { error ->
+                    log.error("OAuth2 token issuance failed command=$commandId stage=access-token-storage oauth2_error=${error.code}")
                     AuthorizationServerError.ServerError(
                         details = "Failed to store access token: $error",
                         exception = null,
@@ -436,6 +462,7 @@ class CreateAccessTokenCommandImpl(
 
             Ok(accessToken)
         } catch (expected: OAuth2SigningKeyUnavailableException) {
+            log.error("OAuth2 token issuance failed command=$commandId stage=signing-key-resolution oauth2_error=temporarily_unavailable")
             Err(
                 AuthorizationServerError.TemporarilyUnavailable(
                     retryAfterSeconds = 5,
@@ -445,6 +472,7 @@ class CreateAccessTokenCommandImpl(
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (expected: Exception) {
+            log.error("OAuth2 token issuance failed command=$commandId stage=access-token-mint error_type=${expected::class.simpleName}")
             Err(
                 AuthorizationServerError.ServerError(
                     details = "Access token creation failed: ${expected.message}",
@@ -501,6 +529,7 @@ class CreateAccessTokenCommandImpl(
         return tokenStorage
             .storeAccessToken(accessToken, tokenData)
             .mapError { error ->
+                log.error("OAuth2 token issuance failed command=$commandId stage=access-token-storage oauth2_error=${error.code}")
                 AuthorizationServerError.ServerError(
                     details = "Failed to store access token: $error",
                     exception = null,

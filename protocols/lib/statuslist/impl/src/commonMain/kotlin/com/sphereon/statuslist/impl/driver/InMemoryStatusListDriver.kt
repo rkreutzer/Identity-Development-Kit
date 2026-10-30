@@ -163,7 +163,10 @@ class InMemoryStatusListStore {
     internal suspend fun getToken(
         tenantId: String,
         ref: StatusListRef
-    ): StatusListToken? = mutex.withLock { resolveHostedList(tenantId, ref)?.signedToken }
+    ): StatusListToken? = mutex.withLock {
+        val state = resolveHostedList(tenantId, ref) ?: return@withLock null
+        state.signedToken?.copy(hostingMode = state.args.hostingMode)
+    }
 
     internal suspend fun updateToken(
         tenantId: String,

@@ -125,6 +125,7 @@ class SdJwtVctDesignMapper : CredentialDesignMapper<SdJwtVcTypeMetadata> {
                 ClaimInformation(
                     path = path,
                     display = displayList.ifEmpty { null },
+                    mandatory = claim.mandatory,
                     sd = mapSdPolicyReverse(claim.sdPolicy),
                     svgId = claim.svgId,
                 )

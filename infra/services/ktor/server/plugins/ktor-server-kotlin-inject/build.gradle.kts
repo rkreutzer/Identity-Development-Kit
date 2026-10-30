@@ -122,3 +122,6 @@ tasks.withType<PublishToMavenRepository>().configureEach {
 tasks.withType<PublishToMavenLocal>().configureEach {
     notCompatibleWithConfigurationCache("Publishing tasks are not compatible with configuration cache due to vanniktech maven publish plugin")
 }
+
+// Opt-in exact JVM CIO owner; absence preserves the ordinary public build.
+apply(from = file("gradle/cio-runtime-verification.gradle.kts"))

@@ -171,6 +171,8 @@ data class CreateAuthorizationRequestArgs(
     /** Selects atomic durable creation; the original request must match on replay. */
     val operationFingerprint: String? = null,
     val templateRevision: String? = null,
+    /** Browser origins permitted to present a signed DC API request (OID4VP Appendix A.2). */
+    val expectedOrigins: List<String>? = null,
 )
 
 /**
@@ -290,6 +292,13 @@ data class ValidateAuthorizationResponseArgs(
      * one from `jwk`, `jku`, `x5c`, or `kid` values in the presented JWT.
      */
     val trustedAuthentications: List<TrustedAuthenticationResolution> = emptyList(),
+    /**
+     * Verifier-owned on-demand credential-issuer authentication, consulted for a credential issuer that no
+     * entry of [trustedAuthentications] names. Its result is admitted material, never presented key material.
+     */
+    @kotlinx.serialization.Transient
+    @JsExportIgnoreCompat
+    val credentialIssuerAuthenticationLookup: CredentialIssuerAuthenticationLookup? = null,
     /** Verifier-owned exact-reference Data Integrity trust policy for non-DID methods. */
     @kotlinx.serialization.Transient
     val verificationMethodResolutionPolicy: VerificationMethodResolutionPolicy = VerificationMethodResolutionPolicy.empty(),
@@ -311,6 +320,8 @@ data class ValidateAuthorizationResponseArgs(
     @kotlinx.serialization.Transient
     @JsExportIgnoreCompat
     val iso18013MdocGeneratedNonce: String? = null,
+    /** Server-resolved session key when DC API omits the wire `state` parameter. */
+    val sessionCorrelationId: String? = null,
 )
 
 /**
@@ -354,6 +365,11 @@ data class MatchedCredential(
     val issuer: CredentialIssuerRef? = null,
     val trust: CredentialTrustValidation? = null,
     val verificationEvidence: VerifiedCredentialEvidence? = null,
+    /**
+     * The digital credential type of the verified credential: the SD-JWT VC `vct`, the mdoc docType,
+     * or the most specific W3C VCDM `type`. Null when the format carries no type.
+     */
+    val credentialType: String? = null,
 )
 
 /**
@@ -381,9 +397,9 @@ data class VerifyHolderBindingArgs(
     /** Purpose-tagged sources admitted for holder or credential-issuer authentication. */
     val trustedAuthentications: List<TrustedAuthenticationResolution> = emptyList(),
     /**
-     * mDoc-only: the verifier's OID4VP `client_id` (after §5.9.3 prefixing). Used with
-     * [responseUri] and [verifierEncryptionJwkThumbprint] to reconstruct the
-     * SessionTranscript per OID4VP 1.0 final §B.2.6. Ignored for SD-JWT and JWT VP.
+     * mDoc-only: the verifier's OID4VP `client_id` (after §5.9.3 prefixing). For
+     * direct-post this is combined with [responseUri]; for DC API the raw
+     * [callerOrigin] is used instead. Ignored for SD-JWT and JWT VP.
      */
     val clientId: String? = null,
     /**
@@ -431,6 +447,10 @@ data class VerifyHolderBindingArgs(
     @kotlinx.serialization.Transient
     @JsExportIgnoreCompat
     val iso18013MdocGeneratedNonce: String? = null,
+    /** Persisted OID4VP response mode; selects the DC API mdoc handover when applicable. */
+    val responseMode: String? = null,
+    /** Raw browser Origin validated against the signed request's expected_origins. */
+    val callerOrigin: String? = null,
 ) {
     init {
         require((credentialFormat == null) xor (presentationFormat == null)) {
@@ -640,6 +660,10 @@ data class HandleDirectPostResponseArgs(
      * trust-domain policy. They must never be synthesized from key material in the submitted token.
      */
     val trustedAuthentications: List<TrustedAuthenticationResolution> = emptyList(),
+    /** Verifier-owned on-demand credential-issuer authentication, forwarded to response validation. */
+    @kotlinx.serialization.Transient
+    @JsExportIgnoreCompat
+    val credentialIssuerAuthenticationLookup: CredentialIssuerAuthenticationLookup? = null,
     /** Exact-reference trust policy for non-DID Data Integrity verification methods. */
     @kotlinx.serialization.Transient
     val verificationMethodResolutionPolicy: VerificationMethodResolutionPolicy = VerificationMethodResolutionPolicy.empty(),
@@ -657,6 +681,8 @@ data class HandleDirectPostResponseArgs(
     @kotlinx.serialization.Transient
     @JsExportIgnoreCompat
     val iso18013MdocGeneratedNonce: String? = null,
+    /** Server-resolved session key for DC API responses, which have no wire `state`. */
+    val sessionCorrelationId: String? = null,
 )
 
 /**

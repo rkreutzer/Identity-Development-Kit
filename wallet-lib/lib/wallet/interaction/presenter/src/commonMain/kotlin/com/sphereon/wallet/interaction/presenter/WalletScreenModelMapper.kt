@@ -240,6 +240,9 @@ private fun projection(state: WalletInteractionState): WalletInteractionScreenPr
                             stage = WalletAttendedAuthorizationStagePresentation.READY,
                             reasonKey = challenge.reasonKey,
                             reasonArguments = challenge.arguments,
+                            operations = challenge.operations.map {
+                                WalletAuthorizationOperationPresentation(it.keyRef, it.operationHash)
+                            },
                         ),
                     )
                 }
@@ -318,6 +321,7 @@ private fun WalletInteractionStatus.toPresentation(): WalletInteractionStatusPre
  */
 private fun WalletCounterpartySummary?.toPresentation(trust: com.sphereon.wallet.interaction.WalletCounterpartyTrustSummary?): WalletPartyPresentation? =
     this?.partyId?.let { stablePartyId ->
+        val attested = trust?.takeIf { it.status == WalletTrustStatus.TRUSTED }?.organisation
         WalletPartyPresentation(
             partyId = stablePartyId,
             role =
@@ -326,13 +330,16 @@ private fun WalletCounterpartySummary?.toPresentation(trust: com.sphereon.wallet
                     WalletCounterpartyRole.VERIFIER -> WalletPartyRolePresentation.VERIFIER
                     WalletCounterpartyRole.MDOC_READER -> WalletPartyRolePresentation.MDOC_READER
                 },
+            // Authoritative organisation data, such as a Federation Entity Statement, takes precedence over
+            // self-declared metadata (OpenID4VP 1.0 section 5.1).
             displayName =
-                this.displayName.takeIf { this.displayNameSource != null }
+                attested?.name
+                    ?: this.displayName.takeIf { this.displayNameSource != null }
                     ?: trust?.takeIf { it.status == WalletTrustStatus.TRUSTED }?.sources?.firstNotNullOfOrNull { it.displayName?.takeIf(String::isNotBlank) }
                     ?: this.displayName,
-            legalName = null,
+            legalName = attested?.legalName,
             domain = null,
-            logoUri = this.logoUri,
+            logoUri = attested?.logoUri ?: this.logoUri,
             purposeKey = null,
             purposeArguments = emptyMap(),
             retentionKey = null,
@@ -429,13 +436,28 @@ private fun com.sphereon.wallet.interaction.WalletCounterpartyTrustSummary?.toPr
                                 displayName = hop.displayName,
                                 position = WalletTrustChainHopPositionPresentation.valueOf(hop.position.name),
                                 assertedBy = hop.assertedBy,
+                                organisation = hop.organisation?.toPresentation(),
                             )
                         },
                     links = WalletTrustChainLinksPresentation.valueOf(chain.links.name),
+                    trustMarks = chain.trustMarks,
                 )
             },
+        organisation = this?.takeIf { it.status == WalletTrustStatus.TRUSTED }?.organisation?.toPresentation(),
     )
 }
+
+private fun com.sphereon.wallet.interaction.WalletCounterpartyOrganisation.toPresentation(): WalletOrganisationPresentation =
+    WalletOrganisationPresentation(
+        name = name,
+        legalName = legalName,
+        contacts = contacts,
+        website = website?.takeIf { it.startsWith("https://") },
+        contactPage = contactPage?.takeIf { it.startsWith("https://") },
+        privacyPolicy = privacyPolicy?.takeIf { it.startsWith("https://") },
+        logoUri = logoUri,
+        attestedBy = attestedBy,
+    )
 
 private fun WalletCredentialBranding.toFace(issuer: WalletCounterpartySummary?): WalletCredentialFacePresentation =
     WalletCredentialFacePresentation(

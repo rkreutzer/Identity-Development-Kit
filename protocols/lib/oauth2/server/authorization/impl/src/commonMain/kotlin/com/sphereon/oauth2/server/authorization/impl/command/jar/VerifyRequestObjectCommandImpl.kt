@@ -64,6 +64,7 @@ import kotlin.experimental.ExperimentalObjCName
 import kotlin.native.ObjCName
 import kotlin.time.Clock
 import kotlin.time.Instant
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Server-side implementation of RFC 9101 (JAR) acceptance.
@@ -95,6 +96,7 @@ class VerifyRequestObjectCommandImpl(
     private val fetchRequestUriCommand: FetchRequestUriCommand,
     private val serversConfigProvider: OAuth2ServersConfigProvider,
     private val jtiStore: Lazy<ClientAssertionJtiStore>,
+    private val actualAsSelection: com.sphereon.oauth2.common.config.OAuth2ServerInstanceIdProvider,
 ) : TypedServiceCommandAdapter<VerifyRequestObjectArgs, VerifiedRequestObject, IdkError>(
         commandId = VerifyRequestObjectCommand.COMMAND_ID,
         execution = execution,
@@ -183,13 +185,14 @@ class VerifyRequestObjectCommandImpl(
             )
         }
 
+        // A present typ must be the JAR media type. An absent typ is decided once the client is known:
+        // only OpenID Federation RPs may omit it (see below).
         val typ = header["typ"]?.jsonPrimitive?.content
-        if (typ != VerifyRequestObjectCommand.JAR_JWT_TYP) {
-            return Err(
-                AuthorizationServerError.InvalidRequestObject(
-                    details = "JAR header 'typ' must be '${VerifyRequestObjectCommand.JAR_JWT_TYP}', got '$typ' (RFC 9101 §10.8)",
-                ),
-            )
+        val typError = AuthorizationServerError.InvalidRequestObject(
+            details = "JAR header 'typ' must be '${VerifyRequestObjectCommand.JAR_JWT_TYP}', got '$typ' (RFC 9101 §10.8)",
+        )
+        if (typ != null && typ != VerifyRequestObjectCommand.JAR_JWT_TYP) {
+            return Err(typError)
         }
 
         // RFC 9101 §6.1 + OIDC Core §6.1: the JAR's `iss` (and inner `client_id`) MUST match the
@@ -238,6 +241,30 @@ class VerifyRequestObjectCommandImpl(
                         details = "Unknown client '$resolvedClientId'",
                     ),
                 )
+
+        val federationProofRequired = client.authorizationRequestProofPolicy == com.sphereon.oauth2.server.authorization.model.AuthorizationRequestProofPolicy.FEDERATED_RP_ASYMMETRIC
+        // OpenID Federation 1.1 §12.1.1.1 defines the Request Object without typ, and RFC 9101 §10.8 notes
+        // that requiring it breaks OpenID Connect deployments. A federation RP may omit it; its Request Object
+        // still has to pass every Connect check below (no sub, signed iss and client_id, aud, jti, exp).
+        if (typ == null && !federationProofRequired) {
+            return Err(typError)
+        }
+        val federationScope = if (federationProofRequired) {
+            try { com.sphereon.oauth2.server.authorization.impl.command.authorization.captureFederationAuthorizationScope(execution, serversConfigProvider, actualAsSelection) }
+            catch (expected: IllegalArgumentException) { return Err(AuthorizationServerError.InvalidRequestObject(details = "Federation AS scope is unavailable")) }
+            catch (expected: IllegalStateException) { return Err(AuthorizationServerError.InvalidRequestObject(details = "Federation AS scope is unavailable")) }
+        } else null
+        if (federationScope != null && federationScope.issuer != args.issuer) {
+            return Err(AuthorizationServerError.InvalidRequestObject(details = "JAR issuer scope does not match the selected AS"))
+        }
+        if (federationProofRequired && (payload.containsKey("request") || payload.containsKey("request_uri"))) {
+            return Err(AuthorizationServerError.InvalidRequestObject(details = "Federation Request Object cannot contain request or request_uri"))
+        }
+        if ((client.singleUseRequestObjects || federationProofRequired) && (jarIss != resolvedClientId || jarClientId != resolvedClientId)) {
+            return Err(AuthorizationServerError.InvalidRequestObject(
+                details = "Federation JAR must contain both signed iss and client_id naming the RP Entity Identifier",
+            ))
+        }
 
         val pinnedAlg = client.requestObjectSigningAlg
         if (pinnedAlg != null && !pinnedAlg.equals(alg, ignoreCase = false)) {
@@ -344,19 +371,32 @@ class VerifyRequestObjectCommandImpl(
             )
         }
 
-        val nowSeconds = Clock.System.now().epochSeconds
-        val exp =
-            payload["exp"]?.jsonPrimitive?.long
-                ?: return Err(AuthorizationServerError.InvalidRequestObject(details = "JAR is missing 'exp' claim"))
-        if (nowSeconds > exp + VerifyRequestObjectCommand.CLOCK_SKEW_SECONDS) {
+        val now = Clock.System.now()
+        val skew = VerifyRequestObjectCommand.CLOCK_SKEW_SECONDS.seconds
+        val exp = numericDateInstant(payload["exp"])
+            ?: return Err(AuthorizationServerError.InvalidRequestObject(details = "JAR 'exp' must be a NumericDate"))
+        if (now > exp + skew) {
             return Err(AuthorizationServerError.InvalidRequestObject(details = "JAR has expired"))
         }
-        val iat = payload["iat"]?.jsonPrimitive?.long
-        if (iat != null && iat - VerifyRequestObjectCommand.CLOCK_SKEW_SECONDS > nowSeconds) {
-            return Err(AuthorizationServerError.InvalidRequestObject(details = "JAR 'iat' is in the future"))
+        if (payload.containsKey("iat")) {
+            val issuedAt = numericDateInstant(payload["iat"])
+                ?: return Err(AuthorizationServerError.InvalidRequestObject(details = "JAR 'iat' must be a NumericDate"))
+            if (issuedAt > now + skew) {
+                return Err(AuthorizationServerError.InvalidRequestObject(details = "JAR 'iat' is in the future"))
+            }
+        }
+        if (payload.containsKey("nbf")) {
+            val notBefore = numericDateInstant(payload["nbf"])
+                ?: return Err(AuthorizationServerError.InvalidRequestObject(details = "JAR 'nbf' must be a NumericDate"))
+            if (notBefore > now + skew) {
+                return Err(AuthorizationServerError.InvalidRequestObject(details = "JAR 'nbf' is in the future"))
+            }
+        }
+        if (federationProofRequired && exp <= now) {
+            return Err(AuthorizationServerError.InvalidRequestObject(details = "Federation JAR has expired"))
         }
 
-        if (client.singleUseRequestObjects) {
+        if (client.singleUseRequestObjects || federationProofRequired) {
             val soleAudience = (aud as? JsonPrimitive)?.content
                 ?: (aud as? kotlinx.serialization.json.JsonArray)?.singleOrNull()?.jsonPrimitive?.content
             if (soleAudience != args.issuer) {
@@ -367,18 +407,25 @@ class VerifyRequestObjectCommandImpl(
             }
             val jti = payload["jti"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
                 ?: return Err(AuthorizationServerError.InvalidRequestObject(details = "JAR is missing 'jti' claim"))
-            if (!jtiStore.value.recordIfNew(resolvedClientId, REQUEST_OBJECT_JTI_PREFIX + jti, Instant.fromEpochSeconds(exp))) {
+            if (!jtiStore.value.recordIfNew(resolvedClientId, REQUEST_OBJECT_JTI_PREFIX + jti, exp)) {
                 return Err(AuthorizationServerError.InvalidRequestObject(details = "JAR 'jti' has already been used"))
             }
         }
 
         // RFC 9101 §6.1: signed claims override the front-channel parameters.
-        val merged = mergeParameters(args.queryParameters, payload)
+        // RFC 9101 §6.3: no unsigned query fallback for federation authorization.
+        val merged = mergeParameters(if (federationProofRequired) emptyMap() else args.queryParameters, payload)
+        val evidence = if (federationScope == null) null else {
+            try { com.sphereon.oauth2.server.authorization.impl.command.authorization.VerifiedFederationAuthorizationEvidence.mint(federationScope, client, merged, exp) }
+            catch (expected: IllegalArgumentException) { return Err(AuthorizationServerError.InvalidRequestObject(details = "Federation authorization evidence is invalid")) }
+            catch (expected: IllegalStateException) { return Err(AuthorizationServerError.InvalidRequestObject(details = "Federation RP signing material is unavailable")) }
+        }
         return Ok(
             VerifiedRequestObject(
                 mergedParameters = merged,
                 clientId = resolvedClientId,
                 signingAlg = alg,
+                authorizationEvidence = evidence,
             ),
         )
     }
@@ -401,6 +448,20 @@ class VerifyRequestObjectCommandImpl(
             )
         }
         return Ok(body)
+    }
+
+    /** RFC 7519 NumericDate is a finite JSON number, including a fractional second. */
+    private fun numericDateInstant(value: JsonElement?): Instant? {
+        val number = (value as? JsonPrimitive)?.takeUnless { it.isString }?.content
+            ?.toDoubleOrNull()?.takeIf { it.isFinite() } ?: return null
+        val seconds = kotlin.math.floor(number)
+        if (seconds < Long.MIN_VALUE.toDouble() || seconds >= Long.MAX_VALUE.toDouble()) return null
+        val wholeSeconds = seconds.toLong()
+        val nanos = ((number - seconds) * 1_000_000_000).toLong()
+        val instant = try { Instant.fromEpochSeconds(wholeSeconds, nanos) }
+            catch (expected: IllegalArgumentException) { return null }
+        // Do not accept an out-of-range value if the time implementation saturates it.
+        return instant.takeIf { it.epochSeconds == wholeSeconds && it.nanosecondsOfSecond.toLong() == nanos }
     }
 
     private fun buildTrustedJwks(client: ClientRegistration): JsonObject? {

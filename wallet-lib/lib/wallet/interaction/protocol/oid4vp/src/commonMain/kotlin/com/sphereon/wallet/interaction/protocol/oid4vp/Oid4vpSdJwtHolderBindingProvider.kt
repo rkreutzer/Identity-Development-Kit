@@ -9,6 +9,7 @@ package com.sphereon.wallet.interaction.protocol.oid4vp
 import com.sphereon.core.api.Err
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
+import com.sphereon.core.api.decodeFromBase64Url
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.crypto.core.generic.SignatureAlgorithm
 import com.sphereon.openid.oid4vp.common.CredentialFormat
@@ -236,7 +237,8 @@ class SecureComponentOid4vpSdJwtHolderBindingProvider(
     }
 
     /**
-     * The KB-JWT MUST be signed by the key identified by the issued SD-JWT's `cnf.jwk`.
+     * The KB-JWT MUST be signed by the key identified by the issued SD-JWT's `cnf.jwk`
+     * or `cnf.kid` (for a did:jwk verification method).
      * Comparing only the alias would allow a lost or incorrectly re-provisioned alias to produce
      * a structurally valid presentation with a different key. Compare the RFC 7638 public key
      * members and fail before signing or submitting anything.
@@ -245,12 +247,14 @@ class SecureComponentOid4vpSdJwtHolderBindingProvider(
         undisclosedPayload: JsonObject,
         resolvedPublicJwkJson: String,
     ): IdkResult<Unit, IdkError> {
+        val confirmation = undisclosedPayload["cnf"] as? JsonObject
         val credentialJwk =
-            (undisclosedPayload["cnf"] as? JsonObject)?.get("jwk") as? JsonObject
+            (confirmation?.get("jwk") as? JsonObject)
+                ?: (confirmation?.get("kid") as? JsonPrimitive)?.contentOrNull?.let(::didJwkKey)
                 ?: return Err(
                     IdkError.fromString(
                         code = "oid4vp.key_binding_cnf_jwk_missing",
-                        message = "SD-JWT credential does not contain the required cnf.jwk holder binding",
+                        message = "SD-JWT credential does not contain a supported cnf.jwk or cnf.kid holder binding",
                     ),
                 )
         val resolvedJwk =
@@ -273,6 +277,12 @@ class SecureComponentOid4vpSdJwtHolderBindingProvider(
         return Ok(Unit)
     }
 
+}
+
+internal fun didJwkKey(verificationMethod: String): JsonObject? {
+    val parts = verificationMethod.removePrefix("did:jwk:").split('#')
+    if (!verificationMethod.startsWith("did:jwk:") || parts.size != 2 || parts[1] != "0" || parts[0].isEmpty()) return null
+    return runCatching { Json.parseToJsonElement(parts[0].decodeFromBase64Url().decodeToString()) as? JsonObject }.getOrNull()
 }
 
 internal fun samePublicKey(

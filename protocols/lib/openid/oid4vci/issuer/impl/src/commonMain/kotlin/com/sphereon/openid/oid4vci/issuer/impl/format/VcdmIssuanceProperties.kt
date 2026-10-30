@@ -12,7 +12,10 @@ import com.sphereon.core.api.Ok
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.openid.oid4vc.common.vcdm.VcdmVersion
 import com.sphereon.openid.oid4vci.issuer.format.IssuanceContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
@@ -50,12 +53,65 @@ internal fun mergeVcdmIssuanceProperties(
         )
     }
 
+    val termsOfUse =
+        context.federationEntityIdentifier?.let { entityIdentifier ->
+            federationTermsOfUse(properties[TERMS_OF_USE], entityIdentifier).getOrElse { return Err(it) }
+        }
+
     return Ok(
         buildJsonObject {
             properties.forEach { (name, value) -> put(name, value) }
+            termsOfUse?.let { put(TERMS_OF_USE, it) }
         },
     )
 }
+
+/**
+ * The `termsOfUse` of a credential issued by an OpenID Federation entity (DIIP v5 Appendix B): an
+ * entry of type `OpenIDFederation` whose `policyId` is the issuer's Entity Identifier, so a
+ * verifier can find the issuer's trust chain. `trustFramework` is optional in the profile and is
+ * omitted because the issuer has no authoritative name for the federation to put there.
+ *
+ * Caller-supplied terms of use are kept; the federation entry is appended, turning a single entry
+ * into an array. A caller-supplied `OpenIDFederation` entry is refused: only the issuer may state
+ * which federation entity it is.
+ */
+private fun federationTermsOfUse(
+    supplied: JsonElement?,
+    entityIdentifier: String,
+): IdkResult<JsonElement, IdkError> {
+    val federationEntry =
+        buildJsonObject {
+            put("type", OPENID_FEDERATION_TERMS_OF_USE_TYPE)
+            put("policyId", entityIdentifier)
+        }
+    val existing =
+        when (supplied) {
+            null -> return Ok(federationEntry)
+            is JsonObject -> listOf(supplied)
+            is JsonArray -> supplied.toList()
+            else -> return Err(invalidVcdmIssuance("termsOfUse must be an object or an array of objects"))
+        }
+    if (existing.any { it !is JsonObject }) {
+        return Err(invalidVcdmIssuance("termsOfUse must be an object or an array of objects"))
+    }
+    if (existing.any { (it as JsonObject).declaresType(OPENID_FEDERATION_TERMS_OF_USE_TYPE) }) {
+        return Err(invalidVcdmIssuance("an $OPENID_FEDERATION_TERMS_OF_USE_TYPE termsOfUse entry is set by the issuer and cannot be supplied"))
+    }
+    return Ok(JsonArray(existing + federationEntry))
+}
+
+private fun JsonObject.declaresType(type: String): Boolean =
+    when (val declared = this["type"]) {
+        is JsonPrimitive -> declared.isString && declared.content == type
+        is JsonArray -> declared.any { it is JsonPrimitive && it.isString && it.content == type }
+        else -> false
+    }
+
+private const val TERMS_OF_USE: String = "termsOfUse"
+
+/** `termsOfUse.type` naming an OpenID Federation entity as the issuer (DIIP v5 Appendix B). */
+internal const val OPENID_FEDERATION_TERMS_OF_USE_TYPE: String = "OpenIDFederation"
 
 internal fun invalidVcdmIssuance(message: String): IdkError =
     IdkError.fromString(code = "invalid_vcdm_credential", message = message)

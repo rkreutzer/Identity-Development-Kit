@@ -23,6 +23,8 @@ import com.sphereon.crypto.core.KeyVisibility
 import com.sphereon.crypto.core.generic.KeyOperations
 import com.sphereon.crypto.core.generic.SignatureAlgorithm
 import com.sphereon.crypto.core.jose.JwkUse
+import com.sphereon.crypto.jose.jws.JwsCompact
+import com.sphereon.crypto.jose.jws.command.VerifyJwsArgs
 import com.sphereon.crypto.jose.jws.JwtServiceImpl
 
 import com.sphereon.crypto.resolution.managed.ManagedOptsKeyInfo
@@ -157,6 +159,50 @@ class CreateIdTokenSigningAlgorithmTest {
             command.execute(CreateIdTokenArgs(subject = "user-1", clientId = CLIENT_ID, accessToken = "access-token"))
         }
         assertTrue(escaped === cancellation || escaped.cause === cancellation)
+    }
+
+    @Test
+    fun mixedAlgorithmCollectionCannotAuthorizeAMismatchedSelectedHandle() = runTest {
+        val key = ctx.keyManagerService.generateKeyAsync(
+            alias = "id-token-mismatched-es256-key", use = JwkUse.sig,
+            keyOperations = arrayOf(KeyOperations.SIGN, KeyOperations.VERIFY),
+            alg = SignatureAlgorithm.ECDSA_SHA256, keyVisibility = KeyVisibility.PRIVATE,
+        )
+        val selected = ManagedOptsKeyInfo(KeyInfo<KeyType>(alias = key.alias, kid = key.kid,
+            providerId = key.providerId, signatureAlgorithm = SignatureAlgorithm.ECDSA_SHA256))
+        val resolver = object : AsServerSigningIdentifierResolver {
+            override suspend fun selectSigning(captured: CapturedAsServerConfig,
+                requirement: AsSigningRequirement, requestedAlgorithm: String?): AsSigningSelection {
+                assertEquals("default", captured.serverKey)
+                assertEquals(AsSigningRequirement.REQUIRED, requirement)
+                assertEquals("ES384", requestedAlgorithm)
+                return AsSigningSelection(selected, setOf("ES256", "ES384"))
+            }
+        }
+        val jwtService = (ctx.session.graph as JwtServiceImpl.Graph).jwtService
+        val command = CreateIdTokenCommandImpl(
+            execution = ctx.execution, jwtService = jwtService,
+            configProvider = TestOAuth2ServersConfigProvider(OAuth2ServersConfig(
+                servers = mapOf("default" to OAuth2ServerInstanceConfig(issuer = ISSUER,
+                    idTokenSigningAlgValuesSupported = setOf("ES256", "ES384"))),
+            )),
+            asInstanceIdProvider = fixedAsInstanceIdProvider(), signingIdentifierResolver = resolver,
+            clientRegistry = StubClientRegistry(mapOf(CLIENT_ID to ClientRegistration(
+                clientId = CLIENT_ID, grantTypes = listOf(GrantType.AUTHORIZATION_CODE),
+                idTokenSignedResponseAlg = "ES384",
+            ))), sessionParticipationRecorders = emptySet(), loginSessionIdProvider = NoOpLoginSessionIdProvider,
+        )
+        val result = command.execute(CreateIdTokenArgs(subject = "user-1", clientId = CLIENT_ID, accessToken = "access-token"))
+        // Before the repair, prove this is an actual correctly signed wrong-algorithm token,
+        // rather than mistaking an unrelated fixture/configuration error for the regression.
+        if (result.isOk) {
+            val token = result.value.value
+            val verification = jwtService.verifyJws(VerifyJwsArgs(jws = JwsCompact(token), identifier = selected))
+            assertTrue(verification.isOk && verification.value.isValid, "Unexpected signature fixture failure")
+            val header = Json.parseToJsonElement(token.split('.')[0].decodeFromBase64Url().decodeToString()) as JsonObject
+            assertEquals("ES256", header["alg"]?.jsonPrimitive?.contentOrNull)
+        }
+        assertTrue(result.isErr, "A requested ES384 algorithm cannot be satisfied by the selected ES256 handle")
     }
 
    private class RecordingSigningIdentifierResolver(

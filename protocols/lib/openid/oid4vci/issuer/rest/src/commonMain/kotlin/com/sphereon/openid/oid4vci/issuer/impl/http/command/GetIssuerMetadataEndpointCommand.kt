@@ -47,6 +47,7 @@ import com.sphereon.openid.oid4vci.issuer.command.BuildIssuerMetadataCommand
 import com.sphereon.openid.oid4vci.issuer.command.BuildSignedIssuerMetadataArgs
 import com.sphereon.openid.oid4vci.issuer.command.BuildSignedIssuerMetadataCommand
 import com.sphereon.openid.oid4vci.issuer.config.Oid4vciIssuerConfigProvider
+import com.sphereon.openid.oid4vci.issuer.impl.signing.IssuerKeyIdResolver
 import com.sphereon.openid.oid4vci.rest.Oid4vciRestConfigProvider
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
@@ -209,6 +210,23 @@ interface GetIssuerMetadataEndpointCommand : HttpEndpointCommand {
             return ENDPOINT.copy(pathPatterns = patterns)
         }
 
+        /**
+         * Issuer path named by a metadata request URL: the trailing path of the OID4VCI 1.0
+         * suffix form (`/.well-known/openid-credential-issuer/<issuer-path>`), the leading path of
+         * the legacy prefix form (`/<issuer-path>/.well-known/openid-credential-issuer`), or an
+         * empty string for the bare well-known URL. Returns `null` for a path that is not a
+         * metadata URL. The result is comparable with [extractIssuerPath].
+         */
+        fun requestedIssuerPath(requestPath: String): String? {
+            val path = requestPath.substringBefore('?').substringBefore('#').trimEnd('/')
+            return when {
+                path == BARE_PATH -> ""
+                path.startsWith("$BARE_PATH/") -> path.removePrefix(BARE_PATH)
+                path.endsWith(BARE_PATH) -> path.removeSuffix(BARE_PATH)
+                else -> null
+            }
+        }
+
         private const val SCHEME_SEPARATOR_LENGTH = 3
     }
 }
@@ -225,6 +243,7 @@ class GetIssuerMetadataEndpointCommandImpl(
     private val restConfigProvider: Oid4vciRestConfigProvider,
     private val multiManagedIdentifierService: MultiManagedIdentifierService,
     private val publicUrlResolver: Oid4vciIssuerPublicUrlResolver,
+    private val issuerKeyIdResolver: IssuerKeyIdResolver? = null,
 ) : HttpEndpointCommandAdapter(
         id = GetIssuerMetadataEndpointCommand.COMMAND_ID,
         execution = execution,
@@ -240,7 +259,26 @@ class GetIssuerMetadataEndpointCommandImpl(
         val publicUrls =
             publicUrlResolver
                 .resolve(request, configProvider, restConfigProvider)
-                .getOrElse { error -> return Err(error) }
+                .getOrElse { error ->
+                    // A selected issuer without an active public binding (ended or removed) has
+                    // no metadata. Answer 404 rather than a credential-request error.
+                    if (error.code == NOT_FOUND_ERROR_CODE) return Ok(issuerMetadataNotFound())
+                    return Err(error)
+                }
+
+        // The metadata URL names exactly one issuer. Dispatch strips the issuer path before this
+        // command runs, so compare against the ingress path. A path-bearing request is answered
+        // only by the issuer whose identifier carries that same path; anything else (an unknown
+        // or ended instance, a sibling chosen by a host-level or tenant-default binding, or a
+        // bare-origin issuer reached through an arbitrary suffix) is 404, never another issuer's
+        // metadata. The bare well-known URL keeps its existing resolution.
+        val requestedIssuerPath =
+            GetIssuerMetadataEndpointCommand.requestedIssuerPath(request.originalPath ?: request.path)
+        if (!requestedIssuerPath.isNullOrEmpty() &&
+            requestedIssuerPath != GetIssuerMetadataEndpointCommand.extractIssuerPath(publicUrls.issuerIdentifier)
+        ) {
+            return Ok(issuerMetadataNotFound())
+        }
 
         val acceptHeader = request.headers["Accept"] ?: request.headers["accept"] ?: ""
         val wantsJwt =
@@ -259,6 +297,11 @@ class GetIssuerMetadataEndpointCommandImpl(
         val resolvedRequestEncryption =
             resolveCredentialRequestEncryption(configProvider.credentialRequestEncryption)
                 .getOrElse { error -> return Err(error) }
+
+        // Federation consumers resolve protocol keys from this same served metadata.
+        // These are credential-scoped keys, separate from Entity Statement signing keys.
+        val signingJwks = issuerThumbprintSigningJwks(configProvider, issuerKeyIdResolver)
+            .getOrElse { error -> return Err(error) }
 
         val metadataResult =
             buildMetadataCommand.execute(
@@ -287,13 +330,14 @@ class GetIssuerMetadataEndpointCommandImpl(
                 // that tenant's host. Done BEFORE signing + JSON encode so both surfaces agree.
                 .withAbsoluteAssetUris(publicUrls.endpointBaseUrl)
                 .withHostedVctUrls(publicUrls.issuerIdentifier)
+                .let { metadata ->
+                    if (signingJwks == null) metadata
+                    else metadata.copy(additionalMetadata = metadata.additionalMetadata + ("jwks" to signingJwks))
+                }
 
         val signingKey = configProvider.signingKey()
 
-        if (wantsJwt) {
-            if (signingKey == null) {
-                return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Signed issuer metadata is not supported: no signing key configured"))
-            }
+        if (wantsJwt && signingKey != null) {
             return buildSignedMetadataCommand
                 .execute(
                     BuildSignedIssuerMetadataArgs(
@@ -452,6 +496,16 @@ fun String.toHostedVctUrl(externalBaseUrl: String?): String {
 fun String.isHostedVctMetadataUrl(): Boolean = indexOf(HOSTED_VCT_PATH_MARKER) >= 0
 
 private const val HOSTED_VCT_PATH_MARKER = "/public/schema/vct/"
+
+private const val NOT_FOUND_ERROR_CODE = "NOT_FOUND_ERROR"
+
+/** 404 for a metadata URL that names no published credential issuer. */
+private fun issuerMetadataNotFound(): GenericHttpResponse =
+    oid4vciErrorResponse(
+        statusCode = 404,
+        errorCode = "not_found",
+        description = "No credential issuer is published at this metadata URL",
+    )
 
 /** True when a `credential_request_encryption.jwks` value carries at least one real key. */
 private fun JsonObject.publishesKeys(): Boolean = (this["keys"] as? JsonArray)?.isNotEmpty() == true

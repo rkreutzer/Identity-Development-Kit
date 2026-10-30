@@ -29,6 +29,7 @@ import com.sphereon.oauth2.server.authorization.provider.UserCredentials
 import com.sphereon.oauth2.server.authorization.provider.UserInfo
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
+import dev.zacsweers.metro.Provider
 import dev.zacsweers.metro.SingleIn
 import dev.zacsweers.metro.binding
 
@@ -51,16 +52,26 @@ import dev.zacsweers.metro.binding
  * oauth2.user-provider.mode = federated | local | noop
  * ```
  */
-@Inject
 @SingleIn(SessionScope::class)
 @ContributesBinding(SessionScope::class, binding = binding<UserAuthenticationProvider>())
-class UserAuthenticationProviderDelegate(
-    private val providers: Map<String, UserAuthenticationProvider>,
+class UserAuthenticationProviderDelegate @Inject constructor(
+    providersFactory: () -> Map<String, Provider<UserAuthenticationProvider>>,
     private val configService: PrincipalConfigService,
 ) : UserAuthenticationProvider {
+    private val providers: Map<String, Provider<UserAuthenticationProvider>> by lazy(providersFactory)
+
+    /** Source-compatible constructor for callers that already own these dependencies. */
+    constructor(
+        providers: Map<String, UserAuthenticationProvider>,
+        configService: PrincipalConfigService,
+    ) : this(
+        providersFactory = { providers.mapValues { (_, provider) -> Provider { provider } } },
+        configService = configService,
+    )
+
     val selected: UserAuthenticationProvider by lazy {
         val mode = configService.getPropertyAsString(MODE_KEY)?.trim()?.lowercase() ?: DEFAULT_MODE
-        providers[mode]
+        providers[mode]?.invoke()
             ?: error(
                 "Unsupported $MODE_KEY: '$mode' (registered keys: ${providers.keys}). " +
                     "Set $MODE_KEY to one of those keys.",

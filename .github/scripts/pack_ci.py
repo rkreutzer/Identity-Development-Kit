@@ -272,11 +272,18 @@ def plan(root: Path, mode: str, publish: bool, environment: dict, remote_only: b
 PUBLIC_TARGETS = "jvm,js,wasmjs,linuxx64"
 
 
+def stage_targets(stage: dict, mode: str) -> str:
+    """Kotlin targets of one stage. Private checks stay JVM-only for speed, but every publication uses the
+    public target set: a snapshot replaces the Gradle module metadata of its coordinates, so a JVM-only
+    publish would drop the JS and wasm variants an earlier publish carried."""
+    return PUBLIC_TARGETS if mode == "public" or stage["phase"] == "publish" else "jvm"
+
+
 def command(root: Path, stage: dict, mode: str, repository: Path, remote_only: bool = False, refresh_dependencies: bool = False) -> list[str]:
     remote_only = remote_only or stage.get("remote_inputs", False)
     wrapper = root / ("gradlew.bat" if os.name == "nt" else "gradlew")
     arguments = [str(wrapper), "--project-dir", str(root / stage["pack"]), "--build-cache",
-                 "-Dkmp.targets=" + (PUBLIC_TARGETS if mode == "public" else "jvm"),
+                 "-Dkmp.targets=" + stage_targets(stage, mode),
                  "-Didk.ci.prerequisites=" + str(repository.resolve()),
                  "-Didk.ci.publish=" + str(stage["phase"] == "publish").lower(),
                  "--init-script", str(root / ".github/scripts/pack-ci.init.gradle"), *stage["tasks"]]

@@ -119,6 +119,32 @@ class InMemorySigningKeyStore(
         return result
     }
 
+    override suspend fun appendPreservingDefault(
+        key: OAuth2SigningKey,
+    ): IdkResult<OAuth2SigningKey, SigningKeyStoreError> = synchronizedWrite {
+        fun refused(details: String) = Err(SigningKeyStoreError.StorageFailure("appendPreservingDefault", details))
+        val now = clock.now()
+        if (key.tenantId.isBlank() || key.state != OAuth2SigningKeyState.ACTIVE || key.notBefore > now ||
+            key.keyInfo.alias.isNullOrBlank() || key.keyInfo.providerId.isNullOrBlank()
+        ) return@synchronizedWrite refused("An eligible tenant-owned ACTIVE signing descriptor is required")
+        val tenantKeys = keysByTenant[key.tenantId]
+            ?: return@synchronizedWrite refused("An eligible default signing key is required")
+        if (tenantKeys.containsKey(key.kid)) {
+            return@synchronizedWrite Err(SigningKeyStoreError.DuplicateKid(key.tenantId, key.kid))
+        }
+        val default = tenantKeys.values.filter {
+            it.state == OAuth2SigningKeyState.ACTIVE && it.notBefore <= now
+        }.maxWithOrNull(activePriorityOrder)
+            ?: return@synchronizedWrite refused("An eligible default signing key is required")
+        if (default.priority == Int.MIN_VALUE) {
+            return@synchronizedWrite refused("The default signing-key priority cannot be preserved without overflow")
+        }
+        val appended = key.copy(priority = default.priority - 1)
+        tenantKeys[appended.kid] = appended
+        advanceRevisionLocked(appended.tenantId)
+        Ok(appended)
+    }
+
     override suspend fun rotate(newActive: OAuth2SigningKey): IdkResult<RotationResult, SigningKeyStoreError> {
         val result =
             synchronizedWrite {

@@ -17,6 +17,7 @@
 
 package com.sphereon.di.session
 
+import com.sphereon.di.supervisedChild
 import com.sphereon.core.api.context.SessionExecution
 import com.sphereon.core.api.log.SessionLogManager
 import com.sphereon.di.context.SecuredTenantContextDetails
@@ -108,7 +109,7 @@ interface SessionScopedProviders {
     @ForScope(SessionScope::class)
     fun provideSessionCoroutineScope(
         @ForScope(SessionScope::class) sessionScopeCoroutineScopeScoped: CoroutineScopeScoped,
-    ): CoroutineScope = sessionScopeCoroutineScopeScoped.createChild()
+    ): CoroutineScope = sessionScopeCoroutineScopeScoped.supervisedChild()
 
     @Multibinds(allowEmpty = true)
     @ForScope(SessionScope::class)

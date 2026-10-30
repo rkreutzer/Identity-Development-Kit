@@ -27,6 +27,7 @@ import com.sphereon.core.api.context.SessionExecution
 import com.sphereon.core.api.decodeFrom
 import com.sphereon.core.api.encodeTo
 import com.sphereon.core.api.error.IdkError
+import com.sphereon.core.api.error.IdkErrorType
 import com.sphereon.core.api.service.TypedServiceCommandAdapter
 import com.sphereon.crypto.core.KeyInfo
 import com.sphereon.crypto.core.KeyInfoType
@@ -43,6 +44,7 @@ import com.sphereon.crypto.core.kms.KeyWrapAlgorithm
 import com.sphereon.crypto.core.kms.command.EcdhDeriveArgs
 import com.sphereon.crypto.core.kms.command.EcdhDeriveCommand
 import com.sphereon.crypto.core.kms.command.EcdhDeriveMode
+import kotlinx.coroutines.CancellationException
 import com.sphereon.crypto.jose.jwe.DecryptJweArgs
 import com.sphereon.crypto.jose.jwe.DecryptJweCommand
 import com.sphereon.crypto.jose.jwe.JweCompact
@@ -103,6 +105,14 @@ class DecryptJweCommandImpl(
     DecryptJweCommand {
     override val commandId: String get() = DecryptJweCommand.COMMAND_ID
 
+    private fun logDecryptionRefusal(stage: String, error: IdkErrorType) {
+        val code = error.code.takeIf { it.matches(Regex("[A-Za-z0-9_.:-]{1,160}")) } ?: "unavailable"
+        log.warn("JWE decryption refused stage=$stage code=$code")
+    }
+
+    private fun decryptionFailure(stage: String, message: String): IdkError =
+        IdkError.fromString(message).also { logDecryptionRefusal(stage, it) }
+
     override suspend fun doExecute(
         args: DecryptJweArgs,
         applyDuring: (DecryptJweArgs) -> DecryptJweArgs,
@@ -153,18 +163,23 @@ class DecryptJweCommandImpl(
         val keyAgreementAlg = KeyAgreementAlgorithm.fromIdentifier(keyAlgStr)
         val keyWrapAlg = KeyWrapAlgorithm.fromIdentifier(keyAlgStr)
 
-        // A provider-backed ECDH key is a handle, not private key material. Preserve that
-        // handle for provider-backed key agreement instead of resolving it in this
-        // process. Non-ECDH algorithms and caller-supplied local keys still use the normal
-        // managed-identifier resolution path.
+        // Provider-backed agreement and unwrap use an opaque handle. Preserve its provider,
+        // alias and kid through the guarded KMS operation, without exporting private material.
+        // Direct encryption needs the actual CEK; caller-supplied keys and unbound references
+        // continue through normal identifier resolution.
         val decryptorReference =
             (decryptor as? ManagedOptsKeyInfo)
+                ?.takeIf { it.lookup == it.identifier }
                 ?.identifier
-                ?.takeIf { keyAgreementAlg != null && it.isProviderBackedReference() }
+                ?.takeIf {
+                    (keyAgreementAlg != null || (keyWrapAlg != null && keyWrapAlg != KeyWrapAlgorithm.DIR)) &&
+                        it.isProviderBackedReference()
+                }
         val decryptorKeyInfo =
             decryptorReference ?: run {
                 val identifierResult = identifierService.resolve(decryptor)
                 if (!identifierResult.isOk) {
+                    logDecryptionRefusal("identifier-resolution", identifierResult.error)
                     return IdkResult.err(IdkError.fromDTO(identifierResult.error))
                 }
                 identifierResult.value.asResult().keyInfo
@@ -198,7 +213,8 @@ class DecryptJweCommandImpl(
                             algorithm = keyWrapAlg,
                         )
                     } catch (expected: Throwable) {
-                        return IdkResult.err(IdkError.fromString("Key unwrapping failed: ${expected.message}"))
+                        if (expected is CancellationException) throw expected
+                        return IdkResult.err(decryptionFailure("key-unwrap", "Key unwrapping failed"))
                     }
                 }
         } else {
@@ -223,7 +239,8 @@ class DecryptJweCommandImpl(
                     additionalAuthenticatedData = aad,
                 )
             } catch (expected: Throwable) {
-                return IdkResult.err(IdkError.fromString("Decryption failed: ${expected.message}"))
+                if (expected is CancellationException) throw expected
+                return IdkResult.err(decryptionFailure("content-decrypt", "Decryption failed"))
             }
 
         // Step 8: RFC 7516 §4.1.3 decompression — when `zip=DEF`, INFLATE the plaintext (raw
@@ -240,7 +257,8 @@ class DecryptJweCommandImpl(
                     try {
                         inflate(plaintext)
                     } catch (expected: Throwable) {
-                        return IdkResult.err(IdkError.fromString("Failed to INFLATE compressed JWE plaintext: ${expected.message}"))
+                        if (expected is CancellationException) throw expected
+                        return IdkResult.err(decryptionFailure("decompression", "Failed to INFLATE compressed JWE plaintext"))
                     }
                 }
 
@@ -543,12 +561,17 @@ class DecryptJweCommandImpl(
 
         val decryptorReference =
             (decryptor as? ManagedOptsKeyInfo)
+                ?.takeIf { it.lookup == it.identifier }
                 ?.identifier
-                ?.takeIf { keyAgreementAlg != null && it.isProviderBackedReference() }
+                ?.takeIf {
+                    (keyAgreementAlg != null || (keyWrapAlg != null && keyWrapAlg != KeyWrapAlgorithm.DIR)) &&
+                        it.isProviderBackedReference()
+                }
         val decryptorKeyInfo =
             decryptorReference ?: run {
                 val identifierResult = identifierService.resolve(decryptor)
                 if (!identifierResult.isOk) {
+                    logDecryptionRefusal("identifier-resolution", identifierResult.error)
                     return IdkResult.err(IdkError.fromDTO(identifierResult.error))
                 }
                 identifierResult.value.asResult().keyInfo
@@ -607,14 +630,16 @@ class DecryptJweCommandImpl(
                                     )
                                 IdkResult.ok(cek)
                             } catch (expected: Throwable) {
-                                IdkResult.err(IdkError.fromString("Key unwrapping failed: ${expected.message}"))
+                                if (expected is CancellationException) throw expected
+                                IdkResult.err(decryptionFailure("key-unwrap", "Key unwrapping failed"))
                             }
                         }
                     } else {
                         IdkResult.err(IdkError.fromString("Unsupported key encryption algorithm: $keyAlgStr"))
                     }
                 } catch (expected: Throwable) {
-                    IdkResult.err(IdkError.fromString("CEK derivation failed: ${expected.message}"))
+                    if (expected is CancellationException) throw expected
+                    IdkResult.err(decryptionFailure("cek-derivation", "CEK derivation failed"))
                 }
 
             if (cekResult.isErr) {
@@ -656,7 +681,8 @@ class DecryptJweCommandImpl(
                             try {
                                 inflate(plaintext)
                             } catch (expected: Throwable) {
-                                lastError = IdkError.fromString("Failed to INFLATE compressed JWE plaintext: ${expected.message}")
+                                if (expected is CancellationException) throw expected
+                                lastError = decryptionFailure("decompression", "Failed to INFLATE compressed JWE plaintext")
                                 continue
                             }
                         }
@@ -673,7 +699,8 @@ class DecryptJweCommandImpl(
                     aad = aad,
                 ).asOkResult()
             } catch (expected: Throwable) {
-                lastError = IdkError.fromString("Decryption failed: ${expected.message}")
+                if (expected is CancellationException) throw expected
+                lastError = decryptionFailure("content-decrypt", "Decryption failed")
                 // Try next recipient
             }
         }

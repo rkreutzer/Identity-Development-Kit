@@ -13,10 +13,16 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/VerifiedDataMode'
-      description: Controls what verified data to include in the response. Only applies when status is 'authorization_response_verified'. Either nothing (omit), or a combination of the vp_tokens and credential data deserialized (credentials_deserialized), depedning on the modes selected
+      description: >-
+        Selects which verified data representations a callback carries. Verified data is only ever included when the
+        status is 'authorization_response_verified'. When 'modes' is absent or empty, no verified data is included.
+        'credential_claims_deserialized' adds 'credential_claims'. 'authorization_response' and 'vp_token' both add
+        'authorization_response', because the vp_token is part of the authorization response.
       example:
-        - vp_token
-        - credentials_deserialized
+        modes:
+          - authorization_response
+          - vp_token
+          - credential_claims_deserialized
 
     RequestUriMethod:
       type: string
@@ -82,9 +88,8 @@ components:
           description: The digital credential type. Can be a vct value, or for instance a json-ld type
         claims:
           type: object
-          additionalProperties:
-            type: string
-          description: The claims returned and deserialized in the form of a map, where the keys represent the claim names
+          additionalProperties: {}
+          description: The claims returned and deserialized in the form of a map, where the keys represent the claim names. Values keep their JSON type, including nested objects, arrays and null.
 
         presentation:
           type: string

@@ -21,6 +21,7 @@ import com.sphereon.core.api.context.asCoreApiContextGraph
 import com.sphereon.core.api.error.IdkErrorType
 import com.sphereon.core.api.service.ServiceCommand
 import com.sphereon.di.context.PrincipalInput
+import com.sphereon.di.context.SecuredTenantContextDetails
 import com.sphereon.di.context.TenantInput
 import com.sphereon.di.context.UserContextManager
 import dev.zacsweers.metro.AppScope
@@ -65,14 +66,31 @@ interface AppCommandInvoker : CommandInvoker {
     ): IdkResult<TOutput, TError>
 }
 
+/**
+ * App command execution for a server-created, already authenticated bearer.
+ * Implementations must bind [secureDetails] to the per-execution session, never
+ * to the cached tenant/principal user context.
+ */
+interface SecuredAppCommandInvoker {
+    suspend fun <TInput : Any, TOutput : Any, TError : IdkErrorType> executeWithSecureDetails(
+        tenantInput: TenantInput,
+        principalInput: PrincipalInput,
+        command: ServiceCommand<TInput, TOutput, TError>,
+        input: TInput,
+        secureDetails: SecuredTenantContextDetails,
+        correlationId: String? = null,
+    ): IdkResult<TOutput, TError>
+}
+
 @Inject
 @SingleIn(AppScope::class)
 @ContributesBinding(AppScope::class, binding = binding<AppCommandInvoker>())
+@ContributesBinding(AppScope::class, binding = binding<SecuredAppCommandInvoker>())
 @OptIn(ExperimentalObjCName::class, ExperimentalUuidApi::class)
 @ObjCName("AppCommandInvokerImpl", exact = true)
 class AppCommandInvokerImpl(
     val userContextManager: UserContextManager,
-) : AppCommandInvoker {
+) : AppCommandInvoker, SecuredAppCommandInvoker {
     private fun backgroundExecutor(): CommandInvoker = userContextManager.getBackgroundService().asCoreApiContextGraph().commandInvoker
 
     override fun resolve(commandId: String): ServiceCommand<*, *, *>? = backgroundExecutor().resolve(commandId)
@@ -93,6 +111,39 @@ class AppCommandInvokerImpl(
         command: ServiceCommand<TInput, TOutput, TError>,
         input: TInput,
         correlationId: String?,
+    ): IdkResult<TOutput, TError> = executeInternal(
+        tenantInput = tenantInput,
+        principalInput = principalInput,
+        command = command,
+        input = input,
+        secureDetails = null,
+        correlationId = correlationId,
+    )
+
+    override suspend fun <TInput : Any, TOutput : Any, TError : IdkErrorType> executeWithSecureDetails(
+        tenantInput: TenantInput,
+        principalInput: PrincipalInput,
+        command: ServiceCommand<TInput, TOutput, TError>,
+        input: TInput,
+        secureDetails: SecuredTenantContextDetails,
+        correlationId: String?,
+    ): IdkResult<TOutput, TError> = executeInternal(
+        tenantInput = tenantInput,
+        principalInput = principalInput,
+        command = command,
+        input = input,
+        secureDetails = secureDetails,
+        correlationId = correlationId,
+    )
+
+    @Suppress("UNCHECKED_CAST")
+    private suspend fun <TInput : Any, TOutput : Any, TError : IdkErrorType> executeInternal(
+        tenantInput: TenantInput,
+        principalInput: PrincipalInput,
+        command: ServiceCommand<TInput, TOutput, TError>,
+        input: TInput,
+        secureDetails: SecuredTenantContextDetails?,
+        correlationId: String?,
     ): IdkResult<TOutput, TError> {
         val activeContext = userContextManager.createOrGetFromInputs(tenantInput, principalInput)
         val sessionId = Uuid.random().toString()
@@ -104,6 +155,7 @@ class AppCommandInvokerImpl(
                     sessionId = sessionId,
                     correlationId = resolvedCorrelationId,
                     makeActive = false,
+                    secureDetails = secureDetails,
                     principalType = activeContext.context.principalType,
                 )
         val executor = (sessionInstance.graph as CommandInvokerGraph).commandInvoker

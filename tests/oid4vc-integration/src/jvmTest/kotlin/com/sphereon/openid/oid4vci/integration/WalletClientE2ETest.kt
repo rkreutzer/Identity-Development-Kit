@@ -21,11 +21,17 @@ import com.sphereon.core.api.http.GenericHttpResponse
 import com.sphereon.core.api.http.dispatch.HttpAdapterDispatcher
 import com.sphereon.core.api.http.dispatch.HttpAdapterRouteSelection
 import com.sphereon.core.api.http.dispatch.HttpAdapterRouteSelector
+import com.sphereon.crypto.core.KeyVisibility
 import com.sphereon.crypto.core.generic.SignatureAlgorithm
 import com.sphereon.crypto.core.jose.JwkUse
 import com.sphereon.crypto.core.kms.asKeyManagerServiceGraph
 import com.sphereon.crypto.jose.jwe.DecryptJweCommand
 import com.sphereon.crypto.jose.jwe.JweServiceImpl
+import com.sphereon.crypto.jose.jws.JwsIdentifierMode
+import com.sphereon.crypto.jose.jws.JwtServiceImpl
+import com.sphereon.crypto.jose.jws.command.CreateJwsArgs
+import com.sphereon.crypto.resolution.IdentifierContext
+import com.sphereon.crypto.resolution.managed.ManagedOptsKeyInfo
 import com.sphereon.di.session.SessionScope
 import com.sphereon.ktor.http.client.config.HttpClientConfigResolverImpl
 import com.sphereon.ktor.http.client.provider.HttpClientEngineType
@@ -38,6 +44,7 @@ import com.sphereon.oauth2.client.impl.token.OAuth2TokenEndpointTransportImpl
 import com.sphereon.oauth2.server.authorization.command.CreateAccessTokenArgs
 import com.sphereon.openid.oid4vci.common.model.CredentialConfigurationSupported
 import com.sphereon.openid.oid4vci.common.model.CredentialDefinition
+import com.sphereon.openid.oid4vci.common.model.CredentialIssuerMetadata
 import com.sphereon.openid.oid4vci.common.model.ProofTypeSupported
 import com.sphereon.openid.oid4vci.common.model.stringValues
 import com.sphereon.openid.oid4vci.holder.ExchangePreAuthorizedCodeArgs
@@ -249,7 +256,7 @@ class WalletClientE2ETest {
     // Helper: manually construct holder commands with mock factory
     // =========================================================================
 
-    private fun createResolveIssuerMetadataCommand(factory: InProcessHttpClientFactory): ResolveIssuerMetadataCommandImpl {
+    private fun createResolveIssuerMetadataCommand(factory: HttpClientFactory): ResolveIssuerMetadataCommandImpl {
         val depsGraph = ctx.session.graph as HolderCommandDepsGraph
         return ResolveIssuerMetadataCommandImpl(
             execution = ctx.execution,
@@ -262,6 +269,67 @@ class WalletClientE2ETest {
                 },
         )
     }
+
+    @Test
+    fun embeddedSignedMetadataRequiresExactIssuerIdentity() =
+        runTest {
+            val kms =
+                ctx.session.graph
+                    .asKeyManagerServiceGraph()
+                    .keyManagerService
+            val pair = kms.generateKeyAsync(alg = SignatureAlgorithm.ECDSA_SHA256)
+            val signer =
+                ManagedOptsKeyInfo(
+                    identifier = pair.joseToManagedKeyInfo(KeyVisibility.PRIVATE),
+                    context =
+                        IdentifierContext(
+                            clientId = "signed-metadata-test",
+                            clientIdScheme = "jwt_vc_json",
+                            issuer = issuerUrl,
+                        ),
+                )
+            val jwtService = (ctx.session.graph as JwtServiceImpl.Graph).jwtService
+            // Both identifiers are valid, but OID4VCI 12.2.4 does not equate them.
+            for (signedIssuer in listOf(issuerUrl, "$issuerUrl/")) {
+                val signedMetadata =
+                    CredentialIssuerMetadata(
+                        credentialIssuer = signedIssuer,
+                        credentialEndpoint = "$issuerUrl/credential",
+                        credentialConfigurationsSupported = mapOf("degree" to universityDegreeConfig),
+                    )
+                val signature =
+                    jwtService.createJwsCompact(
+                        CreateJwsArgs(
+                            issuer = signer,
+                            payload = json.encodeToJsonElement(CredentialIssuerMetadata.serializer(), signedMetadata),
+                            mode = JwsIdentifierMode.JWK,
+                        ),
+                    )
+                assertTrue(signature.isOk, "Fixture metadata must be signed successfully")
+                val body =
+                    json.encodeToString(
+                        CredentialIssuerMetadata.serializer(),
+                        signedMetadata.copy(credentialIssuer = issuerUrl, signedMetadata = signature.value.jwt),
+                    )
+                val factory =
+                    object : HttpClientFactory by createInProcessFactory() {
+                        override fun createClient(options: HttpClientOptions): HttpClient =
+                            HttpClient(
+                                MockEngine { request ->
+                                    assertEquals("https://issuer.example.com/.well-known/openid-credential-issuer", request.url.toString())
+                                    respond(body, HttpStatusCode.OK, headersOf("Content-Type", "application/json"))
+                                },
+                            )
+                    }
+                val result = createResolveIssuerMetadataCommand(factory).execute(ResolveIssuerMetadataArgs(issuerUrl))
+                if (signedIssuer == issuerUrl) {
+                    assertTrue(result.isOk, "Matching signed metadata must remain usable")
+                    assertEquals(issuerUrl, result.value.credentialIssuer)
+                } else {
+                    assertTrue(result.isErr, "A valid signature must not hide a different issuer identifier")
+                }
+            }
+        }
 
     private fun createExchangePreAuthorizedCodeCommand(factory: InProcessHttpClientFactory): ExchangePreAuthorizedCodeCommandImpl {
         // The canonical token transport consumes an HttpClientProvider. Adapt the purpose-built

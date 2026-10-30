@@ -85,6 +85,7 @@ class VerifyAuthorizationRequestCommandImpl(
     private val authorizeExtensions: Set<AuthorizeRequestExtension>,
     private val credentialIssuerAudienceResolver: CredentialIssuerAudienceResolver,
     private val unregisteredClientAdmissionRule: UnregisteredClientAdmissionRule,
+    private val actualAsSelection: com.sphereon.oauth2.common.config.OAuth2ServerInstanceIdProvider,
 ) : TypedServiceCommandAdapter<AuthorizationRequestData, VerifiedAuthorizationRequest, IdkError>(
         commandId = VerifyAuthorizationRequestCommand.COMMAND_ID,
         execution = execution,
@@ -246,13 +247,24 @@ class VerifyAuthorizationRequestCommandImpl(
         // is built from `serverConfig.par.isRequired`, so the enforcement check has to mirror that
         // same source — otherwise the AS lies in discovery and accepts the very requests it claims
         // to forbid (OIDF condition `EnsureUnsignedAuthorizationRequestWithoutUsingParFails`).
-        val parRequired = serverConfig.par.isRequired || client.requirePushedAuthorizationRequests
+        val federationProofRequired = client.authorizationRequestProofPolicy == com.sphereon.oauth2.server.authorization.model.AuthorizationRequestProofPolicy.FEDERATED_RP_ASYMMETRIC
+        val parRequired = serverConfig.par.isRequired || client.requirePushedAuthorizationRequests ||
+            (federationProofRequired && serverConfig.federationAutomaticRegistrationMode == com.sphereon.oauth2.common.config.FederatedAuthorizationRequestMode.PAR_ONLY)
         if (parRequired && request.requestUri == null) {
             return Err(
                 AuthorizationServerError.InvalidRequest(
                     details = "Pushed Authorization Requests (PAR) is required",
                 ),
             )
+        }
+
+        if (federationProofRequired) {
+            val scope = try { captureFederationAuthorizationScope(execution, serversConfigProvider, actualAsSelection) }
+            catch (expected: IllegalArgumentException) { return Err(AuthorizationServerError.InvalidRequest(details = "Federation AS scope is unavailable")) }
+            catch (expected: IllegalStateException) { return Err(AuthorizationServerError.InvalidRequest(details = "Federation AS scope is unavailable")) }
+            if (!validFederationAuthorizationEvidence(request.authorizationEvidence, scope, request, client)) {
+                return Err(AuthorizationServerError.InvalidRequest(details = "A client-bound signed federation Request Object is required"))
+            }
         }
 
         // Validate requested scope
@@ -384,7 +396,7 @@ class VerifyAuthorizationRequestCommandImpl(
         // Return verified request
         return Ok(
             VerifiedAuthorizationRequest(
-                request = request,
+                request = request.copy(authorizationEvidence = null),
                 clientId = request.clientId,
                 redirectUri = finalRedirectUri,
                 grantedScopes = grantedScopes,

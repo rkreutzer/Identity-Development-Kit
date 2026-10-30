@@ -63,9 +63,9 @@ data class OidcLoginSession(
 )
 
 /**
- * Storage abstraction for [OidcLoginSession] records keyed by [OidcLoginSession.sessionId]. Lives
- * at [dev.zacsweers.metro.AppScope] because the session must outlive any single HTTP request
- * (every browser hit creates its own [com.sphereon.di.session.SessionScope] instance).
+ * Storage abstraction for [OidcLoginSession] records keyed by [OidcLoginSession.sessionId]. Records
+ * must outlive individual HTTP requests. The default in-process store lives at AppScope; a
+ * durable adapter may live at SessionScope when its persisted state is tenant and AS scoped.
  *
  * Per `feedback_idk_persistence_drivers.md` IDK ships in-memory only; EDK / VDX overlays supply
  * durable replacements via `@ContributesBinding(replaces = [...])`.

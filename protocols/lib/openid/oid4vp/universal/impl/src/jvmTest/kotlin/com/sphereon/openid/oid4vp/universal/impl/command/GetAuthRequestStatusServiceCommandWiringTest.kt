@@ -33,6 +33,11 @@ import com.sphereon.openid.oid4vp.universal.GetAuthRequestStatusInput
 import com.sphereon.openid.oid4vp.universal.GetAuthorizationRequestStatusOutput
 import com.sphereon.openid.oid4vp.universal.universalOid4vpResponseJson
 import com.sphereon.openid.oid4vp.universal.impl.createJvmUniversalOid4vpTestAppGraph
+import com.sphereon.openid.oid4vp.universal.VerifiedDataMode
+import com.sphereon.openid.oid4vp.universal.VerifiedDataOpts
+import com.sphereon.openid.oid4vp.verifier.MatchedCredential
+import com.sphereon.openid.oid4vp.verifier.impl.AuthorizationSessionStatusResponseMapperImpl
+import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSessionCallbackConfig
 import com.sphereon.openid.oid4vp.verifier.CredentialValidationRejection
 import com.sphereon.openid.oid4vp.verifier.CredentialValidationRejectionReason
 import com.sphereon.openid.oid4vp.verifier.ParsedAuthorizationResponse
@@ -55,16 +60,15 @@ private const val REJECTED_CORRELATION_ID = "status-command-wiring-rejected"
 /**
  * Guards the production wiring, not the helper.
  *
- * The sibling `AuthorizationStatusValidationSummaryTest` calls
- * [authorizationValidationSummaryOf] itself and hands the result to an output it builds locally, so
- * it stays green even if [GetAuthRequestStatusServiceCommandImpl.doExecute] stops passing
- * `validation` into the response. That is exactly the regression this task exists to prevent: a
+ * The mapper's own tests call it directly, so they stay green even if
+ * [GetAuthRequestStatusServiceCommandImpl.doExecute] stops using the mapper's output for the
+ * response. That is exactly the regression this task exists to prevent: a
  * refactor drops one named argument and the rejection silently disappears from the API again.
  *
  * This test therefore drives the command through its real public entry point, [
  * com.sphereon.core.api.service.ServiceCommand.execute], against a store holding a rejected
  * session, using the real session graph for execution context and events. Deleting the
- * `validation = authorizationValidationSummaryOf(session)` argument from `doExecute` makes it fail.
+ * mapper call from `doExecute` makes it fail.
  */
 class GetAuthRequestStatusServiceCommandWiringTest {
     @Test
@@ -126,6 +130,51 @@ class GetAuthRequestStatusServiceCommandWiringTest {
             assertEquals(emptyList(), output.validation?.rejections)
         }
 
+    @Test
+    fun shouldOfferBothVerifiedDataRepresentationsWhateverModesTheCallbackSelects() =
+        runTest {
+            val selections =
+                listOf(
+                    null,
+                    VerifiedDataOpts(),
+                    VerifiedDataOpts(listOf(VerifiedDataMode.CREDENTIAL_CLAIMS_DESERIALIZED)),
+                    VerifiedDataOpts(listOf(VerifiedDataMode.VP_TOKEN)),
+                )
+            for (selection in selections) {
+                val session =
+                    verifiedSession().copy(
+                        parsedResponse =
+                            ParsedAuthorizationResponse(
+                                vpToken = com.sphereon.openid.oid4vp.common.vpTokenOf("identity_credential", "presentation"),
+                                rawVpToken = "{\"identity_credential\":[\"presentation\"]}",
+                                state = REJECTED_CORRELATION_ID,
+                            ),
+                        validationResult =
+                            ValidationResult(
+                                valid = true,
+                                matchedCredentials =
+                                    listOf(
+                                        MatchedCredential(
+                                            credentialQueryId = "identity_credential",
+                                            credentialFormat = com.sphereon.openid.oid4vc.common.CredentialFormat.SD_JWT_VC,
+                                            presentation = "presentation",
+                                            disclosedClaims = mapOf("given_name" to "Ada"),
+                                        ),
+                                    ),
+                            ),
+                        callback = AuthorizationSessionCallbackConfig(url = "https://receiver.example.com/cb", verifiedData = selection),
+                    )
+
+                val output =
+                    statusCommandOver(session)
+                        .execute(GetAuthRequestStatusInput(correlationId = REJECTED_CORRELATION_ID))
+                        .getOrElse { failure -> error("status command failed: $failure") }
+
+                assertEquals(true, output.verifiedData?.credentialClaims != null, "claims for $selection")
+                assertEquals(true, output.verifiedData?.authorizationResponse != null, "authorization response for $selection")
+            }
+        }
+
     private fun kotlinx.coroutines.test.TestScope.statusCommandOver(
         session: AuthorizationSession,
     ): GetAuthRequestStatusServiceCommandImpl {
@@ -140,6 +189,7 @@ class GetAuthRequestStatusServiceCommandWiringTest {
             execution = (sessionGraph as SessionExecution.Graph).sessionExecution,
             authorizationSessionStore = SingleSessionAuthorizationSessionStore(session),
             sessionEventService = (sessionGraph as SessionEventService.Graph).sessionEventService,
+            statusResponseMapper = AuthorizationSessionStatusResponseMapperImpl(),
         )
     }
 

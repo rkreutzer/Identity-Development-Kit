@@ -142,6 +142,14 @@ data class IssuanceContext(
     val credentialSubjects: List<JsonObject> = emptyList(),
     /** Optional semantic VCDM credential identifier, emitted as VC `id` and JWT `jti`. */
     val credentialId: String? = null,
+    /**
+     * OpenID Federation Entity Identifier of the issuer, resolved server side through
+     * [com.sphereon.openid.oid4vci.issuer.spi.IssuerFederationEntityResolver]. When set it equals
+     * [issuerIdentifier] (DIIP v5 Appendix B) and handlers name it in the credential as issuer-signed,
+     * never selectively disclosable content: the SD-JWT VC `fed` claim, or a VCDM `termsOfUse`
+     * entry of type `OpenIDFederation`. Null for an issuer that is not a federation entity.
+     */
+    val federationEntityIdentifier: String? = null,
 )
 
 /**

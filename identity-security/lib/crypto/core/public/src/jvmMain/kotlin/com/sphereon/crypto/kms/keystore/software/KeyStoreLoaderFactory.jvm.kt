@@ -22,6 +22,9 @@ import com.sphereon.crypto.core.kms.model.PredefinedKeyStoreTypes
 import com.mayakapps.kache.InMemoryKache
 import com.mayakapps.kache.KacheStrategy
 import kotlinx.atomicfu.atomic
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.security.MessageDigest
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -35,14 +38,16 @@ import javax.net.ssl.KeyManagerFactory
  * Maintains a map of supported [PredefinedKeyStoreTypes] to corresponding [KeyStoreLoader] implementations.
  */
 object KeyStoreLoaderFactory {
-    private val loaders: Map<String, KeyStoreLoader> =
+    private val loaders: Map<String, BaseKeyStoreLoader> =
         mapOf(
             PredefinedKeyStoreTypes.JKS.keyStoreType to JksLoader(),
             PredefinedKeyStoreTypes.PKCS12.keyStoreType to Pkcs12Loader(),
             PredefinedKeyStoreTypes.BKS.keyStoreType to BksLoader(),
         )
-    private val keyStoreCache = atomic<Map<KeyStoreCacheKey, KeyStore>>(emptyMap())
-    private val inFlightLoads = atomic<Map<KeyStoreCacheKey, CompletableDeferred<KeyStore>>>(emptyMap())
+    internal data class Snapshot(val keyStore: KeyStore, val fileRevision: String?)
+
+    private val keyStoreCache = atomic<Map<KeyStoreCacheKey, Snapshot>>(emptyMap())
+    private val inFlightLoads = atomic<Map<KeyStoreCacheKey, CompletableDeferred<Snapshot>>>(emptyMap())
 
     /**
      * Load a [KeyStore] using the provided [com.sphereon.crypto.kms.keystore.KeyStoreLoaderOpts].
@@ -56,17 +61,52 @@ object KeyStoreLoaderFactory {
     suspend fun load(
         opts: KeyStoreLoaderOpts,
         forceReload: Boolean = false,
-    ): KeyStore {
+    ): KeyStore = loadSnapshot(opts, forceReload).keyStore
+
+    internal suspend fun loadSnapshot(
+        opts: KeyStoreLoaderOpts,
+        forceReload: Boolean = false,
+    ): Snapshot {
         val cacheKey = opts.cacheKeyOrNull()
         if (cacheKey == null) {
-            return loadUncached(opts)
+            return Snapshot(loadUncached(opts), null)
         }
         if (!forceReload) {
-            keyStoreCache.value[cacheKey]?.let { return it }
+            cachedSnapshot(cacheKey, opts)?.let { return it }
         }
-
         return loadSingleFlight(cacheKey, opts, forceReload)
     }
+
+    private suspend fun cachedSnapshot(key: KeyStoreCacheKey, opts: KeyStoreLoaderOpts): Snapshot? {
+        val cached = keyStoreCache.value[key] ?: return null
+        return cached.takeIf { it.fileRevision == fileRevision(opts.source) }
+    }
+
+    // Hash only encrypted file bytes in-process. Content identity detects replacement even
+    // when filesystem timestamp resolution, length or clock ordering cannot distinguish it.
+    internal suspend fun fileRevision(source: KeyStoreLoaderOpts.Source): String? {
+        val fileSource = source as? KeyStoreLoaderOpts.Source.File ?: return null
+        return withContext(Dispatchers.IO) {
+            val file = PathPlaceholderInterpreter.resolve(fileSource.path) ?: java.io.File(fileSource.path)
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    digest.update(buffer, 0, count)
+                }
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        }
+    }
+
+    internal fun contentRevision(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private suspend fun loadUncachedSnapshot(opts: KeyStoreLoaderOpts): Snapshot =
+        loaders[opts.type]?.loadSnapshot(opts)
+            ?: throw UnsupportedOperationException("Unsupported keystore type: ${opts.type}")
 
     internal fun clearCache() {
         keyStoreCache.value = emptyMap()
@@ -91,19 +131,23 @@ object KeyStoreLoaderFactory {
         cacheKey: KeyStoreCacheKey,
         opts: KeyStoreLoaderOpts,
         forceReload: Boolean,
-    ): KeyStore {
+    ): Snapshot {
         while (true) {
             if (!forceReload) {
-                keyStoreCache.value[cacheKey]?.let { return it }
+                cachedSnapshot(cacheKey, opts)?.let { return it }
             }
 
             val currentInFlight = inFlightLoads.value
             currentInFlight[cacheKey]?.let { return it.await() }
 
-            val load = CompletableDeferred<KeyStore>()
+            val load = CompletableDeferred<Snapshot>()
             if (inFlightLoads.compareAndSet(currentInFlight, currentInFlight + (cacheKey to load))) {
                 try {
-                    val keyStore = loadUncached(opts)
+                    val keyStore = loadUncachedSnapshot(opts)
+                    val previous = keyStoreCache.value[cacheKey]
+                    if (previous != null && previous.fileRevision != keyStore.fileRevision) {
+                        SoftwareKeyStoreStateCache.stateFor(cacheKey).invalidate()
+                    }
                     if (inFlightLoads.value[cacheKey] === load) {
                         putCached(cacheKey, keyStore)
                     }
@@ -127,7 +171,7 @@ object KeyStoreLoaderFactory {
 
     private fun putCached(
         key: KeyStoreCacheKey,
-        keyStore: KeyStore,
+        keyStore: Snapshot,
     ) {
         while (true) {
             val current = keyStoreCache.value
@@ -185,7 +229,7 @@ object KeyStoreLoaderFactory {
 
     private fun removeInFlight(
         key: KeyStoreCacheKey,
-        load: CompletableDeferred<KeyStore>,
+        load: CompletableDeferred<Snapshot>,
     ) {
         while (true) {
             val current = inFlightLoads.value

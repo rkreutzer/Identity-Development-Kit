@@ -16,12 +16,16 @@ import com.sphereon.core.compat.LocalDateTimeKMP
 import com.sphereon.crypto.core.KeyInfoType
 import com.sphereon.crypto.core.KeyType
 import com.sphereon.crypto.core.ResolvedKeyInfoType
+import com.sphereon.crypto.core.CoseJoseKeyMappingService
+import com.sphereon.crypto.core.KeyInfo
 import com.sphereon.crypto.core.generic.CertificateSigningRequest
 import com.sphereon.crypto.core.generic.X509DistinguishedNameElements
 import com.sphereon.crypto.core.kms.CertificateService
 import com.sphereon.crypto.core.kms.CertificateStoreService
 import com.sphereon.crypto.core.kms.HasKeyStoreService
 import com.sphereon.crypto.core.kms.KeyManagerService
+import com.sphereon.crypto.core.jose.Jwk
+import com.sphereon.crypto.core.jose.generateJwkThumbprint
 import com.sphereon.crypto.certificate.persistence.CertificateReferenceKind
 import com.sphereon.crypto.certificate.persistence.CertificateReferenceRecord
 import com.sphereon.crypto.certificate.persistence.CertificateReferenceSource
@@ -112,13 +116,34 @@ class CertificatesRestServiceImpl(
     }
 
     override suspend fun issueCertificate(request: IssueCertificateRequest): CertificateResponse {
+        val issuerKeyInfo = request.issuerKeyInfo.toSdk() as KeyInfoType<KeyType>
+        val subjectKeyInfo = request.subjectKeyInfo.toSdk() as ResolvedKeyInfoType<KeyType>
+        val extensions =
+            CertificateIssuanceExtensions.create(
+                certificateAuthorityPathLengthConstraint = request.certificateAuthorityPathLengthConstraint,
+                keyUsage = request.keyUsage?.map { it.value },
+            )
+        if (request.certificateAuthorityPathLengthConstraint != null) {
+            require(request.issuer.toSdk() == request.subject.toSdk()) {
+                "A self-signed certificate authority must use the same issuer and subject name"
+            }
+            require(
+                issuerKeyInfo.providerId == subjectKeyInfo.providerId && issuerKeyInfo.alias == subjectKeyInfo.alias,
+            ) {
+                "A self-signed certificate authority must use the same managed issuer and subject key"
+            }
+            requireManagedSubjectKey(subjectKeyInfo)
+        } else if (request.keyUsage?.isNotEmpty() == true) {
+            requireManagedSubjectKey(subjectKeyInfo)
+        }
         val result =
             certificateService.createCertificate(
-                issuerKeyInfo = request.issuerKeyInfo.toSdk() as KeyInfoType<KeyType>,
+                issuerKeyInfo = issuerKeyInfo,
                 issuer = request.issuer.toSdk(),
-                subjectKeyInfo = request.subjectKeyInfo.toSdk() as ResolvedKeyInfoType<KeyType>,
+                subjectKeyInfo = subjectKeyInfo,
                 subject = request.subject.toSdk(),
                 serialNumber = request.serialNumber,
+                extensions = extensions,
                 notBefore = request.notBefore?.let { LocalDateTimeKMP.fromString(it) } ?: LocalDateTimeKMP.now(),
                 notAfter = request.notAfter?.let { LocalDateTimeKMP.fromString(it) } ?: defaultNotAfter(),
             )
@@ -126,6 +151,25 @@ class CertificatesRestServiceImpl(
             certificate = Base64ByteArray(result.certificate.der),
             keyInfo = result.keyInfo.toRest(),
         )
+    }
+
+    private suspend fun requireManagedSubjectKey(subjectKeyInfo: ResolvedKeyInfoType<KeyType>) {
+        val providerId = requireNotNull(subjectKeyInfo.providerId) {
+            "Certificate extensions require a managed subject key with a provider id"
+        }
+        val alias = requireNotNull(subjectKeyInfo.alias) {
+            "Certificate extensions require a managed subject key with an alias"
+        }
+        val managed = kms.getProviderById(providerId).getKey(KeyInfo<Jwk>(providerId = providerId, alias = alias))
+        require(managed.providerId == providerId && managed.alias == alias) {
+            "Certificate subject does not resolve to the requested managed key"
+        }
+        val requestedThumbprint =
+            generateJwkThumbprint(CoseJoseKeyMappingService.toJoseJwk(subjectKeyInfo.key).toPublicKey())
+        val managedThumbprint = generateJwkThumbprint(CoseJoseKeyMappingService.toJoseJwk(managed.key).toPublicKey())
+        require(requestedThumbprint == managedThumbprint) {
+            "Certificate subject public key does not match the requested managed key"
+        }
     }
 
     override suspend fun issueCertificateFromCsr(request: IssueCertificateFromCsrRequest): CertificateResponse {

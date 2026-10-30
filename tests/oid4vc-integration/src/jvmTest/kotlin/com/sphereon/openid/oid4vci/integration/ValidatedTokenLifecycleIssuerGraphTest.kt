@@ -114,14 +114,7 @@ private class TokenLifecycleTestContext(
             "${com.sphereon.oauth2.common.config.OAuth2ServerInstanceConfig.CONFIG_PREFIX}.default.grant-types-enabled",
             "authorization_code,client_credentials,refresh_token,urn:ietf:params:oauth:grant-type:pre-authorized_code",
         )
-        DefaultPrincipalMapPropertySource.addProperty(
-            "${com.sphereon.oauth2.common.config.OAuth2ServerInstanceConfig.CONFIG_PREFIX}.default.internal-clients.issuer.client-id",
-            "issuer-service",
-        )
-        DefaultPrincipalMapPropertySource.addProperty(
-            "${com.sphereon.oauth2.common.config.OAuth2ServerInstanceConfig.CONFIG_PREFIX}.default.internal-clients.issuer.client-secret",
-            "issuer-secret",
-        )
+        configureOid4vciTestInternalClient()
         // The real registry-backed issuer requires an explicitly owned resource namespace.
         val issuerRoot = "oid4vci.issuers.$OID4VCI_TEST_ISSUER_INSTANCE_ID"
         val authorizationServerId = "00000000-0000-4000-8000-000000000002"
@@ -156,8 +149,6 @@ private class TokenLifecycleTestContext(
                 "$issuerRoot.credentials.[UniversityDegree].proofTypes.jwt.signingAlgorithms" to "ES256",
                 "$issuerRoot.credentials.[UniversityDegree].signingKeyMode" to "jwk-thumbprint",
                 "$issuerRoot.credentials.[UniversityDegree].credentialDefinition.types" to "VerifiableCredential,UniversityDegreeCredential",
-                "oauth2.servers.default.internal-clients.issuer.default-access-token-audience" to OID4VCI_TEST_ISSUER_URL,
-                "oauth2.servers.default.internal-clients.issuer.allowed-access-token-audiences" to OID4VCI_TEST_ISSUER_URL,
             )
         issuerProperties.forEach { (key, value) -> DefaultPrincipalMapPropertySource.addProperty(key, value) }
         // Credential requests execute against the app-scoped configuration. Keep the integration
@@ -196,6 +187,7 @@ private class TokenLifecycleTestContext(
 
     init {
         (session.graph as Oid4vciTenantOverrideSessionGraph).mutableResolvedTenantIdProvider.setCurrentTenantId(OID4VCI_TEST_TENANT_ID)
+        (session.graph as Oid4vciTenantOverrideSessionGraph).mutableOAuth2ServerInstanceIdProvider.setCurrentAsInstanceId("default")
         (session.graph as Oid4vciIssuerInstanceOverrideSessionGraph)
             .mutableOid4vciIssuerInstanceIdProvider
             .setCurrentInstanceId(OID4VCI_TEST_ISSUER_INSTANCE_ID)

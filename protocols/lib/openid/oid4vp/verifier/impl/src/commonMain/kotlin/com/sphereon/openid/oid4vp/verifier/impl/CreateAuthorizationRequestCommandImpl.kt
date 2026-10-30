@@ -45,6 +45,7 @@ import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import io.konform.validation.Invalid
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
@@ -189,8 +190,11 @@ class CreateAuthorizationRequestCommandImpl(
         val isDirectPost =
             processedArgs.responseMode == ResponseMode.DIRECT_POST ||
                 processedArgs.responseMode == ResponseMode.DIRECT_POST_JWT
+        val isDigitalCredentials =
+            processedArgs.responseMode == ResponseMode.DC_API ||
+                processedArgs.responseMode == ResponseMode.DC_API_JWT
         val redirectUri =
-            if (isDirectPost && processedArgs.responseUri != null) {
+            if (isDigitalCredentials || (isDirectPost && processedArgs.responseUri != null)) {
                 null // response_uri replaces redirect_uri for direct_post
             } else {
                 processedArgs.redirectUri
@@ -209,7 +213,9 @@ class CreateAuthorizationRequestCommandImpl(
         // A caller-selected state is also the persistence key. Never turn create into a blind
         // upsert that replaces another live request's nonce and DCQL query.
         val correlationIdExists = authorizationSessionStore.exists(effectiveState).getOrElse { return Err(it) }
-        if (processedArgs.operationFingerprint == null && effectiveState.startsWith(AuthorizationSessionStore.CLAIMED_CORRELATION_PREFIX)) {
+        if (processedArgs.operationFingerprint == null &&
+            (effectiveState.startsWith(AuthorizationSessionStore.CLAIMED_CORRELATION_PREFIX) ||
+                effectiveState.startsWith(AuthorizationSessionStore.LEGACY_CLAIMED_CORRELATION_PREFIX))) {
             return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Reserved claimed-session correlation namespace"))
         }
         if (correlationIdExists && processedArgs.operationFingerprint == null) {
@@ -247,13 +253,18 @@ class CreateAuthorizationRequestCommandImpl(
                 // and where the caller didn't already encode the prefix in client_id.
                 val clientIdCarriesPrefix =
                     ClientIdScheme.entries.any { s -> s.prefix != null && processedArgs.clientId.startsWith(s.prefix + ":") }
-                if (!clientIdCarriesPrefix) {
+                if (!isDigitalCredentials && !clientIdCarriesPrefix) {
                     processedArgs.clientIdScheme.prefix?.let { clientIdScheme(it) }
                 }
 
                 // State for request correlation (OID4VP 1.0 Section 5.1).
                 // The wallet echoes state back in the direct_post response.
-                state(effectiveState)
+                if (!isDigitalCredentials) state(effectiveState)
+                if (isDigitalCredentials) {
+                    processedArgs.expectedOrigins?.let { origins ->
+                        additionalParameter("expected_origins", JsonArray(origins.map { JsonPrimitive(it) }))
+                    }
+                }
 
                 // Client metadata (embedded or by reference) per OID4VP §11.1.
                 processedArgs.clientMetadata?.let { clientMetadata(it) }
@@ -264,7 +275,7 @@ class CreateAuthorizationRequestCommandImpl(
                 // then surfaces it as `&request_uri_method=…` on the outer OAuth2 URL — the
                 // wallet needs to read this before fetching the JAR, so it MUST appear there
                 // and not just inside the signed Request Object.
-                processedArgs.requestUriMethod?.let { requestUriMethod(it) }
+                if (!isDigitalCredentials) processedArgs.requestUriMethod?.let { requestUriMethod(it) }
             }
 
         log.info(
@@ -321,7 +332,7 @@ class CreateAuthorizationRequestCommandImpl(
         return Ok(
             CreatedAuthorizationRequest(
                 request = persisted.authorizationRequest,
-                sessionId = effectiveState,
+                sessionId = persisted.correlationId,
             ),
         )
     }

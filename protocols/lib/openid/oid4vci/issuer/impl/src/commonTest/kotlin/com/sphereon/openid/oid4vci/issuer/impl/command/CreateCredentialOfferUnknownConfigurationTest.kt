@@ -15,6 +15,7 @@ import com.sphereon.core.api.Ok
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.openid.oid4vci.common.model.CredentialOffer
 import com.sphereon.openid.oid4vci.issuer.command.CreateCredentialOfferArgs
+import com.sphereon.openid.oid4vci.issuer.command.nothingWritten
 import com.sphereon.openid.oid4vci.issuer.impl.lifecycle.OfferLifecycleInitializer
 import com.sphereon.openid.oid4vci.issuer.impl.testAuthorizationSnapshot
 import com.sphereon.openid.oid4vci.issuer.store.CredentialOfferStore
@@ -36,6 +37,7 @@ class CreateCredentialOfferUnknownConfigurationTest {
 
             assertTrue(result.isErr, "An offer for an unpublished configuration must be rejected")
             assertEquals("ILLEGAL_ARGUMENT_ERROR", result.error.code)
+            assertTrue(result.error.nothingWritten, "a refusal before any write carries the marker callers read instead of the generic code")
             assertTrue(result.error.message.defaultMessage.contains("DoesNotExist"), result.error.message.defaultMessage)
             assertTrue(fixture.sessionStore.created.isEmpty())
             assertNull(fixture.asBridge.lastRegisterPreAuthCodeArgs)

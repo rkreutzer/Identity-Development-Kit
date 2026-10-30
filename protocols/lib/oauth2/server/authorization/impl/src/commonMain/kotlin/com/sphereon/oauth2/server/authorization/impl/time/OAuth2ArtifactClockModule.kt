@@ -15,7 +15,7 @@ import kotlin.time.Instant
 import kotlin.time.TimeSource
 
 /** Qualifier for clocks used to expire short-lived, server-issued opaque artifacts. */
-internal const val OAUTH2_ARTIFACT_CLOCK = "oauth2-artifact-clock"
+internal const val OAUTH2_ARTIFACT_CLOCK = com.sphereon.oauth2.server.authorization.time.OAUTH2_ARTIFACT_CLOCK
 
 /**
  * A wall-clock-compatible clock whose elapsed time cannot move backwards while the process runs.
@@ -30,8 +30,10 @@ internal class MonotonicOAuth2ArtifactClock(
     wallClock: Clock = Clock.System,
     private val timeSource: TimeSource.WithComparableMarks = TimeSource.Monotonic,
 ) : Clock {
-    private val anchorInstant = wallClock.now()
+    // The mark is taken before the wall clock is read, so this clock is never behind the wall clock by the gap between the two reads.
+    // Instants stamped from the wall clock, such as a session's creation time, then never lie in this clock's future.
     private val anchorMark = timeSource.markNow()
+    private val anchorInstant = wallClock.now()
 
     override fun now(): Instant = anchorInstant + anchorMark.elapsedNow()
 }

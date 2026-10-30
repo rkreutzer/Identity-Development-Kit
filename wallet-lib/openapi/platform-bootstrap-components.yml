@@ -631,6 +631,7 @@ components:
         - holder
         - contacts
         - semanticIntegration
+        - workspace
         - issuerCount
         - verifierCount
       properties:
@@ -657,6 +658,13 @@ components:
           description: >
             True when the wallet exposes enterprise information-system and semantic-modeling
             integration. Clamped off unless the tenant is granted `business-wallet.enterprise.v1`.
+        workspace:
+          type: boolean
+          description: >
+            True when the Workspace product is deployed for this tenant, so the wallet's trimmed
+            Workspace reads the platform Inbox. False means it reads the wallet's own holder tasks
+            (credentials to receive, deferred issuance, presentation requests). Clamped off unless
+            the tenant is granted `business-wallet.enterprise.v1`.
         issuerCount:
           type: integer
           minimum: 0

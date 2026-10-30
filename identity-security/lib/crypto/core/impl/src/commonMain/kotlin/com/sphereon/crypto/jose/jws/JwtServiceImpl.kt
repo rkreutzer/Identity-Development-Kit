@@ -42,11 +42,11 @@ import kotlin.native.ObjCName
 @OptIn(ExperimentalObjCName::class)
 @ObjCName("JwtServiceImpl", exact = true)
 class JwtServiceImpl(
-    private val prepareJwsCommand: PrepareJwsCommand,
-    private val createJwsCompactCommand: CreateJwsCompactCommand,
-    private val createJwsJsonFlattenedCommand: CreateJwsJsonFlattenedCommand,
-    private val createJwsJsonGeneralCommand: CreateJwsJsonGeneralCommand,
-    private val verifyJwsCommand: VerifyJwsCommand,
+    private val prepareJwsCommand: Lazy<PrepareJwsCommand>,
+    private val createJwsCompactCommand: Lazy<CreateJwsCompactCommand>,
+    private val createJwsJsonFlattenedCommand: Lazy<CreateJwsJsonFlattenedCommand>,
+    private val createJwsJsonGeneralCommand: Lazy<CreateJwsJsonGeneralCommand>,
+    private val verifyJwsCommand: Lazy<VerifyJwsCommand>,
 ) : JwtService {
     @dev.zacsweers.metro.ContributesTo(scope = SessionScope::class)
     interface Graph {
@@ -57,11 +57,11 @@ class JwtServiceImpl(
      * Implementation of Commands that exposes the injected command instances
      */
     inner class CommandsImpl : JwtService.Commands {
-        override val prepareJws: PrepareJwsCommand = this@JwtServiceImpl.prepareJwsCommand
-        override val createJwsCompact: CreateJwsCompactCommand = this@JwtServiceImpl.createJwsCompactCommand
-        override val createJwsJsonFlattened: CreateJwsJsonFlattenedCommand = this@JwtServiceImpl.createJwsJsonFlattenedCommand
-        override val createJwsJsonGeneral: CreateJwsJsonGeneralCommand = this@JwtServiceImpl.createJwsJsonGeneralCommand
-        override val verifyJws: VerifyJwsCommand = this@JwtServiceImpl.verifyJwsCommand
+        override val prepareJws: PrepareJwsCommand get() = this@JwtServiceImpl.prepareJwsCommand.value
+        override val createJwsCompact: CreateJwsCompactCommand get() = this@JwtServiceImpl.createJwsCompactCommand.value
+        override val createJwsJsonFlattened: CreateJwsJsonFlattenedCommand get() = this@JwtServiceImpl.createJwsJsonFlattenedCommand.value
+        override val createJwsJsonGeneral: CreateJwsJsonGeneralCommand get() = this@JwtServiceImpl.createJwsJsonGeneralCommand.value
+        override val verifyJws: VerifyJwsCommand get() = this@JwtServiceImpl.verifyJwsCommand.value
     }
 
     override val commands: JwtService.Commands = CommandsImpl()
@@ -82,13 +82,13 @@ class JwtServiceImpl(
     ): JwtCompactResult = prepared.assembleCompact(signatureBytes)
 
     // Delegate service methods to commands
-    override suspend fun prepareJws(args: CreateJwsJsonArgs): IdkResult<PreparedJwsObject, IdkError> = prepareJwsCommand.execute(args)
+    override suspend fun prepareJws(args: CreateJwsJsonArgs): IdkResult<PreparedJwsObject, IdkError> = prepareJwsCommand.value.execute(args)
 
-    override suspend fun createJwsCompact(args: CreateJwsArgs): IdkResult<JwtCompactResult, IdkError> = createJwsCompactCommand.execute(args)
+    override suspend fun createJwsCompact(args: CreateJwsArgs): IdkResult<JwtCompactResult, IdkError> = createJwsCompactCommand.value.execute(args)
 
-    override suspend fun createJwsJsonFlattened(args: CreateJwsJsonArgs): IdkResult<JwsJsonFlattened, IdkError> = createJwsJsonFlattenedCommand.execute(args)
+    override suspend fun createJwsJsonFlattened(args: CreateJwsJsonArgs): IdkResult<JwsJsonFlattened, IdkError> = createJwsJsonFlattenedCommand.value.execute(args)
 
-    override suspend fun createJwsJsonGeneral(args: CreateJwsJsonArgs): IdkResult<JwsJsonGeneral, IdkError> = createJwsJsonGeneralCommand.execute(args)
+    override suspend fun createJwsJsonGeneral(args: CreateJwsJsonArgs): IdkResult<JwsJsonGeneral, IdkError> = createJwsJsonGeneralCommand.value.execute(args)
 
-    override suspend fun verifyJws(args: VerifyJwsArgs): IdkResult<JwsValidationResult, IdkError> = verifyJwsCommand.execute(args)
+    override suspend fun verifyJws(args: VerifyJwsArgs): IdkResult<JwsValidationResult, IdkError> = verifyJwsCommand.value.execute(args)
 }

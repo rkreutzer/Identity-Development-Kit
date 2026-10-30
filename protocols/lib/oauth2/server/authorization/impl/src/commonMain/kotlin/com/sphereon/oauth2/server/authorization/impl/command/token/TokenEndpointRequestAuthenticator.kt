@@ -41,6 +41,7 @@ import com.sphereon.oauth2.server.authorization.impl.command.TokenPathStage
 import com.sphereon.oauth2.server.authorization.impl.command.TokenPathStageTimings
 import com.sphereon.oauth2.server.authorization.impl.command.token.grant.errOf
 import com.sphereon.oauth2.server.authorization.impl.command.token.grant.invalidDpopProof
+import kotlinx.coroutines.CancellationException
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Instant
 
@@ -57,7 +58,7 @@ internal class AuthenticatedTokenRequest(
  */
 internal class TokenEndpointRequestAuthenticator(
     private val parseTokenRequestCommand: ParseTokenRequestCommand,
-    private val verifyClientAuthenticationCommand: VerifyClientAuthenticationCommand,
+    private val verifyClientAuthenticationCommand: Lazy<VerifyClientAuthenticationCommand>,
     private val serversConfigProvider: OAuth2ServersConfigProvider,
     private val verifyDpopProofCommand: Lazy<VerifyDpopProofCommand>,
     private val dpopProofJtiCache: Lazy<DpopProofJtiCache>,
@@ -116,14 +117,6 @@ internal class TokenEndpointRequestAuthenticator(
                 tokenRequest.clientAuthentication
             }
 
-        // Keep selected-command construction separate from execution. The command lives in the
-        // request SessionScope, so otherwise its DI cost is folded into client authentication and
-        // cannot be distinguished from registry/configuration I/O inside the command itself.
-        val selectedVerifyClientAuthentication =
-            timings.record(TokenPathStage.CLIENT_AUTHENTICATION_COMMAND_RESOLUTION) {
-                verifyClientAuthenticationCommand
-            }
-
         // For none-auth code and refresh requests, the grant verifier has the persisted code or
         // refresh-token row needed to distinguish an admitted wallet from an unknown client.
         val deferNoneClientAuthenticationToGrantVerifier =
@@ -139,6 +132,14 @@ internal class TokenEndpointRequestAuthenticator(
                     method = ClientAuthenticationMethod.NONE,
                 )
             } else {
+                // Keep selected-command construction separate from execution. The command lives in
+                // the request SessionScope and is only resolved here, so a request that defers or
+                // skips client authentication never builds it, and its DI cost is not folded into
+                // the registry and configuration I/O measured inside the command itself.
+                val selectedVerifyClientAuthentication =
+                    timings.record(TokenPathStage.CLIENT_AUTHENTICATION_COMMAND_RESOLUTION) {
+                        verifyClientAuthenticationCommand.value
+                    }
                 timings
                     .record(TokenPathStage.CLIENT_AUTHENTICATION) {
                         selectedVerifyClientAuthentication.execute(
@@ -239,11 +240,22 @@ internal class TokenEndpointRequestAuthenticator(
         }
 
         val jti = verified.payload.jti
-        if (dpopProofJtiCache.value.hasBeenUsed(jti)) {
-            return invalidDpopProof("DPoP proof jti '$jti' has already been used")
-        }
         val iat = Instant.fromEpochSeconds(verified.payload.iat)
-        dpopProofJtiCache.value.markAsUsed(jti, iat + DPOP_JTI_REPLAY_WINDOW)
+        // Scope a proof identifier to its verified public key. UTF-8 byte-length framing
+        // makes the address unambiguous even when either value contains delimiters.
+        val thumbprint = verified.jwkThumbprint
+        val replayAddress = "${thumbprint.encodeToByteArray().size}:$thumbprint${jti.encodeToByteArray().size}:$jti"
+        val reserved =
+            try {
+                dpopProofJtiCache.value.recordIfNew(replayAddress, iat + DPOP_JTI_REPLAY_WINDOW)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return invalidDpopProof("DPoP replay protection is unavailable")
+            }
+        if (!reserved) {
+            return invalidDpopProof("DPoP proof could not be reserved against replay")
+        }
         return Ok(verified.jwkThumbprint)
     }
 

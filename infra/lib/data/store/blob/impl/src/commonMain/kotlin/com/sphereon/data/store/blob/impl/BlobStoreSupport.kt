@@ -144,16 +144,18 @@ class BlobStoreConfigBinderImpl(
             val binder = createPolymorphicBinder(prefix)
             val configResult = binder.getEntryConfigResult(configService, storeId)
             if (configResult.isOk) {
-                log.debug("Blob store config for '$storeId': ${configResult.value}")
+                log.debug("Blob store configuration bound successfully")
                 return configResult.value
             }
             if (configResult.error.code != notFoundCode) {
+                log.warn("BLOB_STORE_CONFIG_RESOLUTION_FAILED stage=configuration-binding")
                 throw IllegalArgumentException(
                     "Failed to bind blob store config for '$storeId' under prefix '$prefix': ${configResult.error.message.defaultMessage}",
                 )
             }
         }
 
+        log.warn("BLOB_STORE_CONFIG_RESOLUTION_FAILED stage=lookup code=NOT_FOUND_ERROR")
         throw IllegalArgumentException("Blob store config not found for store ID: $storeId")
     }
 

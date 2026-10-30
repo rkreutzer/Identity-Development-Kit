@@ -83,6 +83,7 @@ import com.sphereon.openid.oid4vci.issuer.lifecycle.Oid4vciIssuancePhase
 import com.sphereon.openid.oid4vci.issuer.lifecycle.Oid4vciPhaseLifecycleArgs
 import com.sphereon.openid.oid4vci.issuer.proof.VerifiedKeyAttestation
 import com.sphereon.openid.oid4vci.issuer.proof.VerifiedProof
+import com.sphereon.openid.oid4vci.issuer.spi.IssuerFederationEntityResolver
 import com.sphereon.openid.oid4vci.issuer.store.CredentialIssuanceSessionStore
 import com.sphereon.openid.oid4vci.issuer.store.CredentialRequestIdentity
 import com.sphereon.openid.oid4vci.issuer.store.CredentialRequestIdentityStore
@@ -202,6 +203,13 @@ class HandleCredentialRequestCommandImpl(
      */
     private val clock: Clock,
     private val contributionWaiter: CredentialAttributeContributionWaiter? = null,
+    /**
+     * Optional OpenID Federation membership of the issuer. When bound and the issuer is a
+     * federation entity, its Entity Identifier is placed in every issued credential (DIIP v5
+     * Appendix B). Null in deployments that do not host federation entities: credentials are
+     * issued without federation content.
+     */
+    private val federationEntityResolver: IssuerFederationEntityResolver? = null,
 ) : TypedServiceCommandAdapter<HandleCredentialRequestArgs, CredentialResponse, IdkError>(
         commandId = HandleCredentialRequestCommand.COMMAND_ID,
         execution = execution,
@@ -862,6 +870,14 @@ class HandleCredentialRequestCommandImpl(
         val statusListBinding =
             issuerConfigProvider.statusListBindingForIssuance(configId).getOrElse { return Err(it) }
 
+        // DIIP v5 Appendix B: an issuer that is an OpenID Federation entity names its Entity
+        // Identifier in every credential. Resolved once per request, before any status entry is
+        // reserved; a membership that cannot be determined refuses the request instead of issuing
+        // a credential that may lack the required federation content.
+        val federationEntityIdentifier =
+            resolveIssuerFederationEntityIdentifier(federationEntityResolver, expectedAudience)
+                .getOrElse { return Err(it) }
+
         val businessMode = execution.conf.app.getPropertyAsString("oid4vci.business-authorization.mode")
         if (businessMode != "ordinary" && businessMode != "required") {
             return Err(IdkError.FORBIDDEN_ERROR(message = "issuer_business_policy_not_configured"))
@@ -929,6 +945,7 @@ class HandleCredentialRequestCommandImpl(
                                             issuanceClockSkewInSeconds = issuerConfigProvider.issuanceClockSkewInSeconds,
                                             expirationInDays = expirationInDays,
                                             statusListBinding = statusListBinding,
+                                            federationEntityIdentifier = federationEntityIdentifier,
                                         )
                                     handler.issueCredential(request, issuanceContext)
                                 }
@@ -987,6 +1004,7 @@ class HandleCredentialRequestCommandImpl(
                         signingX5c = signingConfig.signingX5c,
                         expirationInDays = expirationInDays,
                         statusListBinding = statusListBinding,
+                        federationEntityIdentifier = federationEntityIdentifier,
                     )
 
                 val envelope =

@@ -25,10 +25,14 @@ import com.sphereon.oauth2.server.authorization.storage.PendingAuthorizationSess
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
+import dev.zacsweers.metro.Named
 import dev.zacsweers.metro.SingleIn
 import dev.zacsweers.metro.binding
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.CancellationException
+import com.sphereon.oauth2.server.authorization.time.OAUTH2_ARTIFACT_CLOCK
+import kotlin.time.Clock
 
 /**
  * In-memory backing for [PendingAuthorizationSessionStore] suitable for development, OIDF
@@ -42,9 +46,17 @@ import kotlinx.coroutines.sync.withLock
 @Inject
 @SingleIn(AppScope::class)
 @ContributesBinding(AppScope::class, binding = binding<PendingAuthorizationSessionStore>())
-class InMemoryPendingAuthorizationSessionStore : PendingAuthorizationSessionStore {
+class InMemoryPendingAuthorizationSessionStore(
+    @param:Named(OAUTH2_ARTIFACT_CLOCK) private val clock: Clock = Clock.System,
+) : PendingAuthorizationSessionStore {
     private val mutex = Mutex()
     private val sessions = mutableMapOf<String, AuthorizationSession>()
+
+    override suspend fun consume(sessionId: String): IdkResult<AuthorizationSession?, IdkError> =
+        try {
+            Ok(mutex.withLock { sessions.remove(sessionId)?.takeIf { it.expiresAt > clock.now() } })
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { Err(IdkError.fromString(code = "storage_error", message = "Failed to consume pending authorization session")) }
 
     override suspend fun create(session: AuthorizationSession): IdkResult<AuthorizationSession, IdkError> =
         try {

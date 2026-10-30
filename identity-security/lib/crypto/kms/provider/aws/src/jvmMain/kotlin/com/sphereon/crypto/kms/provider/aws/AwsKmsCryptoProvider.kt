@@ -20,6 +20,7 @@ package com.sphereon.crypto.kms.provider.aws
 import aws.sdk.kotlin.services.kms.KmsClient
 import aws.sdk.kotlin.services.kms.model.CreateAliasRequest
 import aws.sdk.kotlin.services.kms.model.CreateKeyRequest
+import aws.sdk.kotlin.services.kms.model.CreateKeyResponse
 import aws.sdk.kotlin.services.kms.model.DeleteAliasRequest
 import aws.sdk.kotlin.services.kms.model.DecryptRequest
 import aws.sdk.kotlin.services.kms.model.DeriveSharedSecretRequest
@@ -56,6 +57,10 @@ import com.sphereon.crypto.core.kms.model.KeyProviderSettings
 import com.sphereon.crypto.core.kms.model.AwsKmsClientConfig
 import com.sphereon.crypto.core.kms.model.CredentialMode
 import com.sphereon.crypto.core.toKeyReference
+import kotlinx.coroutines.currentCoroutineContext
+import com.sphereon.crypto.core.kms.ManagedKeyCreationAttempt
+import com.sphereon.crypto.core.kms.ManagedKeyCreationAttemptState
+import com.sphereon.crypto.core.kms.ManagedKeyCreationAttemptIntent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -144,6 +149,9 @@ actual class AwsKmsCryptoProvider actual constructor(
     @Volatile
     private var sharedClient: KmsClient? = null
     private val clientMutex = Mutex()
+    private var managedCreationCall: suspend (KmsClient, CreateKeyRequest) -> CreateKeyResponse = { client, request ->
+        singleAttemptManagedCreationClient(client).use { it.createKey(request) }
+    }
     private var tenantAssignmentReader: AwsKmsTenantAssignmentReader? = null
 
     override suspend fun isAssignedToTenant(
@@ -183,6 +191,13 @@ actual class AwsKmsCryptoProvider actual constructor(
         this.sharedClient = client
     }
 
+    internal constructor(
+        settings: KeyProviderSettings,
+        client: KmsClient,
+        managedCreationCall: suspend (KmsClient, CreateKeyRequest) -> CreateKeyResponse,
+    ) : this(settings, client) {
+        this.managedCreationCall = managedCreationCall
+    }
     private suspend fun defaultTenantAssignmentReader(): AwsKmsTenantAssignmentReader {
         val client = getAWSKmsClient()
         return object : AwsKmsTenantAssignmentReader {
@@ -287,11 +302,24 @@ actual class AwsKmsCryptoProvider actual constructor(
 
         // Create key in AWS KMS
         val client = getAWSKmsClient()
-        val createKeyResponse = client.createKey(CreateKeyRequest {
+        val attempt = currentCoroutineContext()[ManagedKeyCreationAttempt]
+        if (attempt != null) {
+            require(attempt.providerId == id && attempt.backingAlias == alias && !keyAgreementKey) { "Managed creation scope does not match the provider" }
+            when (attempt.state()) {
+                ManagedKeyCreationAttemptState.REVOKED -> error("Managed creation authority was revoked")
+                ManagedKeyCreationAttemptState.CLAIMED -> return recoverCreationPair(client, attempt, signingAlgorithm)
+                ManagedKeyCreationAttemptState.UNCLAIMED -> {
+                    check(attempt.intent == ManagedKeyCreationAttemptIntent.CREATE_OR_RECOVER) { "Recovery authority cannot create a key" }
+                    if (!attempt.claimCreateOnce()) return recoverCreationPair(client, attempt, signingAlgorithm)
+                }
+            }
+        }
+        val createRequest = CreateKeyRequest {
+            if (attempt != null) tags = managedCreationTags(attempt)
             this.keyUsage = if (keyAgreementKey) KeyUsageType.KeyAgreement else KeyUsageType.SignVerify
             this.keySpec = keySpec
-        })
-
+        }
+        val createKeyResponse = if (attempt == null) client.createKey(createRequest) else managedCreationCall(client, createRequest)
         val kid = createKeyResponse.keyMetadata?.keyId?.let(::awsCanonicalKeyId)
             ?: throw IllegalStateException("Failed to retrieve key ID after creation")
 
@@ -340,6 +368,9 @@ actual class AwsKmsCryptoProvider actual constructor(
             cose = CoseKeyPair(null, CoseJoseKeyMappingService.toCoseKey(jwk))
         )
     }
+
+    override fun rawSignatureEncoding(algorithm: SignatureAlgorithm): com.sphereon.crypto.core.kms.command.SignatureEncoding? =
+        if (algorithm.jose?.value?.startsWith("ES") == true) com.sphereon.crypto.core.kms.command.SignatureEncoding.DER else com.sphereon.crypto.core.kms.command.SignatureEncoding.RAW
 
     override suspend fun createRawSignature(
         keyInfo: KeyInfoType<*>,
@@ -634,9 +665,40 @@ actual class AwsKmsCryptoProvider actual constructor(
 
     override suspend fun getKey(keyInfo: KeyInfoType<*>): ManagedKeyInfoType<*> {
         return getAWSKmsClient().let { client ->
+            val attempt = currentCoroutineContext()[ManagedKeyCreationAttempt]
+            if (attempt != null) {
+                require(attempt.providerId == id && keyInfo.alias == attempt.backingAlias) { "Managed creation scope does not match key lookup" }
+                check(attempt.authorizeRecovery()) { "Managed creation recovery is not authorized" }
+                when (attempt.state()) {
+                    ManagedKeyCreationAttemptState.REVOKED -> error("Managed creation authority was revoked")
+                    ManagedKeyCreationAttemptState.CLAIMED -> return@let recoverCreationPair(client, attempt,
+                        requireNotNull(keyInfo.signatureAlgorithm)).joseToManagedKeyInfo()
+                    ManagedKeyCreationAttemptState.UNCLAIMED -> Unit
+                }
+                // The journal has not granted any physical creation. Probe its exact server
+                // alias, independently of an optional key selector carried by the caller.
+                try {
+                    client.getPublicKey(GetPublicKeyRequest {
+                        keyId = if (attempt.backingAlias.startsWith("alias/")) attempt.backingAlias else "alias/${attempt.backingAlias}"
+                    })
+                } catch (missing: NotFoundException) {
+                    if (attempt.intent == ManagedKeyCreationAttemptIntent.RECOVER_FOR_REVOCATION) {
+                        check(attempt.authorizeRecovery() && attempt.state() == ManagedKeyCreationAttemptState.UNCLAIMED) {
+                            "Unclaimed managed creation authority changed"
+                        }
+                        attempt.reportRevoked()
+                    }
+                    throw com.sphereon.core.api.error.NotFoundException(resource = "AWS KMS key", cause = missing)
+                }
+                error("An unclaimed managed creation alias already exists")
+            }
             val resolvedKeyId = determineAwsKeyId(keyInfo)
             val resolvedAlias = keyInfo.alias ?: keyInfo.kid ?: resolvedKeyId
-            val response = client.getPublicKey(GetPublicKeyRequest { keyId = resolvedKeyId })
+            val response = try {
+                client.getPublicKey(GetPublicKeyRequest { keyId = resolvedKeyId })
+            } catch (missing: NotFoundException) {
+                throw com.sphereon.core.api.error.NotFoundException(resource = "AWS KMS key", cause = missing)
+            }
             response.publicKey?.let {
 
                 toManagedKeyPair(
@@ -651,12 +713,38 @@ actual class AwsKmsCryptoProvider actual constructor(
         }
     }
 
+    private suspend fun recoverCreationPair(client: KmsClient, attempt: ManagedKeyCreationAttempt, algorithm: SignatureAlgorithm): ManagedKeyPair {
+        val keyId = recoverManagedCreationKey(client, attempt, algorithm)
+        val response = client.getPublicKey(GetPublicKeyRequest { this.keyId = keyId })
+        require(response.keyId?.let(::awsCanonicalKeyId) == keyId && response.publicKey != null) { "Managed creation public receipt is inconsistent" }
+        check(attempt.authorizeRecovery()) { "Managed creation authority changed" }
+        return toManagedKeyPair(requireNotNull(response.publicKey), keyId, attempt.backingAlias, algorithm)
+    }
     override suspend fun storeKey(keyInfo: ResolvedKeyInfoType<*>, providerId: String, alias: String, certChain: Array<Certificate>?): ManagedKeyInfoType<*> {
         throw UnsupportedOperationException("AWS KMS does not support storing keys, it generates them only")
     }
 
     override suspend fun deleteKey(keyInfo: KeyInfoType<*>): Boolean {
         return getAWSKmsClient().let { client ->
+            val attempt = currentCoroutineContext()[ManagedKeyCreationAttempt]
+            if (attempt != null) {
+                require(attempt.intent == ManagedKeyCreationAttemptIntent.RECOVER_FOR_REVOCATION &&
+                    attempt.providerId == id && attempt.backingAlias == keyInfo.alias &&
+                    attempt.state() == ManagedKeyCreationAttemptState.CLAIMED && attempt.authorizeRecovery()) { "Managed deletion is not authorized" }
+                val physicalId = awsCanonicalKeyId(requireNotNull(keyInfo.kid))
+                val metadata = try { client.describeKey(DescribeKeyRequest { this.keyId = physicalId }).keyMetadata }
+                    catch (missing: NotFoundException) { throw com.sphereon.core.api.error.NotFoundException("AWS KMS key", cause = missing) }
+                    ?: error("Managed deletion metadata is missing")
+                require(metadata.keyId == physicalId && metadata.keySpec == expectedManagedKeySpec(requireNotNull(keyInfo.signatureAlgorithm)) &&
+                    metadata.keyUsage == KeyUsageType.SignVerify && metadata.origin == OriginType.AwsKms && metadata.keyManager == KeyManagerType.Customer &&
+                    metadata.keyState in setOf(KeyState.Enabled, KeyState.Disabled, KeyState.PendingDeletion) &&
+                    hasManagedCreationTags(client, physicalId, attempt)) { "Managed deletion receipt is inconsistent" }
+                check(attempt.authorizeRecovery()) { "Managed deletion authority changed" }
+                if (metadata.keyState == KeyState.PendingDeletion) return@let true
+                val removed = client.scheduleKeyDeletion(ScheduleKeyDeletionRequest { this.keyId = physicalId; pendingWindowInDays = 7 }).keyState == KeyState.PendingDeletion
+                check(attempt.authorizeRecovery()) { "Managed deletion authority changed" }
+                return@let removed
+            }
             val keyId = if (keyInfo.kid != null) keyInfo.kid else getKey(keyInfo).kid ?: determineAwsKeyId(keyInfo)  // We fetch the key first, since deletion can only happen via kid and not an alias!
             client.scheduleKeyDeletion(ScheduleKeyDeletionRequest {
                 this.keyId = keyId

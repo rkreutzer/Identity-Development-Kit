@@ -188,6 +188,8 @@ data class WalletTrustChainHop(
     val position: WalletTrustChainHopPosition,
     val displayName: String? = null,
     val assertedBy: String? = null,
+    /** The organisation behind this hop, as the chain's signed statements describe it. */
+    val organisation: WalletCounterpartyOrganisation? = null,
 ) {
     init {
         require(identifier.isNotBlank()) { "wallet_trust_chain_hop_identifier_blank" }
@@ -203,11 +205,32 @@ data class WalletTrustChainHop(
 data class WalletTrustChain(
     val hops: List<WalletTrustChainHop>,
     val links: WalletTrustChainLinks,
+    /** Verified trust mark types the counterparty holds under the chain's anchor. */
+    val trustMarks: List<String> = emptyList(),
 ) {
     init {
         require(hops.isNotEmpty()) { "wallet_trust_chain_hops_empty" }
+        require(trustMarks.none(String::isBlank)) { "wallet_trust_chain_trust_mark_blank" }
     }
 }
+
+/**
+ * Organisation details a trust framework vouches for, such as the signed OpenID Federation
+ * `federation_entity` metadata of the counterparty. Never the counterparty's self-declared display data.
+ */
+@Serializable
+data class WalletCounterpartyOrganisation(
+    val name: String? = null,
+    val legalName: String? = null,
+    /** Email addresses, phone numbers or URLs, as published. */
+    val contacts: List<String> = emptyList(),
+    val website: String? = null,
+    val contactPage: String? = null,
+    val privacyPolicy: String? = null,
+    val logoUri: String? = null,
+    /** Display name of the authority whose signed statement carries these details. */
+    val attestedBy: String? = null,
+)
 
 @Serializable
 enum class WalletTrustDomainPosture {
@@ -276,6 +299,8 @@ data class WalletCounterpartyTrustSummary(
     val trustChain: WalletTrustChain? = null,
     val domainAdmission: WalletTrustDomainAdmission? = null,
     val attestationAuthorisation: WalletAttestationAuthorisation? = null,
+    /** Organisation details vouched for by the trust framework that recognised the counterparty. */
+    val organisation: WalletCounterpartyOrganisation? = null,
     /** Immutable key-binding result used by receive-time JWT VC verification. */
     val issuerAuthentication: WalletIssuerAuthenticationResult? = null,
 )

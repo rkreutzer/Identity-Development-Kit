@@ -120,6 +120,12 @@ data class GenericHttpRequest(
     val clientCertificateChain: List<ByteArray>? = null,
     /** Ingress path retained by route dispatch before mount and tenant prefixes are stripped. */
     val originalPath: String? = null,
+    /**
+     * Decoded query occurrences, preserving each value without joining delimiters.
+     * Transport adapters populate this view; scalar-only in-process callers may leave it empty.
+     * A present key is authoritative even when its list is empty or contains one value.
+     */
+    val multiValueQueryParameters: Map<String, List<String>> = emptyMap(),
 ) {
     /**
      * Request body as String - lazily loaded only when accessed.
@@ -202,7 +208,7 @@ data class GenericHttpRequest(
      *
      * NOTE: This overload shadows the data class auto-generated `copy(...)` because the
      * defaults must explicitly forward [bodySupplier] / [bodyContent] / [multiValueHeaders]
-     * / [originalPath]
+     * / [originalPath] / [multiValueQueryParameters]
      * from `this`. Forgetting to thread any of them silently drops the field on every
      * downstream `request.copy(path = ...)` call (e.g. base-path stripping in
      * [com.sphereon.core.api.http.command.CommandBackedHttpAdapter.stripAdapterBasePath])
@@ -218,6 +224,7 @@ data class GenericHttpRequest(
         multiValueHeaders: Map<String, List<String>> = this.multiValueHeaders,
         clientCertificateChain: List<ByteArray>? = this.clientCertificateChain,
         originalPath: String? = this.originalPath,
+        multiValueQueryParameters: Map<String, List<String>> = this.multiValueQueryParameters,
     ): GenericHttpRequest =
         GenericHttpRequest(
             method = method,
@@ -231,6 +238,7 @@ data class GenericHttpRequest(
             bodyContent = bodyContent,
             clientCertificateChain = clientCertificateChain,
             originalPath = originalPath,
+            multiValueQueryParameters = multiValueQueryParameters,
         )
 
     companion object {

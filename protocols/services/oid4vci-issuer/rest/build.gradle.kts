@@ -65,6 +65,13 @@ kotlin {
                 // per-tenant URLs at serve time. Pure model module, no heavy transitive deps.
                 implementation(if (rootProject.findProperty("idk.consumeInfrastructureAsArtifacts") == "true") "com.sphereon.idk:lib-data-store-credential-design-public:$version" else project(":lib-data-store-credential-design-public"))
 
+                // Public design-asset descriptors require the real tenant asset content command.
+                // Keep its storage implementations visible to this standalone Metro composition
+                // root, including when infrastructure libraries are consumed as Maven artifacts.
+                implementation(if (rootProject.findProperty("idk.consumeInfrastructureAsArtifacts") == "true") "com.sphereon.idk:lib-data-store-asset-impl:$version" else project(":lib-data-store-asset-impl"))
+                implementation(if (rootProject.findProperty("idk.consumeInfrastructureAsArtifacts") == "true") "com.sphereon.idk:lib-data-store-blob-impl:$version" else project(":lib-data-store-blob-impl"))
+                implementation(if (rootProject.findProperty("idk.consumeInfrastructureAsArtifacts") == "true") "com.sphereon.idk:lib-data-store-blob-impl-memory:$version" else project(":lib-data-store-blob-impl-memory"))
+
                 // JSON-LD validation bindings — `VcLdJsonJwtFormatHandler` (in
                 // libOpenidOid4vciIssuerImpl) injects ValidateJsonLdContextServiceCommand
                 // and ValidateJsonLdSchemaServiceCommand. The standalone Ktor server's

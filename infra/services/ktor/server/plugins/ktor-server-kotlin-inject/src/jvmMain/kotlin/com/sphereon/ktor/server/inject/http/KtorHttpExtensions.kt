@@ -24,14 +24,15 @@ import com.sphereon.core.api.http.GenericHttpRequest
 import com.sphereon.core.api.http.GenericHttpResponse
 import com.sphereon.core.api.http.LazyMap
 import com.sphereon.core.api.http.command.CommandBackedHttpAdapter
+import com.sphereon.ktor.server.inject.resolveHttpRequestBodyFraming
 import io.ktor.http.ContentType
-import io.ktor.http.HttpMethod
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.ApplicationRequest
-import io.ktor.server.request.contentLength
 import io.ktor.server.request.contentType
 import io.ktor.server.request.httpMethod
+import io.ktor.server.request.httpVersion
 import io.ktor.server.request.path
 import io.ktor.server.request.receiveChannel
 import io.ktor.server.request.receiveText
@@ -95,15 +96,22 @@ suspend fun ApplicationRequest.toGenericHttpRequest(call: ApplicationCall, maxBo
     val method = this.httpMethod.value
     val request = this
 
+    // Validate raw framing before the best-effort body-read catch below.
+    val framing = resolveHttpRequestBodyFraming(
+        request.httpVersion,
+        request.headers.getAll(HttpHeaders.ContentLength).orEmpty(),
+        request.headers.getAll(HttpHeaders.TransferEncoding).orEmpty(),
+    )
+    val contentLength = framing.contentLength
+
     // Read body immediately (Ktor's receiveText is suspend and can only be called once).
     // Chunked clients do not always send Content-Length, so body-capable methods must still
     // be read when the length is unknown.
     val bodyContent =
         try {
             val contentType = request.contentType()
-            val contentLength = request.contentLength()
             if (maxBodyBytes != null && contentLength != null && contentLength > maxBodyBytes) throw RequestBodyTooLargeException()
-            if (request.httpMethod.mayCarryRequestBody() && contentLength != 0L) {
+            if (framing.shouldReadBody) {
                 if (maxBodyBytes != null) {
                     val bytes = readBoundedRequestBytes(call.receiveChannel(), maxBodyBytes)
                     if (contentType.isTextLikeRequestBody()) GenericHttpBody.Text(bytes.decodeToString()) else GenericHttpBody.Bytes(bytes)
@@ -184,9 +192,6 @@ private fun ContentType?.isTextLikeRequestBody(): Boolean {
 
 // DELETE carries a body on revision-CAS admin routes (the OpenAPI requires it); dropping it
 // turned a valid delete into "Expected start of the object '{', but had 'EOF'".
-private fun HttpMethod.mayCarryRequestBody(): Boolean =
-    this == HttpMethod.Post || this == HttpMethod.Put || this == HttpMethod.Patch || this == HttpMethod.Delete
-
 /** Overflow is handled as 413 by the server, never converted to an empty body. */
 class RequestBodyTooLargeException : IllegalArgumentException("Request body exceeds endpoint byte limit")
 

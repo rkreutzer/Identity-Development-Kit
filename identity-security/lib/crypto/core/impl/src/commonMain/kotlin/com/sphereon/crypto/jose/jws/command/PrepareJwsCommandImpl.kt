@@ -79,6 +79,7 @@ class PrepareJwsCommandImpl(
         // Resolve the identifier
         val identifierResult = identifierService.resolve(issuer)
         if (identifierResult.isErr) {
+            log.error("JWS preparation failed command=$commandId stage=identifier-resolution idk_code=${identifierResult.error.code}")
             return IdkResult.err(IdkError.fromDTO(identifierResult.error))
         }
 

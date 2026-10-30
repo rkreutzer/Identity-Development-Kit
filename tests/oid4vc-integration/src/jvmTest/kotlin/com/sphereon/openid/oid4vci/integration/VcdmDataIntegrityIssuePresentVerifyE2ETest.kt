@@ -214,7 +214,11 @@ class VcdmDataIntegrityIssuePresentVerifyE2ETest {
                     credentialConfigurationId = "vcdm-di-v2",
                     credentialConfiguration = configuration,
                     holderBindingKey = null,
-                    attributes = mapOf("name" to JsonPrimitive(name)),
+                    attributes = emptyMap(),
+                    credentialSubjects =
+                        listOf(
+                            JsonObject(mapOf("id" to JsonPrimitive(holderDid), "name" to JsonPrimitive(name))),
+                        ),
                     signingKeyAlias = issuerAlias,
                     signingKeyMode = SigningKeyMode.JwkThumbprint,
                     signingVerificationMethodId = issuer.verificationMethod,
@@ -224,7 +228,9 @@ class VcdmDataIntegrityIssuePresentVerifyE2ETest {
                 ),
             )
         assertTrue(result.isOk, "production ldp_vc issuer must issue VCDM 2.0 DI credentials: ${if (result.isErr) result.error else ""}")
-        return result.value.credential.jsonObject
+        val credential = result.value.credential.jsonObject
+        assertEquals(JsonPrimitive(holderDid), credential.getValue("credentialSubject").jsonObject["id"])
+        return credential
     }
 
     private suspend fun createRequest(

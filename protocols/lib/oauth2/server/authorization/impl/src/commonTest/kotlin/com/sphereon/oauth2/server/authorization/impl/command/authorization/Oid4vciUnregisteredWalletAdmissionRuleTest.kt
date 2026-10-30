@@ -67,6 +67,7 @@ class Oid4vciUnregisteredWalletAdmissionRuleTest {
             emptySet(),
             resolver(),
             rule,
+            com.sphereon.oauth2.server.authorization.impl.testutil.fixedAsInstanceIdProvider(),
         )
         val result = command.execute(validRequest())
         assertTrue(result.isOk)

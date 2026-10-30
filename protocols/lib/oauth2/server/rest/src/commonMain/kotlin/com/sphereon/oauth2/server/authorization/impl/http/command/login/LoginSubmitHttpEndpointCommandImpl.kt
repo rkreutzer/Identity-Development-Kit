@@ -35,8 +35,10 @@ import com.sphereon.oauth2.server.authorization.audit.OAuth2AuditEmitter
 import com.sphereon.oauth2.server.authorization.audit.OAuth2AuditEventType
 import com.sphereon.oauth2.server.authorization.command.login.LoginSubmitHttpEndpointCommand
 import com.sphereon.oauth2.server.authorization.impl.http.ResponseCategory
+import com.sphereon.oauth2.server.authorization.impl.http.OAuth2ServerBaseUrlResolver
 import com.sphereon.oauth2.server.authorization.impl.http.effectiveScheme
 import com.sphereon.oauth2.server.authorization.impl.http.loginCsrfCookieValue
+import com.sphereon.oauth2.server.authorization.impl.http.loginCsrfCookiePath
 import com.sphereon.oauth2.server.authorization.impl.http.loginSessionCookieHeader
 import com.sphereon.oauth2.server.authorization.impl.http.oauth2ErrorResponse
 import com.sphereon.oauth2.server.authorization.impl.http.parseFormBody
@@ -85,6 +87,7 @@ class LoginSubmitHttpEndpointCommandImpl(
     private val clock: Clock,
     private val auditEmitter: OAuth2AuditEmitter,
     private val csrfTokenizer: LoginCsrfTokenizer,
+    private val baseUrlResolver: OAuth2ServerBaseUrlResolver,
 ) : HttpEndpointCommandAdapter(
         id = LoginSubmitHttpEndpointCommand.COMMAND_ID,
         execution = execution,
@@ -161,7 +164,7 @@ class LoginSubmitHttpEndpointCommandImpl(
                 metadata = mapOf("error_subcode" to "missing_credentials"),
                 errorCode = "invalid_credentials",
             )
-            return Ok(redirectBackToLoginWithError(sessionId, returnUrl))
+            return Ok(redirectBackToLoginWithError(request, sessionId, returnUrl))
         }
 
         // Load the pending authorization session (read-only: findById does NOT consume; the
@@ -215,7 +218,7 @@ class LoginSubmitHttpEndpointCommandImpl(
                 errorCode = "invalid_credentials",
                 errorMessage = authResult.error.message.defaultMessage,
             )
-            return Ok(redirectBackToLoginWithError(sessionId, returnUrl))
+            return Ok(redirectBackToLoginWithError(request, sessionId, returnUrl))
         }
         val authenticatedUser =
             authResult.value
@@ -226,7 +229,7 @@ class LoginSubmitHttpEndpointCommandImpl(
                         metadata = mapOf("error_subcode" to "auth_provider_returned_null_subject"),
                         errorCode = "invalid_credentials",
                     )
-                    return Ok(redirectBackToLoginWithError(sessionId, returnUrl))
+                    return Ok(redirectBackToLoginWithError(request, sessionId, returnUrl))
                 }
         val sub = authenticatedUser.userId
 
@@ -350,14 +353,16 @@ class LoginSubmitHttpEndpointCommandImpl(
             else -> this
         }
 
-    private fun redirectBackToLoginWithError(
+    private suspend fun redirectBackToLoginWithError(
+        request: GenericHttpRequest,
         sessionId: String,
         returnUrl: String,
     ): GenericHttpResponse {
+        val trustedBase = baseUrlResolver.resolveBaseUrl(request, configProvider)
         val encodedReturn = percentEncodeQueryComponent(returnUrl)
         val encodedSession = percentEncodeQueryComponent(sessionId)
         val location =
-            "/login?session_id=$encodedSession&return_url=$encodedReturn&error=invalid_credentials"
+            "${loginCsrfCookiePath(trustedBase)}?session_id=$encodedSession&return_url=$encodedReturn&error=invalid_credentials"
         return GenericHttpResponse(
             statusCode = 302,
             headers = mapOf("Location" to location, "Cache-Control" to "no-store"),

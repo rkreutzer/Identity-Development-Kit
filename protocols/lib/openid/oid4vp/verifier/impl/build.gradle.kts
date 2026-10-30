@@ -95,6 +95,7 @@ kotlin {
                 // issuer side in lib-openid-oid4vci-issuer-impl.
                 api(if (rootProject.findProperty("idk.consumeIdentitySecurityAsArtifacts") == "true") "com.sphereon.idk:lib-jsonld-public:$version" else project(":lib-jsonld-public"))
                 implementation(if (rootProject.findProperty("idk.consumeIdentitySecurityAsArtifacts") == "true") "com.sphereon.idk:lib-jsonld-loader:$version" else project(":lib-jsonld-loader"))
+                implementation(if (rootProject.findProperty("idk.consumeIdentitySecurityAsArtifacts") == "true") "com.sphereon.idk:lib-jsonld-processor:$version" else project(":lib-jsonld-processor"))
 
                 // mDoc verification (Fix V-P0-11): MdocValidations + DeviceAuthValidation +
                 // SessionTranscriptCborCodec + DeviceResponseCborCodec for OID4VP iso_mdl path.

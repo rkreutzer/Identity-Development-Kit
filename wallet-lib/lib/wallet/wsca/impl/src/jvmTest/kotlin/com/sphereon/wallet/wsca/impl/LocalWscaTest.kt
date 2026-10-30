@@ -410,6 +410,42 @@ class LocalWscaTest {
         }
 
     @Test
+    fun oid4vciKeyAttestationUsesFinalNonceAndPublicJwkClaimsWithoutTs03Fields() =
+        runTest {
+            val profile = WalletUnitAttestationProfile.entries.firstOrNull { it.name == "OID4VCI_JWT" }
+            assertNotNull(profile, "Final OID4VCI key attestation needs an explicit format distinct from TS03")
+            val wsca = newLocalWsca().wsca
+            val key = wsca.createCredentialKey(
+                "wallet-final-ka", SecureComponentUsage.WALLET_CREDENTIAL_PROOF, SignatureAlgorithm.ECDSA_SHA256,
+            ).getOrElse { error(it.toString()) }
+            val result = wsca.attestKeys(
+                KeyAttestationIssueRequest(
+                    walletUnitId = "wallet-final-ka",
+                    walletAccountId = "wallet-final-ka",
+                    operationBinding = "test:ka:wallet-final-ka",
+                    profile = profile,
+                    attestedKeys = listOf(key),
+                    audience = "https://issuer.example.com",
+                    nonce = "fresh-issuer-nonce",
+                ),
+            ).getOrElse { error(it.toString()) }
+            val parts = result.artifact.material.value.split('.')
+            val header = Json.parseToJsonElement(parts[0].decodeFromBase64Url().decodeToString()).jsonObject
+            val claims = Json.parseToJsonElement(parts[1].decodeFromBase64Url().decodeToString()).jsonObject
+            assertEquals("key-attestation+jwt", header["typ"]?.jsonPrimitive?.content)
+            assertEquals("fresh-issuer-nonce", claims["nonce"]?.jsonPrimitive?.content)
+            assertNotNull(claims["iat"])
+            assertNotNull(claims["exp"])
+            assertFalse("c_nonce" in claims)
+            val publicJwk = Json.parseToJsonElement(assertNotNull(key.publicKeyJwk)).jsonObject
+            assertEquals(publicJwk, claims["attested_keys"]?.jsonArray?.single()?.jsonObject)
+            assertFalse("keyId" in claims["attested_keys"]!!.jsonArray.single().jsonObject)
+            assertFalse("d" in claims["attested_keys"]!!.jsonArray.single().jsonObject)
+            assertFalse("key_storage" in claims, "Uncertified software must not claim ISO attack resistance")
+            assertFalse("user_authentication" in claims)
+        }
+
+    @Test
     fun attestKeysProducesKeyAttestationJwtWithX5cAndAttestedKeys() =
         runTest {
             val wsca = newLocalWsca().wsca
@@ -539,12 +575,40 @@ class LocalWscaTest {
         }
 
     @Test
+    fun clientAttestationDoesNotPublishInternalWalletEvidenceAndUsesFreshJti() = runTest {
+        val wsca = newLocalWsca().wsca
+        val key = wsca.ensureKey("private-unit-1", SecureComponentUsage.OAUTH_CLIENT_AUTHENTICATION, SignatureAlgorithm.ECDSA_SHA256)
+            .getOrElse { error(it.toString()) }
+        val request = WscaClientAttestationAuthRequest(
+            walletUnitId = "private-unit-1", walletAccountId = "private-account-1",
+            operationBinding = "private-operation-1", clientId = "shared-wallet-implementation",
+            audience = "https://issuer-one.example", clientInstanceKey = key,
+            walletName = "VDX Test Wallet", walletVersion = "1.0.0",
+            signer = WalletProviderAttestationSignerRef(
+                signerId = "provider-signer", issuer = "https://wallet-provider.example",
+                signerProfile = "LOCAL_EVALUATION", certificateChain = listOf("leaf-only"),
+            ),
+            evidence = mapOf("walletUnitId" to "private-unit-1", "operationBinding" to "private-operation-1"),
+        )
+        fun payload(jwt: String) = Json.parseToJsonElement(jwt.split('.')[1].decodeFromBase64Url().decodeToString()).jsonObject
+        val first = wsca.createClientAttestationAuth(request).getOrElse { error(it.toString()) }
+        val second = wsca.createClientAttestationAuth(request.copy(audience = "https://issuer-two.example"))
+            .getOrElse { error(it.toString()) }
+        val firstClaims = payload(first.clientAttestationJwt)
+        assertEquals("shared-wallet-implementation", firstClaims["sub"]?.jsonPrimitive?.content)
+        assertFalse(firstClaims.toString().contains("private-unit-1"))
+        assertFalse(firstClaims.toString().contains("private-account-1"))
+        assertFalse(firstClaims.toString().contains("private-operation-1"))
+        assertFalse(firstClaims["jti"] == payload(second.clientAttestationJwt)["jti"])
+    }
+
+    @Test
     fun createClientAttestationAuthProducesAttestationAndPopHeaderPair() =
         runTest {
             val wsca = newLocalWsca().wsca
             val clientInstanceKey =
                 wsca
-                    .ensureKey("wallet-client-auth", SecureComponentUsage.WALLET_ATTESTATION, SignatureAlgorithm.ECDSA_SHA512)
+                    .ensureKey("wallet-client-auth", SecureComponentUsage.OAUTH_CLIENT_AUTHENTICATION, SignatureAlgorithm.ECDSA_SHA512)
                     .let {
                         assertTrue(it.isOk, "ensureKey failed")
                         it.value

@@ -60,7 +60,25 @@ class AwsKmsKeyIdentityTest {
             }
         }
 
-    private fun fakeKmsClient(): KmsClient {
+    @Test fun onlyTypedMissingPublicKeyBecomesPortableAbsence() = runTest {
+        val missing = aws.sdk.kotlin.services.kms.model.NotFoundException { message = "missing" }
+        val provider = AwsKmsCryptoProvider(settings(), fakeKmsClient(missing))
+        try {
+            val error = kotlin.test.assertFailsWith<com.sphereon.core.api.error.NotFoundException> {
+                provider.getKey(KeyInfo<KeyType>(alias = alias))
+            }
+            kotlin.test.assertSame(missing, error.cause)
+        } finally { provider.close() }
+    }
+    @Test fun publicKeyPermissionAndTransportFailuresKeepTheirIdentity() = runTest {
+        val failure = IllegalStateException("permission denied")
+        val provider = AwsKmsCryptoProvider(settings(), fakeKmsClient(failure))
+        try {
+            val error = kotlin.test.assertFailsWith<IllegalStateException> { provider.getKey(KeyInfo<KeyType>(alias = alias)) }
+            kotlin.test.assertSame(failure, error)
+        } finally { provider.close() }
+    }
+    private fun fakeKmsClient(readFailure: RuntimeException? = null): KmsClient {
         val publicKeyDer =
             KeyPairGenerator.getInstance("EC")
                 .apply { initialize(ECGenParameterSpec("secp256r1")) }
@@ -76,6 +94,7 @@ class AwsKmsKeyIdentityTest {
                     CreateAliasResponse {}
                 }
                 is GetPublicKeyRequest -> {
+                    readFailure?.let { throw it }
                     val reference = request.keyId!!
                     require(reference == keyId || reference == keyArn || aliases[reference] == keyId) { "Unknown key $reference" }
                     GetPublicKeyResponse {

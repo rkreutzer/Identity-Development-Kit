@@ -47,6 +47,7 @@ kotlin {
         }
         val commonTest by getting {
             dependencies {
+                implementation(project(":lib-statuslist-impl"))
                 implementation(kotlin("test"))
                 implementation(sphereonlib.org.jetbrains.kotlinx.coroutines.test)
                 implementation(sphereonlib.org.jetbrains.kotlinx.serialization.json)

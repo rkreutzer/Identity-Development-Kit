@@ -18,15 +18,13 @@ package com.sphereon.openid.oid4vp.verifier.callback
 
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.error.IdkError
-import com.sphereon.core.compat.JsExportCompat
 import com.sphereon.core.api.http.callback.CallbackSigningAlgorithm
-import com.sphereon.openid.oid4vp.verifier.model.AuthorizationSessionStatus
-import kotlinx.serialization.Serializable
+import com.sphereon.openid.oid4vp.universal.GetAuthorizationRequestStatusOutput
 import kotlin.experimental.ExperimentalObjCName
 import kotlin.native.ObjCName
 
 /**
- * Dispatches authorization session status updates to an external callback URL (webhook).
+ * Dispatches the Universal OID4VP status response of an authorization session to an external callback URL (webhook).
  *
  * Implementations should be best-effort: callback delivery failures must not break the main OID4VP flows.
  */
@@ -35,7 +33,7 @@ import kotlin.native.ObjCName
 interface AuthorizationSessionCallbackDispatcher {
     suspend fun dispatch(
         url: String,
-        update: AuthorizationSessionStatusUpdate,
+        status: GetAuthorizationRequestStatusOutput,
     ): IdkResult<Unit, IdkError>
 
     /**
@@ -45,11 +43,11 @@ interface AuthorizationSessionCallbackDispatcher {
      */
     suspend fun dispatch(
         url: String,
-        update: AuthorizationSessionStatusUpdate,
+        status: GetAuthorizationRequestStatusOutput,
         signing: AuthorizationSessionCallbackSigning?,
     ): IdkResult<Unit, IdkError> =
         if (signing == null) {
-            dispatch(url, update)
+            dispatch(url, status)
         } else {
             com.sphereon.core.api.Err(
                 IdkError.fromString(message = "Signed authorization session callback is unsupported"),
@@ -61,21 +59,4 @@ interface AuthorizationSessionCallbackDispatcher {
 data class AuthorizationSessionCallbackSigning(
     val secretRef: String?,
     val algorithm: CallbackSigningAlgorithm?,
-)
-
-/**
- * Payload for authorization session status updates.
- *
- * This is a minimal, stable schema intended for webhook delivery.
- */
-@OptIn(ExperimentalObjCName::class)
-@ObjCName("AuthorizationSessionStatusUpdate", exact = true)
-@JsExportCompat
-@Serializable
-data class AuthorizationSessionStatusUpdate(
-    val correlationId: String,
-    val status: AuthorizationSessionStatus,
-    val updatedAt: Long,
-    val errorCode: String? = null,
-    val errorMessage: String? = null,
 )

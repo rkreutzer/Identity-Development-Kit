@@ -1311,6 +1311,60 @@ components:
           description: >
             Identifier of the hop toward the anchor that attested this hop. Absent on the ANCHOR,
             where nothing further attests.
+        organisation:
+          allOf:
+            - $ref: '#/components/schemas/WalletCounterpartyOrganisation'
+          nullable: true
+          description: >
+            The organisation behind this hop as the chain's signed statements describe it, for
+            example its OpenID Federation federation_entity metadata. Absent when they describe none.
+
+    WalletCounterpartyOrganisation:
+      type: object
+      additionalProperties: false
+      description: >
+        Organisation details a trust framework vouches for, such as the signed OpenID Federation
+        federation_entity metadata (organization_name, display_name, contacts, logo_uri,
+        organization_uri, information_uri, policy_uri). Never the counterparty's self-declared
+        display data: that stays on WalletCounterpartySummary. Authoritative data like this takes
+        precedence over self-declared metadata (OpenID4VP 1.0 section 5.1).
+      properties:
+        name:
+          type: string
+          nullable: true
+          minLength: 1
+        legalName:
+          type: string
+          nullable: true
+          minLength: 1
+        contacts:
+          type: array
+          description: Email addresses, phone numbers or URLs, as published.
+          items:
+            type: string
+            minLength: 1
+          default: []
+        website:
+          type: string
+          nullable: true
+          format: uri
+        contactPage:
+          type: string
+          nullable: true
+          format: uri
+        privacyPolicy:
+          type: string
+          nullable: true
+          format: uri
+        logoUri:
+          type: string
+          nullable: true
+          minLength: 1
+        attestedBy:
+          type: string
+          nullable: true
+          minLength: 1
+          description: Display name of the authority whose signed statement carries these details.
 
     WalletTrustChain:
       type: object
@@ -1327,6 +1381,13 @@ components:
             $ref: '#/components/schemas/WalletTrustChainHop'
         links:
           $ref: '#/components/schemas/WalletTrustChainLinks'
+        trustMarks:
+          type: array
+          description: Verified trust mark types the counterparty holds under the chain's anchor.
+          items:
+            type: string
+            minLength: 1
+          default: []
 
     WalletTrustDomainPosture:
       type: string
@@ -1421,6 +1482,8 @@ components:
           $ref: '#/components/schemas/WalletTrustDomainAdmission'
         attestationAuthorisation:
           $ref: '#/components/schemas/WalletAttestationAuthorisation'
+        organisation:
+          $ref: '#/components/schemas/WalletCounterpartyOrganisation'
         issuerAuthentication:
           $ref: '#/components/schemas/WalletIssuerAuthenticationResult'
 
@@ -1838,6 +1901,100 @@ components:
           format: int64
           nullable: true
           description: Sequence of the last returned entry. Pass it as afterSequence to fetch the next page. Null when the page is empty.
+
+    WalletInteractionTaskKind:
+      type: string
+      description: |
+        What an unfinished holder interaction waits for. OfferReview covers a credential offer,
+        its issuer, a transaction code or an authorization step; DisclosureReview covers credential
+        selection and disclosure consent; UnlockRequired is a wallet unlock or key authorization;
+        DeferredIssuance waits on the issuer to issue later; InProgress is protocol work nobody
+        needs to act on.
+      enum: [OfferReview, DisclosureReview, UnlockRequired, DeferredIssuance, InProgress]
+
+    WalletInteractionTaskParty:
+      type: string
+      description: Who the task is currently waiting on.
+      enum: [HOLDER, COUNTERPARTY, WALLET]
+
+    WalletInteractionTaskAction:
+      type: string
+      description: |
+        An action a host may offer for the task. CONTINUE opens the interaction where it stopped,
+        RETRY_DEFERRED_RETRIEVAL asks the issuer again now, CANCEL stops the interaction.
+      enum: [CONTINUE, RETRY_DEFERRED_RETRIEVAL, CANCEL]
+
+    WalletInteractionTaskProjection:
+      type: object
+      description: One unfinished holder interaction of a wallet unit, projected as a task by the interaction engine.
+      required: [sessionId, walletUnitId, status, kind, waitingOn, revision, openedAtEpochSeconds, updatedAtEpochSeconds]
+      example:
+        sessionId: 018f5c1e-9a3b-7c4d-8e2f-3a4b5c6d7e8f
+        walletUnitId: wu-7f9d
+        flowKind: CredentialReceive
+        protocol: OID4VCI
+        status: DeferredRetrievalPending
+        kind: DeferredIssuance
+        waitingOn: COUNTERPARTY
+        revision: 4
+        openedAtEpochSeconds: 1755300000
+        updatedAtEpochSeconds: 1755300060
+        deferred:
+          intervalSeconds: 30
+          attempt: 1
+          resumable: true
+        actions: [CONTINUE, RETRY_DEFERRED_RETRIEVAL, CANCEL]
+      properties:
+        sessionId:
+          type: string
+          description: Interaction session the task belongs to.
+        walletUnitId:
+          type: string
+        flowKind:
+          type: string
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/WalletInteractionFlowKind'
+        protocol:
+          type: string
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/WalletProtocol'
+        status:
+          $ref: '#/components/schemas/WalletInteractionStatus'
+        kind:
+          $ref: '#/components/schemas/WalletInteractionTaskKind'
+        waitingOn:
+          $ref: '#/components/schemas/WalletInteractionTaskParty'
+        revision:
+          type: integer
+          format: int64
+          description: Interaction revision the task was projected from. Pass it as expectedRevision when acting.
+        openedAtEpochSeconds:
+          type: integer
+          format: int64
+        updatedAtEpochSeconds:
+          type: integer
+          format: int64
+        counterparty:
+          $ref: '#/components/schemas/WalletCounterpartySummary'
+        deferred:
+          $ref: '#/components/schemas/WalletDeferredRetrievalSummary'
+        actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletInteractionTaskAction'
+          default: []
+
+    ListWalletInteractionTasksResult:
+      type: object
+      description: The open tasks of a wallet unit, most recently updated first.
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/WalletInteractionTaskProjection'
 
     # ------------------------------------------------------------------
     # Credential hand-off sessions (multi-screen operator, display, conduit)

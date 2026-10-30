@@ -11,6 +11,7 @@ import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.Ok
 import com.sphereon.core.api.decodeFromBase64Url
 import com.sphereon.core.api.error.IdkError
+import com.sphereon.cbor.tDateToEpochSeconds
 import com.sphereon.crypto.jose.jws.JwsUtils
 import com.sphereon.crypto.jose.jws.JwsCompact
 import com.sphereon.crypto.jose.jws.command.VerifyJwsArgs
@@ -19,6 +20,7 @@ import com.sphereon.data.store.party.model.IdentityRole
 import com.sphereon.data.store.party.model.IdentifierType
 import com.sphereon.mdoc.data.device.IssuerSignedCborCodec
 import com.sphereon.mdoc.data.device.IssuerSignedCborCodecImpl
+import com.sphereon.mdoc.data.mso.MobileSecurityObject
 import com.sphereon.mdoc.data.mso.MobileSecurityObjectCborCodec
 import com.sphereon.mdoc.data.mso.MobileSecurityObjectCborCodecImpl
 import com.sphereon.openid.oid4vc.common.vcdm.VcdmClassifier
@@ -32,6 +34,7 @@ import com.sphereon.sdjwt.SdJwtCodec
 import com.sphereon.sdjwt.vc.IssuerMetadataResolutionError
 import com.sphereon.sdjwt.vc.IssuerMetadataResolutionResult
 import com.sphereon.sdjwt.vc.IssuerMetadataResolver
+import com.sphereon.sdjwt.vc.SdJwtVcClaims
 import com.sphereon.sdjwt.vc.SdJwtVcVerificationOpts
 import com.sphereon.sdjwt.vc.VerifySdJwtVcArgs
 import com.sphereon.sdjwt.vc.command.VerifySdJwtVcCommand
@@ -44,6 +47,7 @@ import com.sphereon.wallet.credential.CredentialSubjectExtractor
 import com.sphereon.wallet.credential.CredentialTypeRef
 import com.sphereon.wallet.credential.CredentialTypeRefKind
 import com.sphereon.wallet.credential.CredentialTypeRefSource
+import com.sphereon.wallet.credential.CredentialValidityWindow
 import com.sphereon.wallet.credential.IdentifierRef
 import com.sphereon.wallet.credential.IssuanceDiagnostic
 import com.sphereon.wallet.credential.IssuanceDiagnosticCode
@@ -374,12 +378,7 @@ class Oid4vciIssuedCredentialAcceptance(
     ): Set<CredentialTypeRef> {
         val parseResult = SdJwtCodec.parse(raw)
         if (parseResult.isErr) return emptySet()
-        val vct =
-            parseResult.value.payload.fullPayload["vct"]
-                ?.jsonPrimitive
-                ?.contentOrNull
-                ?.takeIf { it.isNotBlank() }
-                ?: return emptySet()
+        val vct = SdJwtVcClaims.vct(parseResult.value.payload.fullPayload) ?: return emptySet()
         return setOf(
             CredentialTypeRef(
                 format = format,
@@ -395,23 +394,9 @@ class Oid4vciIssuedCredentialAcceptance(
         raw: String,
         format: CredentialFormat,
     ): Set<CredentialTypeRef> {
-        val issuerSignedBytes =
-            try {
-                raw.decodeFromBase64Url()
-            } catch (_: Exception) {
-                return emptySet()
-            }
-        val issuerSignedResult = acceptanceIssuerSignedCborCodec.decode(issuerSignedBytes)
-        if (issuerSignedResult.isErr) return emptySet()
-
-        val msoPayload =
-            issuerSignedResult.value.value.issuerAuth.payload
-                ?.value ?: return emptySet()
-        val msoResult = acceptanceMobileSecurityObjectCborCodec.decode(msoPayload)
-        if (msoResult.isErr) return emptySet()
-
+        val mso = decodeMdocMso(raw) ?: return emptySet()
         val doctype =
-            msoResult.value.value.docType
+            mso.docType
                 .toString()
                 .takeIf { it.isNotBlank() } ?: return emptySet()
         return setOf(
@@ -423,6 +408,30 @@ class Oid4vciIssuedCredentialAcceptance(
                 primary = true,
             ),
         )
+    }
+
+    /**
+     * Returns the validity window carried by an mdoc's MSO using the existing IssuerSigned/MSO
+     * codecs. A missing or malformed MSO is not stored with an UNKNOWN validity window.
+     */
+    internal fun mdocValidityWindow(raw: String): CredentialValidityWindow? {
+        val validityInfo = decodeMdocMso(raw)?.validityInfo ?: return null
+        return CredentialValidityWindow(
+            validFrom = Instant.fromEpochSeconds(validityInfo.validFrom.tDateToEpochSeconds()),
+            validUntil = Instant.fromEpochSeconds(validityInfo.validUntil.tDateToEpochSeconds()),
+        )
+    }
+
+    private fun decodeMdocMso(raw: String): MobileSecurityObject? {
+        return try {
+            val issuerSignedBytes = raw.decodeFromBase64Url()
+            val issuerSigned = acceptanceIssuerSignedCborCodec.decode(issuerSignedBytes).getOrNull()?.value
+                ?: return null
+            val msoPayload = issuerSigned.issuerAuth.payload?.value ?: return null
+            acceptanceMobileSecurityObjectCborCodec.decode(msoPayload).getOrNull()?.value
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun w3cTypesFromJwt(
@@ -510,6 +519,24 @@ class Oid4vciIssuedCredentialAcceptance(
 
     private fun CredentialFormat.isJwtVc(): Boolean =
         this == CredentialFormat.JWT_VC_JSON || this == CredentialFormat.JWT_VC_JSON_LD
+
+    /**
+     * The single issuer identifier claimed by newly issued VCDM JWT instances, before verification.
+     * It only selects where issuer keys are resolved (OID4VCI 1.0 §14.4: a DID-signed credential
+     * names its DID, not the Credential Issuer URL); [verify] still binds the verified claim to the
+     * resolved authentication. Null for other formats, malformed payloads, or differing issuers.
+     */
+    fun claimedJwtVcIssuer(
+        credentialFormat: CredentialFormat,
+        instances: List<CredentialInstance>,
+    ): String? {
+        if (!credentialFormat.isJwtVc() || instances.isEmpty()) return null
+        return instances.map { instance ->
+            acceptedVcdmCredential(credentialFormat, instance.requireRaw())
+                ?.document?.json?.get("issuer")?.issuerIdentifier()
+                ?: return null
+        }.distinct().singleOrNull()
+    }
 
     private fun acceptedVcdmCredential(
         format: CredentialFormat,

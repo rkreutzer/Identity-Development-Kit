@@ -106,6 +106,9 @@ data class IdentityResult
          */
         @SerialName("partyBindings")
         val partyBindings: List<IdentityPartyBindingResult>? = null,
+        /** Owning Party ID stored on the identity backing Party; null when unowned. */
+        @SerialName("ownerId")
+        val ownerId: Uuid? = null,
     ) {
         companion object {
             /**

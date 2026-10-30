@@ -180,7 +180,10 @@ class StandardAuthorizeRequestCommandImplTest {
         override val getJwks get(): com.sphereon.oauth2.server.authorization.command.GetJwksCommand = throw NotImplementedError()
     }
 
-    private fun command(service: AuthorizationServerService): StandardAuthorizeRequestCommandImpl =
+    private fun command(
+        service: AuthorizationServerService,
+        verifier: com.sphereon.oauth2.server.authorization.command.jar.VerifyRequestObjectCommand = StubVerifyRequestObjectCommand(ctx.execution),
+    ): StandardAuthorizeRequestCommandImpl =
         StandardAuthorizeRequestCommandImpl(
             execution = ctx.execution,
             authorizationServerService = service,
@@ -198,7 +201,7 @@ class StandardAuthorizeRequestCommandImplTest {
                     localLoginAllowed = true,
                 )
             },
-            verifyRequestObjectCommand = StubVerifyRequestObjectCommand(ctx.execution),
+            verifyRequestObjectCommand = verifier,
             clock = FixedClock(Instant.fromEpochSeconds(1_700_000_000)),
             credentialIssuerAudienceResolver = com.sphereon.oauth2.server.authorization.impl.provider.NoCredentialIssuerAudienceResolver(),
             unregisteredClientAdmissionRule = Oid4vciUnregisteredWalletAdmissionRule(),
@@ -322,4 +325,84 @@ class StandardAuthorizeRequestCommandImplTest {
             assertTrue(cmd.supports(standardArgs))
             assertTrue(cmd.supports(emptyArgs))
         }
+
+    @Test
+    fun requestAndRemoteRequestUriRejectBeforeVerificationOrSessionEffects() = runTest {
+        assertConflictingRequestObjectParameters("signed.request.jwt", "https://rp.example/request.jwt")
+    }
+
+    @Test
+    fun requestAndParRequestUriRejectBeforeVerificationOrConsumption() = runTest {
+        assertConflictingRequestObjectParameters("signed.request.jwt", "urn:ietf:params:oauth:request_uri:one-use")
+    }
+
+    @Test
+    fun presentBlankRequestCannotHideConflictWithRequestUri() = runTest {
+        assertConflictingRequestObjectParameters("", "https://rp.example/request.jwt")
+    }
+
+    private suspend fun assertConflictingRequestObjectParameters(request: String, requestUri: String) {
+        var verifierCalls = 0
+        var parserCalls = 0
+        // This boundary must reject before cryptographic verification or any jti consumption.
+        // A valid signature is deliberately unnecessary: neither wrapper may be selected.
+        val verifier = object : com.sphereon.oauth2.server.authorization.command.jar.VerifyRequestObjectCommand {
+            override val inputTypeToken = typeToken<com.sphereon.oauth2.server.authorization.command.jar.VerifyRequestObjectArgs>()
+            override val outputTypeToken = typeToken<com.sphereon.oauth2.server.authorization.command.jar.VerifiedRequestObject>()
+            override val isEnabled = true
+            override suspend fun execute(args: com.sphereon.oauth2.server.authorization.command.jar.VerifyRequestObjectArgs): IdkResult<com.sphereon.oauth2.server.authorization.command.jar.VerifiedRequestObject, IdkError> {
+                verifierCalls++
+                return Err(IdkError.fromString(code = "unexpected_verifier", message = "Ambiguous input reached request-object verification"))
+            }
+        }
+        val parser = stubParseAuthorizationRequest {
+            parserCalls++
+            Err(IdkError.fromString(code = "unexpected_parser", message = "Ambiguous input reached parsing"))
+        }
+        // All later service commands (including session/code creation and PAR retrieval) throw
+        // if accessed in this fixture, so none may silently execute after the early refusal.
+        val result = command(service(parser), verifier).execute(HandleAuthorizeRequestArgs(queryParameters = mapOf(
+            "client_id" to "https://rp.example", "request" to request, "request_uri" to requestUri,
+        )))
+        assertTrue(result.isOk)
+        val outcome = assertIs<AuthorizationRequestOutcome.PreRedirectError>(result.value)
+        assertEquals("invalid_request", outcome.error)
+        assertEquals(0, verifierCalls, "Conflict must not consume a Request Object jti")
+        assertEquals(0, parserCalls, "Conflict must not reach session or code creation")
+    }
+
+    @Test
+    fun soleRequestAndSoleRemoteUriStillReachTheExistingVerifier() = runTest {
+        val captured = mutableListOf<com.sphereon.oauth2.server.authorization.command.jar.VerifyRequestObjectArgs>()
+        val verifier = object : com.sphereon.oauth2.server.authorization.command.jar.VerifyRequestObjectCommand {
+            override val inputTypeToken = typeToken<com.sphereon.oauth2.server.authorization.command.jar.VerifyRequestObjectArgs>()
+            override val outputTypeToken = typeToken<com.sphereon.oauth2.server.authorization.command.jar.VerifiedRequestObject>()
+            override val isEnabled = true
+            override suspend fun execute(args: com.sphereon.oauth2.server.authorization.command.jar.VerifyRequestObjectArgs): IdkResult<com.sphereon.oauth2.server.authorization.command.jar.VerifiedRequestObject, IdkError> {
+                captured += args
+                return Err(IdkError.fromString(code = "verification_control", message = "Existing verifier reached"))
+            }
+        }
+        val parser = stubParseAuthorizationRequest { error("Verifier refusal must precede parsing") }
+        for (parameters in listOf(mapOf("request" to "signed.request.jwt"), mapOf("request_uri" to "https://rp.example/request.jwt"))) {
+            val result = command(service(parser), verifier).execute(HandleAuthorizeRequestArgs(queryParameters = parameters))
+            assertTrue(result.isOk)
+            assertEquals("verification_control", assertIs<AuthorizationRequestOutcome.PreRedirectError>(result.value).error)
+        }
+        assertEquals(2, captured.size)
+        assertEquals("signed.request.jwt", captured[0].requestJwt)
+        assertEquals(null, captured[0].requestUri)
+        assertEquals(null, captured[1].requestJwt)
+        assertEquals("https://rp.example/request.jwt", captured[1].requestUri)
+    }
+    @Test
+    fun presentBlankRequestUriCannotHideConflictWithRequest() = runTest {
+        assertConflictingRequestObjectParameters("signed.request.jwt", "")
+    }
+
+    @Test
+    fun bothBlankWrappersRejectBeforeParsing() = runTest {
+        assertConflictingRequestObjectParameters("", "")
+    }
+
 }

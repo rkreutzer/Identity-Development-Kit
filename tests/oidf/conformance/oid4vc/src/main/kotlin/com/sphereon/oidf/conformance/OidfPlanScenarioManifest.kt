@@ -296,8 +296,10 @@ object OidfPlanScenarioManifest {
                             put(
                                 "credential",
                                 buildJsonObject {
-                                    put("trust_anchor_pem", "{vp-signing-ca.crt}")
-                                    put("status_list_trust_anchor_pem", "{vp-signing-ca.crt}")
+                                    val trustAnchor = if (format == "iso_mdl") "{mdoc-iaca-root.crt}" else "{vp-signing-ca.crt}"
+                                    put("trust_anchor_pem", trustAnchor)
+                                    val statusTrustAnchor = if (format == "iso_mdl") "{mdoc-iaca-root.crt}" else "{vci-test-root.crt}"
+                                    put("status_list_trust_anchor_pem", statusTrustAnchor)
                                 },
                             )
                         },

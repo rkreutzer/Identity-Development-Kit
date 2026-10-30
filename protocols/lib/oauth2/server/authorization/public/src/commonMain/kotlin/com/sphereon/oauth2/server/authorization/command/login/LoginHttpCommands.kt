@@ -122,6 +122,10 @@ interface LoginWebAuthnAssertionBeginHttpEndpointCommand : HttpEndpointCommand {
                 handlerCommandId = COMMAND_ID,
                 tags = setOf("authorization", "login", "webauthn"),
                 summary = "Begin a WebAuthn assertion ceremony for Authorization Server login",
+                // Authentication is established by the later assertion verification. This
+                // handler validates the pending login session and origin before minting a
+                // challenge; PUBLIC keeps its transport session bound to the resolved host.
+                authPolicy = EndpointAuthPolicy.PUBLIC,
             )
     }
 }

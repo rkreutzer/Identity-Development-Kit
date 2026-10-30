@@ -517,6 +517,7 @@ abstract class CommandAdapter<Arg : Any, SuccessResult : Any, ErrorResult : IdkE
         val startMark = TimeSource.Monotonic.markNow()
         var commandResult: IdkResult<SuccessResult, ErrorResult>? = null
         var firstDenial: InterceptorVerdict.Deny? = null
+        var firstDenialInterceptor: String? = null
         var executionCoroutineContext: CoroutineContext = EmptyCoroutineContext
         var contextSetupCancellation: CancellationException? = null
 
@@ -529,10 +530,11 @@ abstract class CommandAdapter<Arg : Any, SuccessResult : Any, ErrorResult : IdkE
                 break
             } catch (expected: Exception) {
                 if (firstDenial == null) {
+                    firstDenialInterceptor = interceptor.name
                     firstDenial =
                         InterceptorVerdict.Deny(
                             reason = "Interceptor '${interceptor.name}' failed: ${expected.message ?: "unknown error"}",
-                            errorCode = "INTERCEPTOR_ERROR",
+                            errorCode = CommandErrors.INTERCEPTOR_ERROR_DENIAL_CODE,
                         )
                 }
             }
@@ -543,9 +545,11 @@ abstract class CommandAdapter<Arg : Any, SuccessResult : Any, ErrorResult : IdkE
             if (denial != null) {
                 val deniedResult: IdkResult<SuccessResult, ErrorResult> =
                     IdkResult.err(
-                        errorMapper.notAuthorized(
+                        errorMapper.notAuthorizedByInterceptor(
                             commandId = CommandId(id),
                             reason = denial.reason,
+                            interceptorName = firstDenialInterceptor.orEmpty(),
+                            denialCode = denial.errorCode,
                         ),
                     )
                 commandResult = deniedResult
@@ -608,7 +612,7 @@ abstract class CommandAdapter<Arg : Any, SuccessResult : Any, ErrorResult : IdkE
         }
 
         val parentInvocation = currentCoroutineContext()[CommandInvocationContext]
-        val commandInvocation = parentInvocation?.enterCommand() ?: CommandInvocationContext.internalRoot()
+        val commandInvocation = CommandInvocationContext.enteredFrom(parentInvocation)
         return withContext(executionCoroutineContext + commandInvocation) {
             var lifecycleFailure: Throwable? = null
             var lifecycleResult: IdkResult<SuccessResult, ErrorResult>? = null
@@ -634,13 +638,15 @@ abstract class CommandAdapter<Arg : Any, SuccessResult : Any, ErrorResult : IdkE
                     if (failure is Exception) {
                         // Interceptor errors fail closed to prevent silent policy bypass.
                         if (firstDenial == null) {
+                            firstDenialInterceptor = interceptor.name
                             firstDenial =
                                 InterceptorVerdict.Deny(
                                     reason = "Interceptor '${interceptor.name}' failed: ${failure.message ?: "unknown error"}",
-                                    errorCode = "INTERCEPTOR_ERROR",
+                                    errorCode = CommandErrors.INTERCEPTOR_ERROR_DENIAL_CODE,
                                 )
                         }
                     } else if (verdict is InterceptorVerdict.Deny && firstDenial == null) {
+                        firstDenialInterceptor = interceptor.name
                         firstDenial = verdict
                     }
                 }

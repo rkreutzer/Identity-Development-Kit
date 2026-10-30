@@ -22,6 +22,7 @@ import com.sphereon.core.api.asErrorResult
 import com.sphereon.core.api.context.SessionExecution
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.core.api.error.IdkErrorType
+import com.sphereon.core.api.log.Log
 import com.sphereon.crypto.core.KeyType
 import com.sphereon.di.session.SessionContext
 import com.sphereon.di.session.SessionScope
@@ -56,7 +57,25 @@ class MultiManagedIdentifierResolutionServiceImpl(
             .asErrorResult()
     }
 
-    override suspend fun resolve(opts: ManagedIdentifierOptsOrResult): IdkResult<ManagedIdentifierResult<KeyType>, IdkErrorType> = execute(opts)
+    override suspend fun resolve(opts: ManagedIdentifierOptsOrResult): IdkResult<ManagedIdentifierResult<KeyType>, IdkErrorType> {
+        // Capture static method names before suspension loses the caller. Never include an
+        // exception message, arguments, key references, filesystem paths or raw stack traces.
+        val callerPath = Regex("com\\.sphereon\\.[A-Za-z0-9_.$]+")
+            .findAll(Throwable().stackTraceToString()).map { it.value }
+            .filterNot { it.contains("MultiManagedIdentifierResolutionServiceImpl") }
+            .distinct().take(4).joinToString(">").take(512).ifEmpty { "unavailable" }
+        val result = execute(opts)
+        if (result.isErr) {
+            val kind = when (opts) {
+                is ManagedOptsKeyInfo -> if (opts.identifier.key == null) "key-reference" else "supplied-key"
+                is ManagedOptsJwk -> "supplied-jwk"
+                else -> "other"
+            }
+            val code = result.error.code.takeIf { it.matches(Regex("[A-Za-z0-9_.:-]{1,160}")) } ?: "unavailable"
+            Log.app().withTag("ManagedKeyResolution").warn("Managed key resolution refused stage=command input_kind=$kind code=$code caller_path=$callerPath")
+        }
+        return result
+    }
 
     override suspend fun isSupportedIdentifier(identifier: Any): Boolean = managedIdentifierServices.any { it.isSupportedIdentifier(identifier) }
 

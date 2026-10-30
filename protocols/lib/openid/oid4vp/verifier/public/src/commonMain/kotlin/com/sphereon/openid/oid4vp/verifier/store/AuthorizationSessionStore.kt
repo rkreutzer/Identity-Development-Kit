@@ -43,7 +43,9 @@ interface AuthorizationSessionStore : Oid4vpStore<String, AuthorizationSession> 
          */
         const val DEFAULT_TTL_SECONDS: Long = 600
         /** Reserved namespace for atomically claimed, durable operations. */
-        const val CLAIMED_CORRELATION_PREFIX: String = "oid4vp-claim:"
+        const val CLAIMED_CORRELATION_PREFIX: String = "oid4vp-claim_"
+        /** Recognize persisted claims created before the state became URL-safe. */
+        const val LEGACY_CLAIMED_CORRELATION_PREFIX: String = "oid4vp-claim:"
     }
 
     /**

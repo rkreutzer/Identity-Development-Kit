@@ -39,6 +39,7 @@ import com.sphereon.crypto.core.KeyType
 import com.sphereon.crypto.core.generic.SignatureAlgorithm
 import com.sphereon.crypto.resolution.managed.ManagedOptsKeyInfo
 import com.sphereon.oauth2.common.config.OAuth2ServerInstanceConfig
+import com.sphereon.oauth2.common.config.MutableOAuth2ServerInstanceIdProvider
 import com.sphereon.oauth2.common.config.OAuth2ServersConfig
 import com.sphereon.oauth2.common.config.TokenFormat
 import com.sphereon.oauth2.common.model.ActorClaim
@@ -55,6 +56,13 @@ import com.sphereon.oauth2.server.authorization.signing.AsServerSigningIdentifie
 import com.sphereon.oauth2.server.authorization.signing.AsSigningRequirement
 import com.sphereon.oauth2.server.authorization.signing.AsSigningSelection
 import com.sphereon.oauth2.server.authorization.signing.CapturedAsServerConfig
+import com.sphereon.oauth2.common.config.DefaultOAuth2ServerInstanceIdProvider
+import com.sphereon.oauth2.server.authorization.signing.AsServerJwsSigner
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.Json
@@ -150,6 +158,140 @@ class CreateAccessTokenAzpClaimTest {
             assertTrue(result.isErr)
             assertIs<AuthorizationServerError.TemporarilyUnavailable>(result.error.sourceAs())
         }
+
+    @Test
+    fun routedServerSelectionIsScopedForSigningAndRestoredAfterMint() =
+        runTest {
+            var currentServerId: String? = null
+            val instanceIdProvider = object : MutableOAuth2ServerInstanceIdProvider {
+                override fun currentAsInstanceId(): String? = currentServerId
+                override fun setCurrentAsInstanceId(asInstanceId: String) { currentServerId = asInstanceId }
+                override fun clearCurrentAsInstanceId() { currentServerId = null }
+            }
+            var serverIdDuringSigning: String? = null
+            val resolver = object : AsServerSigningIdentifierResolver {
+                override suspend fun selectSigning(
+                    captured: CapturedAsServerConfig,
+                    requirement: AsSigningRequirement,
+                    requestedAlgorithm: String?,
+                ): AsSigningSelection {
+                    serverIdDuringSigning = instanceIdProvider.currentAsInstanceId()
+                    return fixedSigningIdentifierResolver(
+                        ManagedOptsKeyInfo(identifier = KeyInfo<KeyType>(
+                            alias = "as-signing-key", kid = "as-signing-key", signatureAlgorithm = SignatureAlgorithm.RSA_SHA256,
+                        )),
+                    ).selectSigning(captured, requirement, requestedAlgorithm)
+                }
+            }
+            val command = CreateAccessTokenCommandImpl(
+                execution = ctx.execution,
+                jwtService = RecordingJwtService(),
+                tokenStorage = InMemoryTokenStorageImpl(InMemoryOAuth2BackingStorageImpl()),
+                secureRandom = defaultSecureRandom(),
+                configProvider = configProvider,
+                asInstanceIdProvider = instanceIdProvider,
+                signingIdentifierResolver = resolver,
+                eventService = null,
+            )
+
+            val result = command.execute(CreateAccessTokenArgs(
+                subject = SERVICE_CLIENT_ID,
+                clientId = SERVICE_CLIENT_ID,
+                audience = listOf("https://api.example.com"),
+                serverId = "default",
+            ))
+
+            assertTrue(result.isOk)
+            assertEquals("default", serverIdDuringSigning)
+            assertEquals(null, currentServerId)
+        }
+
+    @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun concurrentMintsKeepSelectionUntilSigningCompletesAndRestoreBeforeNextCapture() = runTest {
+        val provider = DefaultOAuth2ServerInstanceIdProvider().apply { setCurrentAsInstanceId("default") }
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val observed = mutableListOf<String?>()
+        val jwt = RecordingJwtService()
+        val command = CreateAccessTokenCommandImpl(
+            execution = ctx.execution,
+            jwtService = jwt,
+            tokenStorage = InMemoryTokenStorageImpl(InMemoryOAuth2BackingStorageImpl()),
+            secureRandom = defaultSecureRandom(),
+            configProvider = TestOAuth2ServersConfigProvider(OAuth2ServersConfig(servers =
+                listOf("default", "a", "b").associateWith { OAuth2ServerInstanceConfig(issuer = "https://$it.example.com") },
+            )),
+            asInstanceIdProvider = provider,
+            signingIdentifierResolver = fixedSigningIdentifierResolver(
+                ManagedOptsKeyInfo(identifier = KeyInfo<KeyType>(
+                    alias = "as-signing-key", kid = "as-signing-key", signatureAlgorithm = SignatureAlgorithm.RSA_SHA256,
+                )),
+            ),
+            asServerJwsSigner = AsServerJwsSigner { captured, args ->
+                assertEquals(captured.serverKey, provider.currentAsInstanceId())
+                observed += provider.currentAsInstanceId()
+                if (captured.serverKey == "a") {
+                    entered.complete(Unit)
+                    release.await()
+                }
+                assertEquals(captured.serverKey, provider.currentAsInstanceId())
+                jwt.createJwsCompact(args)
+            },
+        )
+        fun args(serverId: String?) = CreateAccessTokenArgs(
+            subject = "subject", clientId = "client", audience = listOf("https://api.example.com"), serverId = serverId,
+        )
+        val first = async { command.execute(args("a")) }
+        entered.await()
+        val second = async { command.execute(args("b")) }
+        val inherited = async { command.execute(args(null)) }
+        runCurrent()
+        assertEquals<List<String?>>(listOf("a"), observed.toList(), "later mints must wait through signing and restoration")
+        release.complete(Unit)
+        val results = listOf(first.await(), second.await(), inherited.await())
+        results.forEach { assertTrue(it.isOk) }
+        assertEquals(listOf("https://a.example.com", "https://b.example.com", "https://default.example.com"),
+            results.map { decodePayload(it.value.value)["iss"]?.jsonPrimitive?.contentOrNull })
+        assertEquals<List<String?>>(listOf("a", "b", "default"), observed.toList())
+        assertEquals("default", provider.currentAsInstanceId())
+    }
+
+    @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun cancelledMintRestoresSelectionAndReleasesWaitingMint() = runTest {
+        val provider = DefaultOAuth2ServerInstanceIdProvider().apply { setCurrentAsInstanceId("default") }
+        val entered = CompletableDeferred<Unit>()
+        val command = CreateAccessTokenCommandImpl(
+            execution = ctx.execution,
+            jwtService = RecordingJwtService(),
+            tokenStorage = InMemoryTokenStorageImpl(InMemoryOAuth2BackingStorageImpl()),
+            secureRandom = defaultSecureRandom(),
+            configProvider = TestOAuth2ServersConfigProvider(OAuth2ServersConfig(servers = mapOf(
+                "default" to OAuth2ServerInstanceConfig(issuer = ISSUER, tokenFormat = TokenFormat.OPAQUE),
+                "a" to OAuth2ServerInstanceConfig(issuer = "https://a.example.com"),
+            ))),
+            asInstanceIdProvider = provider,
+            signingIdentifierResolver = fixedSigningIdentifierResolver(
+                ManagedOptsKeyInfo(identifier = KeyInfo<KeyType>(
+                    alias = "as-signing-key", kid = "as-signing-key", signatureAlgorithm = SignatureAlgorithm.RSA_SHA256,
+                )),
+            ),
+            asServerJwsSigner = AsServerJwsSigner { _, _ ->
+                entered.complete(Unit)
+                awaitCancellation()
+            },
+        )
+        val args = CreateAccessTokenArgs(subject = "subject", clientId = "client", audience = listOf("https://api.example.com"))
+        val first = async { command.execute(args.copy(serverId = "a")) }
+        entered.await()
+        val inherited = async { command.execute(args) }
+        runCurrent()
+        assertFalse(inherited.isCompleted)
+        first.cancelAndJoin()
+        assertTrue(inherited.await().isOk)
+        assertEquals("default", provider.currentAsInstanceId())
+    }
 
     /**
      * Decode the middle (payload) segment of the compact JWT the command produced and parse it

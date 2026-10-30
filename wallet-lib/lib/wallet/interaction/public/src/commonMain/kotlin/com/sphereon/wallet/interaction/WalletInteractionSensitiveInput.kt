@@ -48,8 +48,23 @@ interface WalletInteractionSensitiveInputAuthority {
     ): String?
 
     /**
+     * Validate and spend one authorization handoff in its owning runtime. Remote authorities
+     * override this through the backend's typed validate-before-spend command; they must not
+     * expose a separate remote peek of the sensitive value.
+     */
+    suspend fun consumeAuthorizationHandoff(
+        sessionId: WalletInteractionSessionId,
+        ref: WalletInteractionSensitiveInputRef,
+    ): String? {
+        val pending = peek(sessionId, WalletInteractionSensitiveInputPurpose.OID4VCI_AUTHORIZATION_HANDOFF, ref)
+            ?: return null
+        require(openableAuthorizationUri(pending) != null) { "wallet_interaction_authorization_handoff_unopenable" }
+        return consume(sessionId, WalletInteractionSensitiveInputPurpose.OID4VCI_AUTHORIZATION_HANDOFF, ref)
+    }
+
+    /**
      * Return the bound value without spending it. Authorization-handoff callers validate before
-     * [consume] so an unopenable URL is refused on every implementation, not only StoreBacked.
+     * [consume] in the local default; remote authorization handoffs use their owning command.
      */
     suspend fun peek(
         sessionId: WalletInteractionSessionId,

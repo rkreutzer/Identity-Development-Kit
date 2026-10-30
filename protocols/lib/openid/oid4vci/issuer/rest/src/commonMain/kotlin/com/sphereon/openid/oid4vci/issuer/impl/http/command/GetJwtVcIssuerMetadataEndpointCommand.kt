@@ -142,6 +142,9 @@ private suspend fun buildBody(
                     // to serve what we have. Real deployments should alarm on this.
                     return@mapNotNull null
                 }
+            if (aliasToMode[alias] == SigningKeyMode.JwkThumbprint) {
+                return@mapNotNull thumbprintSigningJwk(publicJwk).getOrElse { return Err(it) }
+            }
             val kid =
                 when (val mode = aliasToMode[alias]) {
                     is SigningKeyMode.Did -> {
@@ -150,8 +153,7 @@ private suspend fun buildBody(
                             .getOrElse { return@mapNotNull null }
                     }
 
-                    // JwkThumbprint, X5c, Federation, None — not producing a kid here for
-                    // the demo; a JwkThumbprint variant would call a thumbprint-URI helper.
+                    // X5c, Federation and None do not identify a key through a kid here.
                     else -> {
                         null
                     }

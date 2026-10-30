@@ -400,6 +400,7 @@ class OAuth2ServersConfigBinder(
             introspection = readFeaturePolicy("$serverPrefix.introspection", defaults.introspection),
             revocation = readFeaturePolicy("$serverPrefix.revocation", defaults.revocation),
             par = readFeaturePolicy("$serverPrefix.par", defaults.par),
+            federationAutomaticRegistrationMode = readFederationRegistrationMode("$serverPrefix.federation-automatic-registration-mode", defaults.federationAutomaticRegistrationMode),
             tokenExchange = readFeaturePolicy("$serverPrefix.token-exchange", defaults.tokenExchange),
             // RFC 8628 (Device Authorization Grant): feature gate plus the two timing knobs that
             // shape the issued device-authorization record (`expires_in`, `interval`).
@@ -795,6 +796,14 @@ class OAuth2ServersConfigBinder(
             }
         }
         return clients
+    }
+
+    private fun readFederationRegistrationMode(
+        key: String, default: com.sphereon.oauth2.common.config.FederatedAuthorizationRequestMode,
+    ): com.sphereon.oauth2.common.config.FederatedAuthorizationRequestMode {
+        val raw = configService.getPropertyAsString(key, null) ?: return default
+        return com.sphereon.oauth2.common.config.FederatedAuthorizationRequestMode.entries.singleOrNull { it.name == raw.trim().uppercase() }
+            ?: error("Unsupported federation automatic-registration mode for $key")
     }
 
     private fun readFeaturePolicy(

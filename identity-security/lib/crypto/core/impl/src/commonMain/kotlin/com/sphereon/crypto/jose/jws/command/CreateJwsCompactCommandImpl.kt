@@ -73,6 +73,7 @@ class CreateJwsCompactCommandImpl(
         // Create flattened JWS first
         val flattenedResult = createJwsJsonFlattenedCommand.execute(jsonArgs)
         if (flattenedResult.isErr) {
+            log.error("JWS signing failed command=$commandId stage=flattened-signing idk_code=${flattenedResult.error.code}")
             return IdkResult.err(flattenedResult.error)
         }
 

@@ -64,7 +64,7 @@ class TokenHttpEndpointCommandImplTest {
                         },
                     configProvider = TestOAuth2ServersConfigProvider(),
                     baseUrlResolver = DefaultOAuth2ServerBaseUrlResolver(),
-                    dpopNonceManager = TokenTestNonceManager,
+                    dpopNonceManager = lazyOf(TokenTestNonceManager),
                     clientCertificateExtractor = NoOpClientCertificateExtractor,
                     auditEmitter = NoOpOAuth2AuditEmitter,
                 )
@@ -98,6 +98,52 @@ class TokenHttpEndpointCommandImplTest {
         }
 
     @Test
+    fun nonceManagerIsOnlyResolvedForADpopRequest() =
+        runTest {
+            var nonceManagerResolutions = 0
+            val command =
+                TokenHttpEndpointCommandImpl(
+                    execution = TestSessionExecution(),
+                    handleTokenRequestCommand =
+                        FakeHandleTokenRequestCommand {
+                            Ok(TokenResponse(accessToken = "at", tokenType = "Bearer", expiresIn = 3600))
+                        },
+                    configProvider = TestOAuth2ServersConfigProvider(),
+                    baseUrlResolver = DefaultOAuth2ServerBaseUrlResolver(),
+                    dpopNonceManager =
+                        lazy {
+                            nonceManagerResolutions++
+                            TokenTestNonceManager
+                        },
+                    clientCertificateExtractor = NoOpClientCertificateExtractor,
+                    auditEmitter = NoOpOAuth2AuditEmitter,
+                )
+            val headers = mapOf("Host" to "as.example", "Content-Type" to "application/x-www-form-urlencoded")
+
+            val bearer =
+                command.execute(
+                    GenericHttpRequest.withTextBody(method = "POST", path = "/token", body = "grant_type=client_credentials", headers = headers),
+                )
+
+            assertTrue(bearer.isOk)
+            assertFalse(bearer.value.headers.containsKey("DPoP-Nonce"))
+            assertEquals(0, nonceManagerResolutions, "A request without a DPoP proof must not construct the nonce manager")
+
+            val dpop =
+                command.execute(
+                    GenericHttpRequest.withTextBody(
+                        method = "POST",
+                        path = "/token",
+                        body = "grant_type=client_credentials",
+                        headers = headers + ("DPoP" to "proof"),
+                    ),
+                )
+
+            assertEquals("test-nonce-current", dpop.value.headers["DPoP-Nonce"])
+            assertEquals(1, nonceManagerResolutions)
+        }
+
+    @Test
     fun missingBody_rendersInvalidRequest() =
         runTest {
             val command =
@@ -109,7 +155,7 @@ class TokenHttpEndpointCommandImplTest {
                         },
                     configProvider = TestOAuth2ServersConfigProvider(),
                     baseUrlResolver = DefaultOAuth2ServerBaseUrlResolver(),
-                    dpopNonceManager = TokenTestNonceManager,
+                    dpopNonceManager = lazyOf(TokenTestNonceManager),
                     clientCertificateExtractor = NoOpClientCertificateExtractor,
                     auditEmitter = NoOpOAuth2AuditEmitter,
                 )
@@ -134,7 +180,7 @@ class TokenHttpEndpointCommandImplTest {
                         },
                     configProvider = TestOAuth2ServersConfigProvider(),
                     baseUrlResolver = DefaultOAuth2ServerBaseUrlResolver(),
-                    dpopNonceManager = TokenTestNonceManager,
+                    dpopNonceManager = lazyOf(TokenTestNonceManager),
                     clientCertificateExtractor = NoOpClientCertificateExtractor,
                     auditEmitter = NoOpOAuth2AuditEmitter,
                 )
@@ -168,7 +214,7 @@ class TokenHttpEndpointCommandImplTest {
                         },
                     configProvider = TestOAuth2ServersConfigProvider(),
                     baseUrlResolver = DefaultOAuth2ServerBaseUrlResolver(),
-                    dpopNonceManager = TokenTestNonceManager,
+                    dpopNonceManager = lazyOf(TokenTestNonceManager),
                     clientCertificateExtractor = NoOpClientCertificateExtractor,
                     auditEmitter = NoOpOAuth2AuditEmitter,
                 )
@@ -201,7 +247,7 @@ class TokenHttpEndpointCommandImplTest {
                         },
                     configProvider = TestOAuth2ServersConfigProvider(),
                     baseUrlResolver = DefaultOAuth2ServerBaseUrlResolver(),
-                    dpopNonceManager = TokenTestNonceManager,
+                    dpopNonceManager = lazyOf(TokenTestNonceManager),
                     clientCertificateExtractor = NoOpClientCertificateExtractor,
                     auditEmitter = NoOpOAuth2AuditEmitter,
                 )
@@ -231,7 +277,7 @@ class TokenHttpEndpointCommandImplTest {
                         handleTokenRequestCommand = FakeHandleTokenRequestCommand { Err(error) },
                         configProvider = TestOAuth2ServersConfigProvider(),
                         baseUrlResolver = DefaultOAuth2ServerBaseUrlResolver(),
-                        dpopNonceManager = TokenTestNonceManager,
+                        dpopNonceManager = lazyOf(TokenTestNonceManager),
                         clientCertificateExtractor = NoOpClientCertificateExtractor,
                         auditEmitter = NoOpOAuth2AuditEmitter,
                     )

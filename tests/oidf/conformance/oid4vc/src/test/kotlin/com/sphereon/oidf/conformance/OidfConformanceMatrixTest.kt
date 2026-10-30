@@ -67,11 +67,11 @@ class OidfConformanceMatrixTest {
     }
 
     @Test
-    fun `suite lock pins source patch set and runtime images`() {
+    fun suiteLockPinsUnmodifiedOfficialImages() {
         val lock = OidfSuiteLock.load()
 
         assertEquals(40, lock.upstreamCommit.length)
-        assertTrue(lock.patchSet.startsWith("vdx-"))
+        assertEquals("upstream-unmodified", lock.patchSet)
         listOf(
             lock.gitImage,
             lock.mavenImage,
@@ -79,8 +79,8 @@ class OidfConformanceMatrixTest {
             lock.upstreamNginxImage,
             lock.mongoImage,
         ).forEach { image -> assertTrue(image.matches(Regex(".+@sha256:[0-9a-f]{64}")), image) }
-        assertTrue(lock.serverImage.contains(Regex(":(?!latest$)[^:]+$")))
-        assertTrue(lock.nginxImage.contains(Regex(":(?!latest$)[^:]+$")))
+        assertTrue(lock.serverImage.matches(Regex("registry\\.gitlab\\.com/openid/conformance-suite@sha256:[0-9a-f]{64}")))
+        assertTrue(lock.nginxImage.matches(Regex("registry\\.gitlab\\.com/openid/conformance-suite/nginx@sha256:[0-9a-f]{64}")))
         assertTrue(
             OidfSuiteConfigPreprocessor.VCI_WALLET_CLIENT_AUTH_CONFIG in OidfSuiteConfigPreprocessor.requiredSourceFiles,
             "The hermetic suite source manifest must include the wallet's private-key client-auth config",
@@ -156,8 +156,11 @@ class OidfConformanceMatrixTest {
             .filter { it.requiredPlan.profile == OidfProfile.HAIP_1_0 }
             .forEach { scenario ->
                 val credential = scenario.configOverrides.getValue("credential").jsonObject
-                assertEquals("{vp-signing-ca.crt}", credential.getValue("trust_anchor_pem").jsonPrimitive.content, scenario.id)
-                assertEquals("{vp-signing-ca.crt}", credential.getValue("status_list_trust_anchor_pem").jsonPrimitive.content, scenario.id)
+                val isMdoc = scenario.variant.getValue("credential_format") == "iso_mdl"
+                val credentialTrustAnchor = if (isMdoc) "{mdoc-iaca-root.crt}" else "{vp-signing-ca.crt}"
+                val statusTrustAnchor = if (isMdoc) "{mdoc-iaca-root.crt}" else "{vci-test-root.crt}"
+                assertEquals(credentialTrustAnchor, credential.getValue("trust_anchor_pem").jsonPrimitive.content, scenario.id)
+                assertEquals(statusTrustAnchor, credential.getValue("status_list_trust_anchor_pem").jsonPrimitive.content, scenario.id)
             }
     }
 

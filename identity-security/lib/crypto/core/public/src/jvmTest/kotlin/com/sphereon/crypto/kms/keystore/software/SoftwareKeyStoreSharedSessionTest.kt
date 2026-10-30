@@ -33,6 +33,8 @@ import java.nio.file.Files
 import java.security.KeyPairGenerator
 import java.security.spec.ECGenParameterSpec
 import kotlin.test.Test
+import java.security.KeyStore
+import kotlin.test.assertFailsWith
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -223,4 +225,122 @@ class SoftwareKeyStoreSharedSessionTest {
                 "reused instance must resolve the durably-overwritten bundle key, not the stale self-generated one",
             )
         }
+
+    // Independent JCA file I/O deliberately bypasses this JVM's provider/factory caches,
+    // reproducing the shared-file boundary of a second process without replacing a provider.
+    private fun writeExternalAlias(path: String, sourceAlias: String, targetAlias: String) {
+        val file = java.io.File(path)
+        val modified = file.lastModified()
+        val external = KeyStore.getInstance("PKCS12")
+        file.inputStream().use { external.load(it, "test-password".toCharArray()) }
+        val protection = KeyStore.PasswordProtection("test-password".toCharArray())
+        external.setEntry(targetAlias, external.getEntry(sourceAlias, protection), protection)
+        file.outputStream().use { external.store(it, "test-password".toCharArray()) }
+        assertTrue(file.setLastModified(modified), "fixture preserves coarse file timestamps")
+    }
+
+    @Test
+    fun freshServiceSeesExternalAliasWithWarmLoaderCache() = runTest {
+        KeyStoreLoaderFactory.clearCache()
+        val dir = Files.createTempDirectory("sks-external-new-service").toFile()
+        try {
+            val path = dir.resolve("shared.p12").absolutePath
+            val writer = SoftwareKeyStoreService(configFor(path))
+            writer.storeKey(ecRecipientKey("seed"), "license", "seed")
+            writer.awaitPendingPersistenceCompletion()
+            assertEquals(1, writer.listKeys().size)
+            writeExternalAlias(path, "seed", "external-new")
+            val reader = SoftwareKeyStoreService(configFor(path))
+            assertEquals("external-new", reader.resolvePublicKeyByAlias("external-new").alias)
+            assertEquals(2, reader.listKeys().size)
+        } finally {
+            KeyStoreLoaderFactory.clearCache()
+            SoftwareKeyStoreStateCache.clear()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun reusedServiceSeesExternalAliasWithoutTimestampAdvance() = runTest {
+        KeyStoreLoaderFactory.clearCache()
+        val dir = Files.createTempDirectory("sks-external-reused-service").toFile()
+        try {
+            val path = dir.resolve("shared.p12").absolutePath
+            val reader = SoftwareKeyStoreService(configFor(path))
+            reader.storeKey(ecRecipientKey("seed"), "license", "seed")
+            reader.awaitPendingPersistenceCompletion()
+            assertEquals(1, reader.listKeys().size)
+            writeExternalAlias(path, "seed", "external-new")
+            assertEquals("external-new", reader.resolvePublicKeyByAlias("external-new").alias)
+            assertEquals("external-new", reader.getKey(KeyInfo<Jwk>(kid = "external-new", keyVisibility = KeyVisibility.PRIVATE)).alias)
+        } finally {
+            KeyStoreLoaderFactory.clearCache()
+            SoftwareKeyStoreStateCache.clear()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun externalOverwriteInvalidatesResolvedPrivateKeyCache() = runTest {
+        KeyStoreLoaderFactory.clearCache()
+        val dir = Files.createTempDirectory("sks-external-overwrite").toFile()
+        try {
+            val path = dir.resolve("shared.p12").absolutePath
+            val reader = SoftwareKeyStoreService(configFor(path))
+            val oldKey = ecRecipientKey("selected")
+            val nextKey = ecRecipientKey("next")
+            reader.storeKey(oldKey, "license", "selected")
+            reader.storeKey(nextKey, "license", "next")
+            reader.awaitPendingPersistenceCompletion()
+            val request = KeyInfo<Jwk>(kid = "selected", keyVisibility = KeyVisibility.PRIVATE)
+            assertEquals((oldKey.key as JwkType).d, (reader.getKey(request).key as JwkType).d)
+            writeExternalAlias(path, "next", "selected")
+            val fresh = SoftwareKeyStoreService(configFor(path))
+            assertEquals((nextKey.key as JwkType).d, (fresh.getKey(request).key as JwkType).d)
+            assertEquals((nextKey.key as JwkType).d, (reader.getKey(request).key as JwkType).d)
+        } finally {
+            KeyStoreLoaderFactory.clearCache()
+            SoftwareKeyStoreStateCache.clear()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun corruptedExternalStoreCannotServeCachedKey() = runTest {
+        KeyStoreLoaderFactory.clearCache()
+        val dir = Files.createTempDirectory("sks-external-corrupt").toFile()
+        try {
+            val path = dir.resolve("shared.p12").absolutePath
+            val reader = SoftwareKeyStoreService(configFor(path))
+            reader.storeKey(ecRecipientKey("selected"), "license", "selected")
+            reader.awaitPendingPersistenceCompletion()
+            reader.resolvePublicKeyByAlias("selected")
+            assertTrue(!java.io.File(path + ".bak").exists(), "corruption fixture has no recoverable backup")
+            java.io.File(path).writeBytes(byteArrayOf(1, 2, 3))
+            assertFailsWith<java.io.IOException> { reader.resolvePublicKeyByAlias("selected") }
+        } finally {
+            KeyStoreLoaderFactory.clearCache()
+            SoftwareKeyStoreStateCache.clear()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun deletedExternalStoreCannotServeCachedKey() = runTest {
+        KeyStoreLoaderFactory.clearCache()
+        val dir = Files.createTempDirectory("sks-external-delete").toFile()
+        try {
+            val path = dir.resolve("shared.p12").absolutePath
+            val reader = SoftwareKeyStoreService(configFor(path))
+            reader.storeKey(ecRecipientKey("selected"), "license", "selected")
+            reader.awaitPendingPersistenceCompletion()
+            reader.resolvePublicKeyByAlias("selected")
+            assertTrue(java.io.File(path).delete())
+            assertFailsWith<java.io.IOException> { reader.resolvePublicKeyByAlias("selected") }
+        } finally {
+            KeyStoreLoaderFactory.clearCache()
+            SoftwareKeyStoreStateCache.clear()
+            dir.deleteRecursively()
+        }
+    }
 }

@@ -17,6 +17,7 @@
 
 package com.sphereon.di.app
 
+import com.sphereon.di.supervisedChild
 import com.sphereon.core.api.conf.AppConfigService
 import com.sphereon.core.api.conf.PropertiesFileAppPropertySource
 import com.sphereon.core.api.conf.PropertySourceBootstrap
@@ -159,5 +160,5 @@ interface AppScopedProviders {
     @ForScope(AppScope::class)
     fun provideIdkAppCoroutineScope(
         @ForScope(AppScope::class) scoped: software.amazon.app.platform.scope.coroutine.CoroutineScopeScoped,
-    ): kotlinx.coroutines.CoroutineScope = scoped.createChild()
+    ): kotlinx.coroutines.CoroutineScope = scoped.supervisedChild()
 }

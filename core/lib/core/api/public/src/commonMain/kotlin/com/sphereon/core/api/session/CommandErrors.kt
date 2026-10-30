@@ -28,6 +28,21 @@ import com.sphereon.core.api.error.IdkErrorType
 object CommandErrors {
     const val COMMAND_NOT_AUTHORIZED_CODE = "COMMAND_NOT_AUTHORIZED"
 
+    /**
+     * Error meta key holding the [CommandLifecycleInterceptor.name] of the interceptor whose denial (or failure)
+     * produced a [COMMAND_NOT_AUTHORIZED_CODE] error. Absent when the error did not come from an interceptor.
+     */
+    const val DENIED_BY_INTERCEPTOR_META = "deniedByInterceptor"
+
+    /**
+     * Error meta key holding the [InterceptorVerdict.Deny.errorCode] of the denial, or `INTERCEPTOR_ERROR`
+     * when the interceptor threw. Always present together with [DENIED_BY_INTERCEPTOR_META].
+     */
+    const val DENIAL_CODE_META = "denialCode"
+
+    /** The [DENIAL_CODE_META] value when the interceptor threw instead of returning a verdict. */
+    const val INTERCEPTOR_ERROR_DENIAL_CODE = "INTERCEPTOR_ERROR"
+
     fun unsupportedArg(
         command: BaseCommand<*, *, *>? = null,
         arg: Any? = null,
@@ -45,6 +60,29 @@ object CommandErrors {
         reason: String,
         actor: String? = null,
     ): IdkError = IdkError.COMMAND_NOT_AUTHORIZED_ERROR(commandId = commandId.value, reason = reason, actor = actor)
+
+    /**
+     * A [notAuthorized] error that also names the interceptor behind it, in [DENIED_BY_INTERCEPTOR_META],
+     * and the denial's error code, in [DENIAL_CODE_META]. Code, message and the other meta are those of [notAuthorized].
+     */
+    fun notAuthorizedByInterceptor(
+        commandId: CommandId,
+        reason: String,
+        interceptorName: String,
+        denialCode: String,
+        actor: String? = null,
+    ): IdkError {
+        val base = notAuthorized(commandId, reason, actor)
+        return IdkError(
+            code = base.code,
+            message = base.message,
+            severity = base.severity,
+            category = base.category,
+            causes = base.causes,
+            meta = base.meta + mapOf(DENIED_BY_INTERCEPTOR_META to interceptorName, DENIAL_CODE_META to denialCode),
+            exception = base.exception,
+        )
+    }
 
     fun allHandlersFailed(errors: List<IdkError>): IdkError = IdkError.ALL_HANDLERS_FAILED_ERROR(errors = errors)
 

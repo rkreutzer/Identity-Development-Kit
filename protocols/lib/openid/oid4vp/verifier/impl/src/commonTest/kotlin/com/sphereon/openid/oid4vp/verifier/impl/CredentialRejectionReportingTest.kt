@@ -150,7 +150,7 @@ class CredentialRejectionReportingTest {
         statusVerifier: CredentialStatusVerifier,
         credentialStatusPolicies: Map<String, CredentialStatusPolicy>? = null,
     ): IdkResult<ValidationResult, IdkError> {
-        val sdJwt = "eyJhbGciOiJFUzI1NiJ9.payload.signature~WyJhYmMxMjMiLCJmaXJzdF9uYW1lIiwiSm9obiJd~eyJhbGciOiJFUzI1NiJ9.kb.sig"
+        val sdJwt = "eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJodHRwczovL2lzc3Vlci5leGFtcGxlIiwidmN0IjoidXJuOnRlc3Q6aWRlbnRpdHkifQ.signature~WyJhYmMxMjMiLCJmaXJzdF9uYW1lIiwiSm9obiJd~eyJhbGciOiJFUzI1NiJ9.kb.sig"
         val originalRequest =
             AuthorizationRequest(
                 clientId = "https://verifier.example.com",
@@ -202,6 +202,7 @@ class CredentialRejectionReportingTest {
             execution = testContext.execution,
             authorizationSessionStore = authorizationSessionStore,
             businessAuthorizations = emptySet(),
+            credentialTypeMatcher = com.sphereon.openid.oid4vp.verifier.impl.testutil.testCredentialTypeMatcher(),
             verifyHolderBindingCommand = VerifiedHolderBindingCommand,
             verifyJwsCommand = InvalidVerifyJwsCommand,
             jsonLdContextValidator =
@@ -218,6 +219,7 @@ class CredentialRejectionReportingTest {
             mobileSecurityObjectCborCodec =
                 com.sphereon.mdoc.data.mso
                     .MobileSecurityObjectCborCodecImpl(),
+            cborParser = com.sphereon.cbor.CborParserImpl(),
             vcdmDataIntegrityVerifier = UnusedVcdmDataIntegrityVerifier,
             credentialStatusVerifiers = setOf(statusVerifier),
             credentialTrustValidators = emptySet(),

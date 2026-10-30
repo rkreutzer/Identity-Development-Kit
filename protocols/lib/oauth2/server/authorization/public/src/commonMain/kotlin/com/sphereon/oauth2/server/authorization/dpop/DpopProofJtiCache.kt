@@ -33,13 +33,21 @@ import kotlin.time.Instant
  * IDK ships an in-memory implementation that is single-tenant: all observed `jti` values share
  * one keyspace. Implementations backing a multi-tenant deployment MUST partition the `jti`
  * keyspace by tenant so that tenant A cannot block tenant B from accepting a proof that happens
- * to use the same `jti`, nor confirm replay of a proof tenant B has not yet seen. EDK durable
- * implementations (Redis, SQL, Caffeine-with-namespacing, etc.) are responsible for this
- * partitioning, typically via a tenant-prefixed cache key or a per-tenant table partition.
+ * to use the same `jti`, nor confirm replay of a proof tenant B has not yet seen. Hosted durable
+ * implementations (Redis, SQL, or tenant-scoped stores) are responsible for this
+ * partitioning, using an explicit tenant cache key or per-tenant table partition.
  * Failing to partition lets a hostile tenant pre-poison `jti` values to block legitimate proofs
  * on other tenants.
  */
 interface DpopProofJtiCache {
+    /**
+     * Atomically reserves a verified proof replay address until [expiresAt]. Only `true` permits
+     * authentication to continue. `false` covers replay and unavailable storage; exceptions
+     * must never be interpreted as acceptance. Cancellation remains cancellation.
+     * The default deliberately refuses implementations that have only the legacy peek/mark API.
+     */
+    suspend fun recordIfNew(jti: String, expiresAt: Instant): Boolean = false
+
     /**
      * Returns `true` when [jti] is still present (and not expired) in the cache, indicating a
      * replay. Returns `false` when the jti has never been observed or its previous record has

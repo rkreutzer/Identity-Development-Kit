@@ -289,6 +289,13 @@ class Ts03WalletAttestationEncoder(
     ): com.sphereon.core.api.IdkResult<Ts03EncodedJwt, com.sphereon.core.api.error.IdkError> =
         encodeCompactJwt(json.encodeToString(claims), signer, signingRequest, typ = KEY_ATTESTATION_TYP)
 
+    suspend fun encodeOid4vciKeyAttestation(
+        claims: Oid4vciKeyAttestationClaims,
+        signer: WalletAttestationSigner,
+        signingRequest: WalletAttestationSigningRequest,
+    ): IdkResult<Ts03EncodedJwt, IdkError> =
+        encodeCompactJwt(json.encodeToString(claims), signer, signingRequest, typ = KEY_ATTESTATION_TYP)
+
     private suspend fun encodeCompactJwt(
         claimsJson: String,
         signer: WalletAttestationSigner,

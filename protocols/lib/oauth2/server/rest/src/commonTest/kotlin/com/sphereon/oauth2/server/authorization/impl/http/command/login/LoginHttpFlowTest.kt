@@ -17,6 +17,7 @@
 package com.sphereon.oauth2.server.authorization.impl.http.command.login
 
 import com.sphereon.core.api.IdkResult
+import com.sphereon.core.api.Err
 import com.sphereon.core.api.Ok
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.core.api.http.GenericHttpRequest
@@ -33,6 +34,7 @@ import com.sphereon.oauth2.server.authorization.audit.NoOpOAuth2AuditEmitter
 import com.sphereon.oauth2.server.authorization.audit.OAuth2AuditEmitter
 import com.sphereon.oauth2.server.authorization.audit.OAuth2AuditEventType
 import com.sphereon.oauth2.server.authorization.impl.http.DefaultOAuth2ServerBaseUrlResolver
+import com.sphereon.oauth2.server.authorization.impl.http.OAuth2ServerBaseUrlResolver
 import com.sphereon.oauth2.server.authorization.impl.http.command.TestOAuth2ServersConfigProvider
 import com.sphereon.oauth2.server.authorization.impl.http.command.TestSessionExecution
 import com.sphereon.oauth2.server.authorization.impl.provider.LoginCsrfTokenizerImpl
@@ -45,6 +47,7 @@ import com.sphereon.oauth2.server.authorization.provider.AuthenticationHint
 import com.sphereon.oauth2.server.authorization.provider.AuthenticationMethod
 import com.sphereon.oauth2.server.authorization.provider.LoginCsrfKeyProvider
 import com.sphereon.oauth2.server.authorization.provider.LoginCsrfTokenizer
+import com.sphereon.oauth2.server.authorization.provider.LoginCsrfToken
 import com.sphereon.oauth2.server.authorization.provider.LoginPageAsset
 import com.sphereon.oauth2.server.authorization.provider.LoginPageBranding
 import com.sphereon.oauth2.server.authorization.provider.LoginPageContext
@@ -63,6 +66,7 @@ import dev.zacsweers.metro.Provider
 import com.sphereon.oauth2.server.authorization.storage.OidcLoginSessionStore
 import com.sphereon.oauth2.server.authorization.storage.OidcLoginSessionStoreError
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlin.test.Test
@@ -70,6 +74,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.minutes
 
@@ -100,15 +105,18 @@ class LoginHttpFlowTest {
     // identical: AppScope-singleton tokenizer with one secret per AS process.
     private val csrfTokenizer: LoginCsrfTokenizer = LoginCsrfTokenizerImpl(StubLoginCsrfKeyProvider())
 
-    private fun newLoginPageCommand(): LoginPageHttpEndpointCommandImpl =
+    private fun newLoginPageCommand(
+        pendingStore: PendingAuthorizationSessionStore = pagePendingStore(),
+        tokenizer: LoginCsrfTokenizer = csrfTokenizer,
+    ): LoginPageHttpEndpointCommandImpl =
         LoginPageHttpEndpointCommandImpl(
             execution = TestSessionExecution(),
             loginPageRenderer = StubLoginPageRenderer(staticAssets = staticAssets),
             asInstanceIdProvider = StubAsInstanceIdProvider(),
             configProvider = TestOAuth2ServersConfigProvider(),
             baseUrlResolver = DefaultOAuth2ServerBaseUrlResolver(),
-            csrfTokenizer = csrfTokenizer,
-            pendingAuthorizationSessionStore = pagePendingStore(),
+            csrfTokenizer = tokenizer,
+            pendingAuthorizationSessionStore = pendingStore,
         )
 
     // Command wired with a config provider whose default server carries a fixed `issuer`, so the
@@ -161,6 +169,7 @@ class LoginHttpFlowTest {
         execution: SessionExecution = TestSessionExecution(),
         seedPendingSession: Boolean = true,
         applicationId: String? = "app-1",
+        baseUrlResolver: OAuth2ServerBaseUrlResolver = DefaultOAuth2ServerBaseUrlResolver(),
     ): Pair<LoginSubmitHttpEndpointCommandImpl, InMemoryLoginSessionStore> {
         val pendingStore = InMemoryPendingAuthorizationSessionStore()
         if (seedPendingSession) {
@@ -178,6 +187,7 @@ class LoginHttpFlowTest {
                 clock = Clock.System,
                 auditEmitter = auditEmitter,
                 csrfTokenizer = csrfTokenizer,
+                baseUrlResolver = baseUrlResolver,
             )
         return command to store
     }
@@ -298,6 +308,46 @@ class LoginHttpFlowTest {
             assertEquals("text/css; charset=utf-8", r.headers["Content-Type"])
             assertEquals("body { color: red; }", r.body)
         }
+
+    @Test fun unknownPendingSessionDoesNotMintCsrfOrIssueCookie() = runTest {
+        var minted = false
+        val pending = object : PendingAuthorizationSessionStore by pagePendingStore() {
+            override suspend fun findById(sessionId: String): IdkResult<AuthorizationSession?, IdkError> = Ok(null)
+        }
+        val tokenizer = object : LoginCsrfTokenizer by csrfTokenizer {
+            override suspend fun mint(sessionId: String): LoginCsrfToken { minted = true; error("No token for missing session") }
+        }
+        val response = newLoginPageCommand(pending, tokenizer).execute(GenericHttpRequest(method = "GET", path = "/login", queryParameters = mapOf("session_id" to "missing"), headers = mapOf("Host" to "as.example")))
+        assertTrue(response.isOk); assertEquals(400, response.value.statusCode); assertEquals(false, minted)
+        assertNull(response.value.headers["Set-Cookie"])
+    }
+    @Test fun pendingStorageFailureDoesNotMintCsrfOrIssueForm() = runTest {
+        var minted = false
+        val pending = object : PendingAuthorizationSessionStore by pagePendingStore() {
+            override suspend fun findById(sessionId: String): IdkResult<AuthorizationSession?, IdkError> = Err(IdkError.INVALID_STATE(message = "Test storage failure"))
+        }
+        val tokenizer = object : LoginCsrfTokenizer by csrfTokenizer {
+            override suspend fun mint(sessionId: String): LoginCsrfToken { minted = true; error("No token on storage failure") }
+        }
+        val response = newLoginPageCommand(pending, tokenizer).execute(GenericHttpRequest(method = "GET", path = "/login", queryParameters = mapOf("session_id" to "missing"), headers = mapOf("Host" to "as.example")))
+        assertTrue(response.isOk); assertEquals(503, response.value.statusCode); assertEquals(false, minted)
+        assertNull(response.value.headers["Set-Cookie"])
+    }
+    @Test fun pendingDisappearanceDuringCsrfMintReturns400WithoutCookie() = runTest {
+        val tokenizer = object : LoginCsrfTokenizer by csrfTokenizer {
+            override suspend fun mint(sessionId: String): LoginCsrfToken = throw IllegalArgumentException("Pending session disappeared")
+        }
+        val response = newLoginPageCommand(tokenizer = tokenizer).execute(GenericHttpRequest(method = "GET", path = "/login", queryParameters = mapOf("session_id" to "sess-1"), headers = mapOf("Host" to "as.example")))
+        assertTrue(response.isOk); assertEquals(400, response.value.statusCode); assertNull(response.value.headers["Set-Cookie"])
+    }
+    @Test fun cancelledCsrfMintPropagatesCancellation() = runTest {
+        val tokenizer = object : LoginCsrfTokenizer by csrfTokenizer {
+            override suspend fun mint(sessionId: String): LoginCsrfToken = throw CancellationException("Cancelled")
+        }
+        assertFailsWith<CancellationException> {
+            newLoginPageCommand(tokenizer = tokenizer).execute(GenericHttpRequest(method = "GET", path = "/login", queryParameters = mapOf("session_id" to "sess-1"), headers = mapOf("Host" to "as.example")))
+        }
+    }
 
     @Test
     fun loginAssetsUnknownPathReturnsNotFound() =
@@ -587,6 +637,66 @@ class LoginHttpFlowTest {
             assertNull(r.headers["Set-Cookie"], "Failed login must not set a session cookie")
             assertEquals(0, store.size(), "Failed login must not persist a session")
         }
+
+    @Test
+    fun missingCredentialsReturnToSelectedIssuerLogin() =
+        runTest { assertFailedLoginUsesSelectedIssuer(username = "", password = "wonderland") }
+
+    @Test
+    fun rejectedCredentialsReturnToSelectedIssuerLogin() =
+        runTest {
+            assertFailedLoginUsesSelectedIssuer(
+                username = "alice",
+                password = "wonderland",
+                provider = StubUserAuthProvider("alice" to "wonderland", failure = AuthenticationError.InvalidCredentials()),
+            )
+        }
+
+    @Test
+    fun nullAuthenticationSubjectReturnsToSelectedIssuerLogin() =
+        runTest { assertFailedLoginUsesSelectedIssuer(username = "alice", password = "NOPE") }
+
+    private suspend fun assertFailedLoginUsesSelectedIssuer(
+        username: String,
+        password: String,
+        provider: UserAuthenticationProvider = StubUserAuthProvider("alice" to "wonderland"),
+    ) {
+        val trustedBase = "$TRUSTED_BASE/as/selected-server"
+        // A caller-supplied return URL must never select the login endpoint's issuer or origin.
+        val returnUrl = "https://other.example/authorize/callback?session_id=sess-1&next=%2Faccount"
+        var resolvedOriginalPath: String? = null
+        val resolver = object : OAuth2ServerBaseUrlResolver {
+            override suspend fun resolveBaseUrl(
+                request: GenericHttpRequest,
+                configProvider: com.sphereon.oauth2.common.config.OAuth2ServersConfigProvider,
+                tenantPath: String?,
+            ): String {
+                resolvedOriginalPath = request.originalPath
+                return trustedBase
+            }
+        }
+        val (command, store) = newSubmitCommand(userAuthProvider = provider, baseUrlResolver = resolver)
+        val (body, cookie) = csrfFormAndCookie("sess-1", username, password, returnUrl)
+        val response = command.execute(
+            GenericHttpRequest(
+                method = "POST",
+                path = "/login",
+                headers = mapOf("Content-Type" to "application/x-www-form-urlencoded", "Cookie" to cookie),
+                bodySupplier = { body },
+            ).copy(originalPath = "/as/selected-server/login"),
+        )
+        assertTrue(response.isOk)
+        assertEquals(302, response.value.statusCode)
+        assertEquals("/as/selected-server/login", resolvedOriginalPath)
+        assertEquals(
+            "/as/selected-server/login?session_id=sess-1&return_url=" +
+                com.sphereon.core.api.http.query.percentEncodeQueryComponent(returnUrl) +
+                "&error=invalid_credentials",
+            response.value.headers["Location"],
+        )
+        assertNull(response.value.headers["Set-Cookie"], "Failed login must not authenticate a browser")
+        assertEquals(0, store.size(), "Failed login must not persist a login session")
+    }
 
     @Test
     fun loginPostWithoutPendingAuthorizationSessionReturns400() =
@@ -1269,6 +1379,7 @@ class LoginHttpFlowTest {
         private val amr: List<String>? = listOf(Amr.PWD),
         private val roles: List<String> = emptyList(),
         private val validPasskeyCredentialId: String? = null,
+        private val failure: AuthenticationError? = null,
     ) : UserAuthenticationProvider {
         var lastAuthenticationContext: AuthenticationContext? = null
 
@@ -1294,6 +1405,7 @@ class LoginHttpFlowTest {
             context: AuthenticationContext?,
         ): IdkResult<AuthenticatedUser?, AuthenticationError> {
             lastAuthenticationContext = context
+            failure?.let { return Err(it) }
             val webAuthn = credentials as? UserCredentials.WebAuthnAssertion
             if (webAuthn != null) {
                 val expectedMetadata =
@@ -1465,3 +1577,4 @@ private object NoopListEnabledFederationProvidersCommand :
                 .EnabledFederationProviders(providers = emptyList())
         )
 }
+

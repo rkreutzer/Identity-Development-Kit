@@ -19,15 +19,21 @@ package com.sphereon.openid.oid4vp.common
 import com.sphereon.crypto.core.jose.JwaAlgorithm
 import com.sphereon.crypto.core.jose.JwaCurve
 import com.sphereon.crypto.core.jose.JwaKeyType
+import com.sphereon.crypto.core.jose.JoseKeyOperations
 import com.sphereon.crypto.core.jose.Jwk
 import com.sphereon.crypto.core.jose.JwkSet
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -61,6 +67,44 @@ class ClientMetadataSerializationTest {
             alg = JwaAlgorithm.ECDH_ES,
             kid = kid,
         )
+
+    @Test
+    fun wireMetadataKeepsUsableEncryptionKeyBetweenUnsupportedKeyTypes() {
+        val keys =
+            JsonArray(
+                listOf(
+                    Json.parseToJsonElement("""{"kty":"AKP","alg":"ML-KEM-9999","kid":"future","use":"enc","pub":"unsupported"}"""),
+                    Json.encodeToJsonElement(Jwk.serializer(), encJwk("usable")),
+                    Json.parseToJsonElement("""{"kty":"unknown-key-type","alg":"unknown-alg","kid":"unknown","use":"enc"}"""),
+                ),
+            )
+        val wire = buildJsonObject { put("jwks", buildJsonObject { put("keys", keys) }) }
+        val decoded = Oid4vpJson.wire.decodeFromJsonElement(ClientMetadata.serializer(), wire)
+
+        assertEquals(listOf("usable"), decoded.jwks?.keys?.map { it.kid })
+        assertEquals("usable", decoded.selectEncryptedResponseJwk()?.kid)
+        val roundTrip = Oid4vpJson.wire.decodeFromString<ClientMetadata>(Oid4vpJson.wire.encodeToString(decoded))
+        assertEquals(decoded.jwks, roundTrip.jwks)
+    }
+
+    @Test
+    fun metadataWithOnlyUnsupportedKeysHasNoEncryptionKey() {
+        val decoded =
+            Oid4vpJson.wire.decodeFromString<ClientMetadata>(
+                """{"jwks":{"keys":[{"kty":"AKP","alg":"ML-KEM-9999","use":"enc"}]}}""",
+            )
+        assertTrue(requireNotNull(decoded.jwks).keys.isEmpty())
+        assertNull(decoded.selectEncryptedResponseJwk())
+    }
+
+    @Test
+    fun metadataStillRejectsMalformedJwkSetStructure() {
+        for (jwks in listOf("[]", "{}", """{"keys":{}}""", """{"keys":["not-a-key-object"]}""")) {
+            assertFailsWith<SerializationException> {
+                Oid4vpJson.wire.decodeFromString<ClientMetadata>("""{"jwks":$jwks}""")
+            }
+        }
+    }
 
     @Test
     fun `empty ClientMetadata serialises to an empty JSON object`() {
@@ -149,6 +193,23 @@ class ClientMetadataSerializationTest {
         assertEquals("\"ECDH-ES\"", key["alg"].toString())
         assertEquals("\"enc\"", key["use"].toString())
         assertNotNull(key["kid"])
+    }
+
+    @Test
+    fun encryptedResponseKeyMayOmitOptionalUseWhenAlgIdentifiesEncryption() {
+        val key = encJwk().copy(use = null)
+        val metadata = ClientMetadata(jwks = JwkSet(arrayOf(key)))
+
+        assertEquals(key, metadata.selectEncryptedResponseJwk())
+    }
+
+    @Test
+    fun explicitSigningIntentRejectsEncryptionAlgorithmKey() {
+        val signingUse = encJwk().copy(use = "sig")
+        val signingOperations = encJwk().copy(use = null, key_ops = arrayOf(JoseKeyOperations.SIGN))
+
+        assertNull(ClientMetadata(jwks = JwkSet(arrayOf(signingUse))).selectEncryptedResponseJwk())
+        assertNull(ClientMetadata(jwks = JwkSet(arrayOf(signingOperations))).selectEncryptedResponseJwk())
     }
 
     @Test

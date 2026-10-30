@@ -182,6 +182,8 @@ class VerifyJwtCommandImpl(
         val verificationResult = jwtService.verifyJws(verifyArgs)
 
         if (verificationResult.isErr) {
+            val code = verificationResult.error.code.takeIf { it.matches(Regex("[A-Za-z0-9_.:-]{1,160}")) } ?: "unavailable"
+            log.warn("JWT resource verification refused command=$commandId stage=jws-result-error code=$code")
             return Err(
                 ResourceServerError.InvalidToken.SignatureInvalid(
                     details = verificationResult.error.message.defaultMessage,
@@ -191,6 +193,7 @@ class VerifyJwtCommandImpl(
 
         val validationResult = verificationResult.value
         if (!validationResult.isValid) {
+            log.warn("JWT resource verification refused command=$commandId stage=jws-signature-invalid")
             return Err(
                 ResourceServerError.InvalidToken.SignatureInvalid(
                     details = validationResult.errorMessages.joinToString(", "),
@@ -217,6 +220,7 @@ class VerifyJwtCommandImpl(
         // RFC 9068 §4 requires the access-token media type. Reject absent and non-string typ
         // values safely; jsonPrimitive would throw for malformed object/array headers.
         if (standardArtifactContext == null && !hasSupportedAccessTokenTyp(protectedHeader)) {
+            log.warn("JWT resource verification refused command=$commandId stage=access-token-type")
             return Err(
                 ResourceServerError.InvalidToken.Malformed(
                     reason = "JWT typ must be 'at+jwt' or 'application/at+jwt'",

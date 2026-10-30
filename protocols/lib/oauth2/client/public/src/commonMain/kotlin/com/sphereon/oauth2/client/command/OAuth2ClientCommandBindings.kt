@@ -92,4 +92,14 @@ interface OAuth2ClientCommandBindings {
     fun privateKeyJwtClientAssertion(registry: SessionScopedCommandRegistry): PrivateKeyJwtClientAssertionServiceCommand =
         registry.get(PrivateKeyJwtClientAssertionServiceCommand.COMMAND_ID) as? PrivateKeyJwtClientAssertionServiceCommand
             ?: error("No binding for ${PrivateKeyJwtClientAssertionServiceCommand.COMMAND_ID}")
+
+    @Provides
+    fun startFederatedAuthentication(registry: SessionScopedCommandRegistry): StartFederatedAuthenticationCommand =
+        registry.get(StartFederatedAuthenticationCommand.COMMAND_ID) as? StartFederatedAuthenticationCommand
+            ?: error("No binding for ${StartFederatedAuthenticationCommand.COMMAND_ID}")
+
+    @Provides
+    fun completeFederatedAuthentication(registry: SessionScopedCommandRegistry): CompleteFederatedAuthenticationCommand =
+        registry.get(CompleteFederatedAuthenticationCommand.COMMAND_ID) as? CompleteFederatedAuthenticationCommand
+            ?: error("No binding for ${CompleteFederatedAuthenticationCommand.COMMAND_ID}")
 }

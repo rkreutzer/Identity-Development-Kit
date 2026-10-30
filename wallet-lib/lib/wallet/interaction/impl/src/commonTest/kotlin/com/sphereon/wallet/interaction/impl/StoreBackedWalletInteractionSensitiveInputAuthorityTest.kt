@@ -18,6 +18,27 @@ import kotlin.test.assertNull
 
 class StoreBackedWalletInteractionSensitiveInputAuthorityTest {
     @Test
+    fun typedAuthorizationConsumePreservesWrongKindWrongSessionAndMalformedReferences() = runTest {
+        val authority = StoreBackedWalletInteractionSensitiveInputAuthority(InMemoryWalletInteractionPrivateSessionStore())
+        val session = WalletInteractionSessionId("session-a")
+        val valid = authority.register(session, WalletInteractionSensitiveInputPurpose.OID4VCI_AUTHORIZATION_HANDOFF,
+            "https://issuer.example/authorize")
+        val callback = authority.register(session, WalletInteractionSensitiveInputPurpose.OID4VCI_AUTHORIZATION_CALLBACK,
+            "http://127.0.0.1/callback?code=real-test-value")
+        val malformed = authority.register(session, WalletInteractionSensitiveInputPurpose.OID4VCI_AUTHORIZATION_HANDOFF,
+            "/relative/authorization")
+        assertNull(authority.consumeAuthorizationHandoff(session, callback))
+        assertNull(authority.consumeAuthorizationHandoff(WalletInteractionSessionId("session-b"), valid))
+        repeat(2) {
+            assertFailsWith<IllegalArgumentException> { authority.consumeAuthorizationHandoff(session, malformed) }
+        }
+        assertEquals("http://127.0.0.1/callback?code=real-test-value",
+            authority.consume(session, WalletInteractionSensitiveInputPurpose.OID4VCI_AUTHORIZATION_CALLBACK, callback))
+        assertEquals("https://issuer.example/authorize", authority.consumeAuthorizationHandoff(session, valid))
+        assertNull(authority.consumeAuthorizationHandoff(session, valid))
+    }
+
+    @Test
     fun valuesAreSessionAndPurposeBoundAndConsumedOnce() =
         runTest {
             val authority = StoreBackedWalletInteractionSensitiveInputAuthority(InMemoryWalletInteractionPrivateSessionStore())

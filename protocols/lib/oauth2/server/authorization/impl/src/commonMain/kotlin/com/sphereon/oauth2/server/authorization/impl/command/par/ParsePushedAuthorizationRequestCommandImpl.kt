@@ -35,12 +35,15 @@ import com.sphereon.oauth2.server.authorization.command.ParsePushedAuthorization
 import com.sphereon.oauth2.server.authorization.command.jar.VerifyRequestObjectArgs
 import com.sphereon.oauth2.server.authorization.command.jar.VerifyRequestObjectCommand
 import com.sphereon.oauth2.server.authorization.error.AuthorizationServerError
+import com.sphereon.oauth2.server.authorization.model.Prompt
+import dev.zacsweers.metro.ExposeImplBinding
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import kotlin.experimental.ExperimentalObjCName
 import kotlin.native.ObjCName
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 
-import dev.zacsweers.metro.ExposeImplBinding
 private const val MIN_PKCE_LENGTH = 43
 private const val MAX_PKCE_LENGTH = 128
 
@@ -360,6 +363,35 @@ class ParsePushedAuthorizationRequestCommandImpl(
         // a /token request whose DPoP proof signs with a different key.
         val dpopJkt = requestBody["dpop_jkt"]?.firstOrNull()
 
+        // OpenID Connect Core 1.0 §3.1.2.1 request parameters, read as the Authorization Endpoint reads them. The
+        // authorization code and the ID Token take them from the pushed request: a dropped `nonce` yields an ID Token
+        // without it, and dropped `prompt` / `max_age` / `id_token_hint` would skip the session checks they ask for.
+        fun single(name: String): String? = requestBody[name]?.firstOrNull()
+        val nonce = single("nonce")
+        val responseMode = single("response_mode")
+        val prompt = Prompt.parseSpaceSeparated(single("prompt"))
+        val display = single("display")
+        val loginHint = single("login_hint")
+        val idTokenHint = single("id_token_hint")?.takeIf { it.isNotBlank() }
+        val acrValues = single("acr_values")?.splitToNonEmpty()
+        val uiLocales = single("ui_locales")?.splitToNonEmpty()
+        val maxAge =
+            single("max_age")?.let { raw ->
+                val value = raw.toIntOrNull()
+                    ?: return Err(AuthorizationServerError.InvalidRequest(details = "max_age must be a non-negative integer, got: $raw"))
+                if (value < 0) return Err(AuthorizationServerError.InvalidRequest(details = "max_age must be non-negative"))
+                value
+            }
+        val claims =
+            single("claims")?.let { raw ->
+                try {
+                    Json.parseToJsonElement(raw) as? JsonObject
+                        ?: return Err(AuthorizationServerError.InvalidRequest(details = "claims parameter must be a JSON object"))
+                } catch (expected: Exception) {
+                    return Err(AuthorizationServerError.InvalidRequest(details = "Malformed claims JSON: ${expected.message}"))
+                }
+            }
+
         // Extract additional parameters for extensibility (use first value of each)
         val additionalParameters = requestBody.mapValues { (_, values) -> values.first() }
 
@@ -377,9 +409,21 @@ class ParsePushedAuthorizationRequestCommandImpl(
                 codeChallenge = codeChallenge,
                 codeChallengeMethod = codeChallengeMethod,
                 dpopJkt = dpopJkt,
+                responseMode = responseMode,
+                nonce = nonce,
+                display = display,
+                prompt = prompt,
+                maxAge = maxAge,
+                uiLocales = uiLocales,
+                idTokenHint = idTokenHint,
+                loginHint = loginHint,
+                acrValues = acrValues,
+                claims = claims,
                 requestUri = null, // Not applicable for PAR requests
                 additionalParameters = additionalParameters,
             ),
         )
     }
 }
+
+private fun String.splitToNonEmpty(): List<String> = split(" ").map { it.trim() }.filter { it.isNotEmpty() }

@@ -39,6 +39,7 @@ import com.sphereon.wallet.unit.WalletSecureComponentType
 import com.sphereon.wallet.unit.WalletUserAuthenticationEvidence
 import com.sphereon.wallet.unit.attestation.KeyAttestationIssueRequest
 import com.sphereon.wallet.unit.attestation.KeyAttestationIssueResult
+import com.sphereon.wallet.unit.attestation.Oid4vciKeyAttestationClaims
 import com.sphereon.wallet.unit.attestation.Ts03KeyAttestationClaims
 import com.sphereon.wallet.unit.attestation.Ts03KeyStorageClaim
 import com.sphereon.wallet.unit.attestation.Ts03StatusClaim
@@ -339,9 +340,6 @@ class LocalWsca
                             put("jwk", json.encodeToJsonElement(Jwk.serializer(), clientInstanceJwk))
                         },
                     )
-                    if (request.evidence.isNotEmpty()) {
-                        put("evidence", json.encodeToJsonElement(request.evidence))
-                    }
                 }
             val attestationJwt =
                 signWalletProviderCompactJwt(
@@ -392,6 +390,9 @@ class LocalWsca
             attestKeysInternal(request)
 
         private suspend fun attestKeysInternal(request: KeyAttestationIssueRequest): IdkResult<KeyAttestationIssueResult, IdkError> {
+            if (request.profile == WalletUnitAttestationProfile.OID4VCI_JWT && request.requestedFormat != WalletUnitAttestationFormat.KEY_ATTESTATION_JWT) {
+                return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Final OID4VCI key attestation requires the key-attestation JWT format"))
+            }
             if (request.attestedKeys.isEmpty()) {
                 return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Key attestation requires at least one attested key"))
             }
@@ -415,10 +416,6 @@ class LocalWsca
             // Honest KA claims: absent caller values are derived from
             // wscd.profile's capability ceiling; present caller values are rejected if they claim
             // MORE than that ceiling honestly backs.
-            val keyStorage =
-                resolveKeyStorageClaim(wscd.profile, request.keystore, request.privateKeyProtection).getOrElse { return Err(it) }
-            val userAuthenticationClaim =
-                resolveUserAuthenticationClaim(wscd.profile, request.userAuthentication).getOrElse { return Err(it) }
             // Custody evidence (WscdKeyEvidence.evidence, e.g. LocalNative's device_keystore /
             // hardware_backing_preference) is key-independent for every Wscd implementation today
             // (SoftwareWscd and LocalNativeWscd both return a constant map once a key is
@@ -430,8 +427,24 @@ class LocalWsca
                 wscd.keyEvidence(toWscdKeyHandle(request.attestedKeys.first(), request.walletUnitId)).getOrElse { return Err(it) }
             val mergedEvidence = keyEvidence.evidence + request.evidence
 
-            val claims =
-                Ts03KeyAttestationClaims(
+            val claims = if (request.profile == WalletUnitAttestationProfile.OID4VCI_JWT) {
+                val publicKeys = request.attestedKeys.map { key ->
+                    val encoded = key.publicKeyJwk
+                        ?: return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Attested key requires a public JWK"))
+                    runCatching { json.parseToJsonElement(encoded).jsonObject }.getOrElse {
+                        return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "Attested key public JWK is invalid"))
+                    }
+                }
+                val finalClaims = runCatching {
+                    Oid4vciKeyAttestationClaims(issuer, now.epochSeconds, expiresAt.epochSeconds, request.nonce, publicKeys)
+                }.getOrElse { return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "OID4VCI key attestation claims are invalid")) }
+                json.encodeToJsonElement(finalClaims).jsonObject
+            } else {
+                val keyStorage = resolveKeyStorageClaim(wscd.profile, request.keystore, request.privateKeyProtection)
+                    .getOrElse { return Err(it) }
+                val userAuthenticationClaim = resolveUserAuthenticationClaim(wscd.profile, request.userAuthentication)
+                    .getOrElse { return Err(it) }
+                json.encodeToJsonElement(Ts03KeyAttestationClaims(
                     iss = issuer,
                     sub = request.walletUnitId,
                     aud = request.audience,
@@ -450,7 +463,8 @@ class LocalWsca
                     cNonce = request.nonce,
                     singleUse = request.singleUse,
                     evidence = mergedEvidence,
-                )
+                )).jsonObject
+            }
 
             val protectedHeader =
                 JsonObject(
@@ -469,10 +483,13 @@ class LocalWsca
                     walletUnitId = request.walletUnitId,
                     signerRef = request.signer,
                     protectedHeader = protectedHeader,
-                    payload = json.encodeToJsonElement(claims).let { it as JsonObject },
+                    payload = claims,
                     operationBinding = request.operationBinding,
                 ).getOrElse { return Err(it) }
-            validateSelfIssuedKeyAttestation(compact, request.nonce).getOrElse { return Err(it) }
+            validateSelfIssuedKeyAttestation(
+                compact, request.nonce,
+                nonceClaim = if (request.profile == WalletUnitAttestationProfile.OID4VCI_JWT) "nonce" else "c_nonce",
+            ).getOrElse { return Err(it) }
             val artifactHash = compactJwtArtifactHash(compact)
             val artifact =
                 WalletAttestationArtifact(
@@ -818,6 +835,7 @@ class LocalWsca
             compactJwt: String,
             expectedNonce: String,
             maxTtlSeconds: Long = ATTESTATION_MAX_TTL_SECONDS,
+            nonceClaim: String = "c_nonce",
         ): IdkResult<Unit, IdkError> {
             val parts = compactJwt.split('.')
             if (parts.size != 3) {
@@ -845,9 +863,9 @@ class LocalWsca
                     ),
                 )
             }
-            val cNonce = payload["c_nonce"]?.jsonPrimitive?.contentOrNull
+            val cNonce = payload[nonceClaim]?.jsonPrimitive?.contentOrNull
             if (cNonce != expectedNonce) {
-                return Err(selfValidationError("Key attestation JWT 'c_nonce' ('$cNonce') does not match the request nonce ('$expectedNonce')"))
+                return Err(selfValidationError("Key attestation JWT '$nonceClaim' does not match the request nonce"))
             }
             return Ok(Unit)
         }

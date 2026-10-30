@@ -186,6 +186,8 @@ data class CreateAccessTokenArgs(
     val scope: String? = null,
     val audience: List<String> = emptyList(),
     val expiresInSeconds: Int = 3600,
+    /** Explicit configured server key for trusted in-process callers without an HTTP host route. */
+    val serverId: String? = null,
     val dpopJkt: String? = null,
     val clientInstanceKeyJkt: String? = null,
     /** Authentication time from the end-user authentication event, in epoch seconds. */

@@ -20,6 +20,8 @@ import com.sphereon.oauth2.common.model.AuthorizationRequest
 import io.konform.validation.Validation
 import io.konform.validation.constraints.minLength
 import io.konform.validation.constraints.pattern
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 /**
  * Konform validator for OpenID4VP Authorization Request.
@@ -29,7 +31,7 @@ import io.konform.validation.constraints.pattern
  * - redirect_uri or response_uri (required)
  * - response_type (typically "vp_token")
  * - dcql_query (Digital Credentials Query Language) - OpenID4VP 1.0 Final
- * - nonce (recommended for security)
+ * - nonce and response_mode (required)
  * - state (recommended)
  *
  * ⚠️ IMPORTANT: OpenID4VP 1.0 Final uses DCQL, not Presentation Exchange
@@ -45,21 +47,17 @@ val validateOid4vpAuthorizationRequest =
             minLength(1) hint "client_id is required"
         }
 
-        // Either redirect_uri or response_uri must be present.
-        // Per OID4VP 1.0: redirect_uri is OPTIONAL when response_mode is direct_post
-        // or direct_post.jwt, because response_uri is used instead.
-        run {
-            constrain("redirect_uri or response_uri is required") { req ->
-                val responseMode = req.responseMode
-                val isResponseUriOrBrowserMode =
-                    responseMode == "direct_post" ||
-                        responseMode == "direct_post.jwt" ||
-                        responseMode == "dc_api" ||
-                        responseMode == "dc_api.jwt"
-                val hasResponseUri = req.additionalParameters?.containsKey("response_uri") == true
-                // redirect_uri is required unless we're in direct_post mode with a response_uri
-                !req.redirectUri.isNullOrBlank() ||
-                    (isResponseUriOrBrowserMode && (hasResponseUri || responseMode?.startsWith("dc_api") == true))
+        constrain("response_mode is required") { !it.responseMode.isNullOrBlank() }
+        constrain("response_uri and redirect_uri cannot both be present") {
+            !it.additionalParameters.containsKey("response_uri") || it.redirectUri == null
+        }
+        constrain("direct_post requires response_uri and forbids redirect_uri") { req ->
+            val directPost = req.responseMode in setOf("direct_post", "direct_post.jwt")
+            val responseUri = (req.additionalParameters["response_uri"] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+            when {
+                directPost -> !responseUri.isNullOrBlank() && req.redirectUri == null
+                req.responseMode in setOf("dc_api", "dc_api.jwt") -> true
+                else -> !req.redirectUri.isNullOrBlank()
             }
         }
 
@@ -68,14 +66,12 @@ val validateOid4vpAuthorizationRequest =
             minLength(1) hint "response_type is required"
         }
 
-        // nonce is required for security (prevents replay attacks)
-        AuthorizationRequest::nonce ifPresent {
-            minLength(8) hint "nonce should be at least 8 characters for security"
+        // Final section 5.2 requires URL-safe ASCII, without a wallet-imposed length heuristic.
+        constrain("nonce is required and must contain only URL-safe ASCII characters") { req ->
+            !req.nonce.isNullOrEmpty() && req.nonce!!.all { it in URL_SAFE_ASCII }
         }
-
-        // state is strongly recommended for CSRF protection
-        AuthorizationRequest::state ifPresent {
-            minLength(8) hint "state should be at least 8 characters when present"
+        constrain("state must contain only URL-safe ASCII characters when present") { req ->
+            req.state == null || req.state!!.all { it in URL_SAFE_ASCII }
         }
 
         // Validate that DCQL query is provided (OpenID4VP 1.0 Final requirement)
@@ -119,3 +115,5 @@ val validateOid4vpAuthorizationRequest =
             }
         }
     }
+
+private const val URL_SAFE_ASCII = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"

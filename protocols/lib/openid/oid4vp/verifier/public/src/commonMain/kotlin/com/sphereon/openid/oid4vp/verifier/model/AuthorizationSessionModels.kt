@@ -21,6 +21,7 @@ import com.sphereon.core.compat.JsExportCompat
 import com.sphereon.oauth2.common.model.AuthorizationRequest
 import com.sphereon.openid.oid4vp.common.ResponseMode
 import com.sphereon.openid.oid4vp.dcql.DcqlQuery
+import com.sphereon.openid.oid4vp.universal.VerifiedDataOpts
 import com.sphereon.openid.oid4vp.verifier.ParsedAuthorizationResponse
 import com.sphereon.openid.oid4vp.verifier.ValidationResult
 import com.sphereon.statuslist.CredentialStatusPolicy
@@ -71,7 +72,15 @@ data class AuthorizationSessionCallbackConfig(
      * If empty, all status transitions may be emitted.
      */
     val statuses: List<AuthorizationSessionStatus> = emptyList(),
-    /** Secret reference used to sign this session's callbacks. Absent means the registry default applies. */
+    /**
+     * The verified data representations the callback carries once the session is verified. Absent or
+     * empty modes carry none.
+     */
+    val verifiedData: VerifiedDataOpts? = null,
+    /**
+     * Secret reference and algorithm requested for signing this session's callbacks. They are stored
+     * with the session, but callbacks are currently posted unsigned.
+     */
     val secretRef: String? = null,
     val signing: CallbackSigningAlgorithm? = null,
 )

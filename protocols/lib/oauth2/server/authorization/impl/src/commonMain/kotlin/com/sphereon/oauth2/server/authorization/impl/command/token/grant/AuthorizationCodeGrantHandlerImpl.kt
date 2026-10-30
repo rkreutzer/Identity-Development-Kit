@@ -16,9 +16,12 @@
 
 package com.sphereon.oauth2.server.authorization.impl.command.token.grant
 
+import com.sphereon.oauth2.server.authorization.impl.command.token.logTokenRefusal
+
 import com.sphereon.core.api.Err
 import com.sphereon.core.api.IdkResult
 import com.sphereon.core.api.error.IdkError
+import com.sphereon.core.api.log.SessionLogService
 import com.sphereon.di.session.SessionScope
 import com.sphereon.oauth2.common.config.isEnabled
 import com.sphereon.oauth2.common.config.isRequired
@@ -27,7 +30,6 @@ import com.sphereon.oauth2.server.authorization.command.CreateAccessTokenArgs
 import com.sphereon.oauth2.server.authorization.command.CreateAccessTokenCommand
 import com.sphereon.oauth2.server.authorization.command.CreateIdTokenArgs
 import com.sphereon.oauth2.server.authorization.command.CreateIdTokenCommand
-import com.sphereon.oauth2.server.authorization.command.CreateRefreshTokenArgs
 import com.sphereon.oauth2.server.authorization.command.CreateRefreshTokenCommand
 import com.sphereon.oauth2.server.authorization.command.CreateTokenResponseArgs
 import com.sphereon.oauth2.server.authorization.command.CreateTokenResponseCommand
@@ -39,6 +41,7 @@ import com.sphereon.oauth2.server.authorization.command.token.GrantContext
 import com.sphereon.oauth2.server.authorization.command.token.GrantHandler
 import com.sphereon.oauth2.server.authorization.command.token.GrantHandlerKeys
 import com.sphereon.oauth2.server.authorization.impl.command.token.executeWithTrustedClientAuthorization
+import com.sphereon.oauth2.server.authorization.impl.command.token.issueForVerifiedAuthorizationCode
 import com.sphereon.oauth2.server.authorization.error.AuthorizationServerError
 import com.sphereon.oauth2.server.authorization.impl.oidc.OidcScopeClaimsMapper
 import com.sphereon.oauth2.server.authorization.impl.command.putClaims
@@ -80,6 +83,7 @@ class AuthorizationCodeGrantHandlerImpl(
     private val createIdToken: Lazy<CreateIdTokenCommand>,
     private val createTokenResponse: CreateTokenResponseCommand,
     private val credentialIssuerAudienceResolver: CredentialIssuerAudienceResolver,
+    private val log: SessionLogService,
     private val scopeClaimsMapper: OidcScopeClaimsMapper? = null,
 ) : GrantHandler {
     override val grantType: String = GrantHandlerKeys.AUTHORIZATION_CODE
@@ -119,7 +123,11 @@ class AuthorizationCodeGrantHandlerImpl(
                         requestedResource = authParams.resource,
                     ),
                     clientAuthorization,
-                ).getOrElse { error -> return Err(error) }
+                ).getOrElse { error ->
+                    val code = error.code.takeIf { it.matches(Regex("[A-Za-z0-9_.:-]{1,160}")) } ?: "unavailable"
+                    logTokenRefusal(log, "Authorization code grant refused stage=code-verification code=$code")
+                    return Err(error)
+                }
 
         // RFC 9449 §10.1 / FAPI2-SP §5.3.2.1 holder-of-key requirement: when the auth request
         // committed a `dpop_jkt` (either explicitly or via a DPoP proof at PAR), the auth code
@@ -140,6 +148,7 @@ class AuthorizationCodeGrantHandlerImpl(
         val committedJkt = verified.dpopJkt
         val dpopRequired = context.serverConfig.dpop.isRequired
         if (proofJkt == null && (committedJkt != null || dpopRequired)) {
+            logTokenRefusal(log, "Authorization code grant refused stage=dpop-proof-missing code_bound=${committedJkt != null} server_required=$dpopRequired")
             val reason =
                 if (committedJkt != null) {
                     "Authorization code is DPoP-bound but the token request did not present a DPoP proof"
@@ -149,6 +158,7 @@ class AuthorizationCodeGrantHandlerImpl(
             return errOf(AuthorizationServerError.InvalidGrant(details = reason))
         }
         if (committedJkt != null && proofJkt != null && committedJkt != proofJkt) {
+            logTokenRefusal(log, "Authorization code grant refused stage=dpop-key-binding")
             return invalidDpopProof("DPoP proof thumbprint does not match dpop_jkt committed at /authorize")
         }
         val boundJkt = proofJkt ?: committedJkt
@@ -234,25 +244,8 @@ class AuthorizationCodeGrantHandlerImpl(
         // auth_time / acr / amr / nonce / sid pinned to the original authentication.
         val refreshToken =
             createRefreshToken.value
-                .execute(
-                    CreateRefreshTokenArgs(
-                        subject = verified.subject,
-                        clientId = tokenRequest.clientId,
-                        scope = verified.scope,
-                        resource = verified.codeData.admittedAudiences ?: verified.resource,
-                        defaultAccessTokenAudience = verified.defaultAccessTokenAudience,
-                        credentialConfigurationIds = credentialConfigurationIds.orEmpty(),
-                        oid4vciIssuerState = issuerState,
-                        dpopJkt = boundJkt,
-                        clientInstanceKeyJkt = context.clientInstanceKeyJkt,
-                        authTime = verified.codeData.authTime,
-                        acr = verified.codeData.acr,
-                        amr = verified.codeData.amr,
-                        nonce = verified.codeData.nonce,
-                        loginSessionId = verified.codeData.sessionId,
-                        federationClaims = federationClaims?.toString(),
-                    ),
-                ).getOrElse { error -> return Err(error) }
+                .issueForVerifiedAuthorizationCode(verified, context, clientAuthorization)
+                .getOrElse { error -> return Err(error) }
 
         // RFC 6749 §10.5: stash the freshly-minted tokens on the (now consumed) auth-code
         // entry so a replay of the same code can fetch them and revoke. Best-effort — a

@@ -19,6 +19,7 @@ import com.sphereon.core.events.SessionEventService
 import com.sphereon.core.events.SilentCommand
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -68,7 +69,7 @@ import kotlin.time.Instant
 class EventCommandExtension<Arg : Any, SuccessResult : Any, ErrorResult : IdkErrorType>(
     private val eventServiceProvider: () -> SessionEventService,
     private val config: CommandEventConfig = CommandEventConfig.DEFAULT,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) : IEnhancedCommandExecutionExtension<Arg, SuccessResult, ErrorResult> {
     // Track start time for duration calculation
     private val startTimes = mutableMapOf<String, Instant>()
@@ -222,7 +223,7 @@ class EventCommandExtension<Arg : Any, SuccessResult : Any, ErrorResult : IdkErr
          */
         fun <Arg : Any, SuccessResult : Any, ErrorResult : IdkErrorType> create(
             eventServiceProvider: () -> SessionEventService,
-            scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
+            scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
         ): EventCommandExtension<Arg, SuccessResult, ErrorResult> = EventCommandExtension(eventServiceProvider, scope = scope)
 
         /**
@@ -231,7 +232,7 @@ class EventCommandExtension<Arg : Any, SuccessResult : Any, ErrorResult : IdkErr
         fun <Arg : Any, SuccessResult : Any, ErrorResult : IdkErrorType> create(
             eventServiceProvider: () -> SessionEventService,
             config: CommandEventConfig,
-            scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
+            scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
         ): EventCommandExtension<Arg, SuccessResult, ErrorResult> = EventCommandExtension(eventServiceProvider, config, scope)
     }
 }

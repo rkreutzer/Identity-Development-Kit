@@ -9,13 +9,35 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.nio.file.Files
 import kotlin.io.path.Path
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class OidfPlanScenarioDiscoveryTest {
+    @Test
+    fun haipWalletPresentationTrustAnchorsMatchCredentialFormat() {
+        val scenarios = OidfPlanScenarioManifest.forPlan("oid4vp-1final-wallet-haip-test-plan")
+        assertEquals(4, scenarios.size)
+        scenarios.forEach { scenario ->
+            val expected =
+                when (scenario.variant.getValue("credential_format")) {
+                    "iso_mdl" -> "{mdoc-iaca-root.crt}"
+                    "sd_jwt_vc" -> "{vp-signing-ca.crt}"
+                    else -> error("Unexpected credential format")
+                }
+            val credential = scenario.configOverrides.getValue("credential").jsonObject
+            assertEquals(expected, credential.getValue("trust_anchor_pem").jsonPrimitive.content, scenario.id)
+            val expectedStatus = if (scenario.variant.getValue("credential_format") == "iso_mdl") "{mdoc-iaca-root.crt}" else "{vci-test-root.crt}"
+            assertEquals(expectedStatus, credential.getValue("status_list_trust_anchor_pem").jsonPrimitive.content, scenario.id)
+        }
+        assertTrue(OidfPlanScenarioManifest.forPlan("oid4vci-1_0-wallet-haip-test-plan").all { it.configOverrides.isEmpty() })
+    }
+
     @Test
     fun `pinned suite accepts every required scenario and returns unique modules`() {
         if (System.getProperty("oidf.suite.mode") != "discover") {

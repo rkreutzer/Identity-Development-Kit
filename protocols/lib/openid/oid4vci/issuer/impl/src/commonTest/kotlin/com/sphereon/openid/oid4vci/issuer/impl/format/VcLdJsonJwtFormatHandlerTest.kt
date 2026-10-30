@@ -276,6 +276,85 @@ class VcLdJsonJwtFormatHandlerTest {
         }
 
     @Test
+    fun federationEntityIssuerAddsOpenIdFederationTermsOfUse() =
+        runTest {
+            var captured: JsonObject? = null
+            val result =
+                newHandler(capturedPayload = { captured = it }).issueCredential(
+                    request = CredentialRequest(format = CredentialFormat.JWT_VC_JSON_LD.value),
+                    context = makeContext(types = listOf("VerifiableCredential", "DigitalProductPassport")).copy(
+                        federationEntityIdentifier = "https://issuer.example.com",
+                    ),
+                )
+
+            assertTrue(result.isOk, "issuance must succeed: ${if (result.isErr) result.error else ""}")
+            val payload = assertNotNull(captured)
+            // DIIP v5 Appendix B: type OpenIDFederation, policyId = Entity Identifier, no invented trustFramework.
+            assertEquals(
+                buildJsonObject {
+                    put("type", "OpenIDFederation")
+                    put("policyId", "https://issuer.example.com")
+                },
+                payload["termsOfUse"],
+            )
+            assertEquals("https://issuer.example.com", payload["issuer"]?.jsonPrimitive?.content)
+        }
+
+    @Test
+    fun nonFederationIssuerAddsNoTermsOfUse() =
+        runTest {
+            var captured: JsonObject? = null
+            val result =
+                newHandler(capturedPayload = { captured = it }).issueCredential(
+                    request = CredentialRequest(format = CredentialFormat.JWT_VC_JSON_LD.value),
+                    context = makeContext(types = listOf("VerifiableCredential", "DigitalProductPassport")),
+                )
+
+            assertTrue(result.isOk, "issuance must succeed: ${if (result.isErr) result.error else ""}")
+            assertNull(assertNotNull(captured)["termsOfUse"])
+        }
+
+    @Test
+    fun federationTermsOfUseIsAppendedToCallerTermsAndCannotBeForged() =
+        runTest {
+            val callerTerms =
+                buildJsonObject {
+                    put("type", "IssuerPolicy")
+                    put("id", "https://issuer.example.com/policies/1")
+                }
+            var captured: JsonObject? = null
+            val appended =
+                newHandler(capturedPayload = { captured = it }).issueCredential(
+                    request = CredentialRequest(format = CredentialFormat.JWT_VC_JSON_LD.value),
+                    context = makeContext(types = listOf("VerifiableCredential", "DigitalProductPassport")).copy(
+                        vcdmProperties = buildJsonObject { put("termsOfUse", callerTerms) },
+                        federationEntityIdentifier = "https://issuer.example.com",
+                    ),
+                )
+            assertTrue(appended.isOk, "issuance must succeed: ${if (appended.isErr) appended.error else ""}")
+            val terms = assertNotNull(captured)["termsOfUse"]?.jsonArray ?: error("termsOfUse must become an array")
+            assertEquals(2, terms.size)
+            assertEquals(callerTerms, terms[0])
+            assertEquals("OpenIDFederation", terms[1].jsonObject["type"]?.jsonPrimitive?.content)
+
+            val forged =
+                newHandler().issueCredential(
+                    request = CredentialRequest(format = CredentialFormat.JWT_VC_JSON_LD.value),
+                    context = makeContext(types = listOf("VerifiableCredential", "DigitalProductPassport")).copy(
+                        vcdmProperties =
+                            buildJsonObject {
+                                putJsonObject("termsOfUse") {
+                                    put("type", "OpenIDFederation")
+                                    put("policyId", "https://other.example.com")
+                                }
+                            },
+                        federationEntityIdentifier = "https://issuer.example.com",
+                    ),
+                )
+            assertTrue(forged.isErr, "a caller-supplied OpenIDFederation entry must be refused")
+        }
+
+    @Test
     fun issueCredentialWithFutureDataValidityPreservesItWithoutNbf() =
         runTest {
             var captured: JsonObject? = null
@@ -535,6 +614,10 @@ class VcLdJsonJwtFormatHandlerTest {
             assertEquals("vc", header["cty"]?.jsonPrimitive?.content)
             assertEquals("did:jwk:issuer#0", header["kid"]?.jsonPrimitive?.content)
             assertEquals(setOf("typ", "cty", "kid"), header.keys)
+            // OID4VCI 1.0 §14.4: a DID-signed credential names its DID, not the Credential Issuer URL.
+            val payload = assertNotNull(jwtService.lastArgs?.payload as? JsonObject)
+            assertEquals("did:jwk:issuer", payload["iss"]?.jsonPrimitive?.content)
+            assertEquals("did:jwk:issuer", payload["issuer"]?.jsonPrimitive?.content)
         }
 
     @Test

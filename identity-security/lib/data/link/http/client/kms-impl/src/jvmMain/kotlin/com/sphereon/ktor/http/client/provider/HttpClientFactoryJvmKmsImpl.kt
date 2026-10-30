@@ -230,7 +230,16 @@ class HttpClientFactoryJvmKmsImpl(
             val egressGuard =
                 options.urlValidation
                     ?.takeIf { it.blockPrivateNetworks || it.blockRfc1918 || it.blockSharedNetworks }
-                    ?.let { policy -> EgressGuard(addressPolicy = { address -> EgressAddressPolicy.isAllowed(address, policy) }, resolver = egressResolver) }
+                    ?.let { policy ->
+                        EgressGuard(
+                            addressPolicy = { address -> EgressAddressPolicy.isAllowed(address, policy) },
+                            resolver = egressResolver,
+                        ).also { guard ->
+                            guard.installResolvedPrivateAddressException { host, addresses ->
+                                policy.permitsResolvedPrivateIpv4Exception(host, addresses.map { it.hostAddress })
+                            }
+                        }
+                    }
             OkHttp.create {
                 config {
                     sslSocketFactory(sslContext.socketFactory, CompositeTrustManager(trustManagers))

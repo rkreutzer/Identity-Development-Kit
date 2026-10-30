@@ -6415,6 +6415,13 @@ components:
             Exposes integration with the enterprise information system and semantic modeling. This
             is the enterprise tier's differentiator and is clamped off unless the tenant is granted
             `business-wallet.enterprise.v1`.
+        workspaceEnabled:
+          type: boolean
+          nullable: true
+          description: >
+            The Workspace product is deployed for this tenant, so the wallet's trimmed Workspace
+            reads the platform Inbox instead of the wallet's own holder tasks. Clamped off unless
+            the tenant is granted `business-wallet.enterprise.v1`.
       example:
         issuanceEnabled: true
         emailIssuanceEnabled: true
@@ -6422,6 +6429,7 @@ components:
         emailVerificationEnabled: false
         contactsEnabled: true
         semanticIntegrationEnabled: false
+        workspaceEnabled: false
 
     BusinessWalletFeaturesSettingsView:
       type: object
@@ -6448,6 +6456,8 @@ components:
           $ref: '#/components/schemas/BooleanConfigField'
         semanticIntegrationEnabled:
           $ref: '#/components/schemas/BooleanConfigField'
+        workspaceEnabled:
+          $ref: '#/components/schemas/BooleanConfigField'
       example:
         issuanceEnabled: { value: true, source: tenant }
         emailIssuanceEnabled: { value: true, source: default }
@@ -6455,6 +6465,7 @@ components:
         emailVerificationEnabled: { value: false, source: default }
         contactsEnabled: { value: true, source: default }
         semanticIntegrationEnabled: { value: false, source: license }
+        workspaceEnabled: { value: false, source: license }
 
     BusinessWalletIssuanceDefaultsSettings:
       type: object

@@ -30,8 +30,60 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import kotlin.test.assertNotEquals
+import com.sphereon.openid.oid4vp.verifier.config.MutableOid4vpVerifierInstanceIdProvider
+import kotlinx.coroutines.test.runTest
 
 class CreateAuthRequestServiceCommandImplTest {
+    @Test
+    fun claimedOperationStateUsesUrlSafeAsciiAndKeepsItsStableDistinctBinding() {
+        val state = claimedAuthorizationState("operation-a")
+        assertTrue(state.matches(Regex("^[A-Za-z0-9._~-]+$")), "OID4VP state must use URL-safe ASCII")
+        assertEquals(state, claimedAuthorizationState("operation-a"))
+        assertNotEquals(state, claimedAuthorizationState("operation-b"))
+    }
+    @Test
+    fun commandSelectsRequestedInstanceAndRestoresItAfterFailure() = runTest {
+        val provider = TestInstanceProvider()
+        val result = withRequestedVerifierInstance<Unit>(provider, "verifier-a") {
+            assertEquals("verifier-a", provider.currentInstanceId())
+            Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "downstream refused"))
+        }
+        assertIs<Err<IdkError>>(result)
+        assertNull(provider.currentInstanceId())
+    }
+
+    @Test
+    fun commandCannotOverrideRoutedVerifierAndPreservesMatchingRoute() = runTest {
+        val provider = TestInstanceProvider("verifier-a")
+        val refused = withRequestedVerifierInstance<Unit>(provider, "verifier-b") {
+            error("A conflicting instance must not execute")
+        }
+        assertIs<Err<IdkError>>(refused)
+        assertEquals("verifier-a", provider.currentInstanceId())
+        assertEquals("accepted", assertIs<Ok<String>>(withRequestedVerifierInstance(provider, "verifier-a") { Ok("accepted") }).value)
+        assertEquals("verifier-a", provider.currentInstanceId())
+    }
+
+    @Test
+    fun commandKeepsLegacyDefaultAndRestoresInstanceAfterException() = runTest {
+        val provider = TestInstanceProvider()
+        withRequestedVerifierInstance(provider, null) { assertNull(provider.currentInstanceId()); Ok(Unit) }
+        try {
+            withRequestedVerifierInstance<Unit>(provider, "verifier-a") { error("downstream failure") }
+        } catch (_: IllegalStateException) {
+            // The operation failed, but the request scope must still be restored.
+        }
+        assertNull(provider.currentInstanceId())
+    }
+
+    private class TestInstanceProvider(private var id: String? = null) : MutableOid4vpVerifierInstanceIdProvider {
+        override fun currentInstanceId(): String? = id
+        override fun setCurrentInstanceId(instanceId: String) { id = instanceId }
+        override fun clearCurrentInstanceId() { id = null }
+    }
+
     @Test
     fun responseTypeValidationMatchesTheImplementedVerifierCapability() {
         assertNull(validateCreateAuthResponseType(null))

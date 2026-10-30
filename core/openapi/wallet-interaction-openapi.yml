@@ -444,6 +444,46 @@ paths:
         '500':
           $ref: './common-components.yml#/components/responses/Error'
 
+  /wallets/{walletUnitId}/tasks:
+    parameters:
+      - $ref: './wallet-interaction-components.yml#/components/parameters/WalletUnitId'
+    get:
+      tags: [WalletInteractionActivity]
+      summary: List open wallet interaction tasks
+      operationId: listWalletInteractionTasks
+      x-command-id: wallet.interaction.list-tasks
+      description: |
+        Lists the unfinished holder interactions of a wallet unit as tasks, most
+        recently updated first. A task waits on the holder (offer review,
+        disclosure review, unlock), on the counterparty (deferred issuance) or on
+        the wallet itself (protocol work running). A terminal interaction is no
+        longer a task; it appears in the activity log instead. Act on a task with
+        the interaction endpoints: resume, actions (including
+        retry_deferred_retrieval) and cancel.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of tasks to return.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: Open tasks of the wallet unit.
+          content:
+            application/json:
+              schema:
+                $ref: './wallet-interaction-components.yml#/components/schemas/ListWalletInteractionTasksResult'
+        '400':
+          $ref: './common-components.yml#/components/responses/ValidationError'
+        '401':
+          $ref: './common-components.yml#/components/responses/Unauthorized'
+        '500':
+          $ref: './common-components.yml#/components/responses/Error'
+
   /wallets/{walletUnitId}/activity:
     parameters:
       - $ref: './wallet-interaction-components.yml#/components/parameters/WalletUnitId'

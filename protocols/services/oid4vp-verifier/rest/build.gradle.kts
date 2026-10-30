@@ -18,6 +18,14 @@ kotlin {
         testRuns.named("test") {
             executionTask.configure {
                 useJUnitPlatform()
+                // The named-verifier proof needs a separately running local stack, so ordinary runs leave it out
+                // and `-Poid4vp.localStackTest=true` selects it alone.
+                val localStackTest = "com.sphereon.openid.oid4vp.universal.impl.NamedVerifierLocalStackTest"
+                if (project.findProperty("oid4vp.localStackTest") == "true") {
+                    filter.includeTestsMatching(localStackTest)
+                } else {
+                    filter.excludeTestsMatching(localStackTest)
+                }
             }
         }
     }

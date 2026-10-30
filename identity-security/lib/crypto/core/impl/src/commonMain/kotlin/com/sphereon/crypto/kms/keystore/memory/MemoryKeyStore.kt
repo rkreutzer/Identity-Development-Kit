@@ -98,23 +98,12 @@ class MemoryKeyStoreService(
     override val settings: KeyProviderSettings?
         get() = null
 
-    // Legacy: direct storage (session-scoped behavior when instantiated directly)
-    private val directKeys = mutableMapOf<String, ManagedKeyInfoType<*>>()
-    private val directCertificateChains = mutableMapOf<String, Array<Certificate>>()
-    private val directCertificates = mutableMapOf<String, Certificate>()
+    private val directStorage = StoragePartition()
 
-    // New: partitioned storage accessed via backing storage
-    private val partition: StoragePartition?
-        get() = backingStorage?.let { storage -> partitionKey?.let { key -> storage.getPartition(key) } }
-
-    private val keys: MutableMap<String, ManagedKeyInfoType<*>>
-        get() = partition?.keys ?: directKeys
-
-    private val certificateChains: MutableMap<String, Array<Certificate>>
-        get() = partition?.certificateChains ?: directCertificateChains
-
-    private val certificates: MutableMap<String, Certificate>
-        get() = partition?.certificates ?: directCertificates
+    private fun <T> withStorage(block: StoragePartition.() -> T): T {
+        val storage = backingStorage?.let { backing -> partitionKey?.let(backing::getPartition) } ?: directStorage
+        return storage.withLock { storage.block() }
+    }
 
     init {
         require(config.keyStoreType === PredefinedKeyStoreTypes.MEMORY.keyStoreType) { "A memory keystore needs to be of config type MEMORY" }
@@ -124,9 +113,11 @@ class MemoryKeyStoreService(
 
     override fun keyVisibility() = KeyVisibility.fromValue(config.keyVisibility)
 
-    override suspend fun listKeys(): Array<ManagedKeyReference> = keys.map { it.value.toKeyReference() }.toTypedArray()
+    override suspend fun listKeys(): Array<ManagedKeyReference> = withStorage { keys.map { it.value.toKeyReference() }.toTypedArray() }
 
-    override suspend fun getKey(keyInfo: KeyInfoType<*>): ManagedKeyInfoType<*> {
+    override suspend fun getKey(keyInfo: KeyInfoType<*>): ManagedKeyInfoType<*> = withStorage { getKeyLocked(keyInfo) }
+
+    private fun StoragePartition.getKeyLocked(keyInfo: KeyInfoType<*>): ManagedKeyInfoType<*> {
         var managedKeyInfo = keyInfo
         if (managedKeyInfo.alias === null) {
             // Lookup precedence: kid match first, then EC public-coordinate match. Two safety
@@ -209,9 +200,9 @@ class MemoryKeyStoreService(
      * Delete a key from the store.
      * @return true if the key was found and deleted, false if the key was not found
      */
-    override suspend fun deleteKey(keyInfo: KeyInfoType<*>): Boolean =
+    override suspend fun deleteKey(keyInfo: KeyInfoType<*>): Boolean = withStorage {
         try {
-            val storedKeyInfo = getKey(keyInfo)
+            val storedKeyInfo = getKeyLocked(keyInfo)
             keys.remove(storedKeyInfo.alias) != null
         } catch (_: NotFoundException) {
             // Ignored: key not found is expected for delete
@@ -220,13 +211,14 @@ class MemoryKeyStoreService(
             // Ignored: key lookup failed, nothing to delete
             false
         }
+    }
 
     override suspend fun storeKey(
         keyInfo: ResolvedKeyInfoType<*>,
         providerId: String,
         alias: String,
         certChain: Array<Certificate>?,
-    ): ManagedKeyInfoType<*> {
+    ): ManagedKeyInfoType<*> = withStorage {
         val visibility = keyInfo.keyVisibility ?: config.keyVisibility
         if (config.keyVisibility === KeyVisibility.PUBLIC.keyVisibility && visibility === KeyVisibility.PRIVATE) {
             throw PKIException("Cannot get private key info for a public key store")
@@ -248,14 +240,14 @@ class MemoryKeyStoreService(
         if (!certChain.isNullOrEmpty()) {
             certificateChains[alias] = certChain
         }
-        return managedKeyInfo
+        managedKeyInfo
     }
 
     override suspend fun storeCertificateChain(
         alias: String,
         certificates: Array<Certificate>,
         keyInfo: ResolvedKeyInfoType<*>?,
-    ) {
+    ) = withStorage {
         if (!config.overwriteAlias) {
             check(!this.certificateChains.containsKey(alias)) { "Cannot overwrite certificate chain alias $alias, as alias already exists in keystore and overwriting is not enabled" }
         }
@@ -266,38 +258,41 @@ class MemoryKeyStoreService(
         certificateChains[alias] = certificates
     }
 
-    override suspend fun listCertificateChainAliases(): Array<String> = certificateChains.keys.toTypedArray()
+    override suspend fun listCertificateChainAliases(): Array<String> = withStorage { certificateChains.keys.toTypedArray() }
 
-    override suspend fun getCertificateChain(alias: String): Array<Certificate> =
+    override suspend fun getCertificateChain(alias: String): Array<Certificate> = withStorage {
         certificateChains[alias] ?: certificates[alias]?.let {
             arrayOf(it)
         } ?: throw NotFoundException("Could not find certificate chain for alias $alias")
+    }
 
     /**
      * Delete a certificate chain from the store.
      * @return true if the chain was found and deleted, false if not found
      */
-    override suspend fun deleteCertificateChain(alias: String): Boolean = certificateChains.remove(alias) != null
+    override suspend fun deleteCertificateChain(alias: String): Boolean = withStorage { certificateChains.remove(alias) != null }
 
     override suspend fun storeTrustedCertificate(
         alias: String,
         certificate: Certificate,
-    ) {
+    ) = withStorage {
         if (!config.overwriteAlias) {
             check(!this.certificates.containsKey(alias)) { "Cannot overwrite certificate alias $alias, as alias already exists in keystore and overwriting is not enabled" }
         }
         certificates[alias] = certificate
     }
 
-    override suspend fun listCertificateAliases(): Array<String> = certificates.keys.toTypedArray()
+    override suspend fun listCertificateAliases(): Array<String> = withStorage { certificates.keys.toTypedArray() }
 
-    override suspend fun getCertificate(alias: String): Certificate = certificates[alias] ?: certificateChains[alias]?.get(0) ?: throw NotFoundException("Could not find certificate for alias $alias")
+    override suspend fun getCertificate(alias: String): Certificate = withStorage {
+        certificates[alias] ?: certificateChains[alias]?.get(0) ?: throw NotFoundException("Could not find certificate for alias $alias")
+    }
 
     /**
      * Delete a certificate from the store.
      * @return true if the certificate was found and deleted, false if not found
      */
-    override suspend fun deleteCertificate(alias: String): Boolean = certificates.remove(alias) != null
+    override suspend fun deleteCertificate(alias: String): Boolean = withStorage { certificates.remove(alias) != null }
 
     /**
      * Compares two key materials by their public-identifying fields. Used when a caller has

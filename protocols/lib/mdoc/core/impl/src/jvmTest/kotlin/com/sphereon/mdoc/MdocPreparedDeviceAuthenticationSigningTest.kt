@@ -55,9 +55,153 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class MdocPreparedDeviceAuthenticationSigningTest {
+    @Test
+    fun managedDeviceKeyWithoutMsoKidUsesMatchingCustodyAndRejectsAnotherAlias(): TestResult =
+        runTest {
+            val app = createMdocCryptoTestAppGraph(this@MdocPreparedDeviceAuthenticationSigningTest)
+            try {
+                val context = app.userContextManager.getAnonymous()
+                val session = context.sessionContextManager.createOrGetFromId(
+                    "mdoc-no-kid-test", principalType = com.sphereon.di.context.PrincipalType.USER,
+                )
+                val execution = session.asCoreApiServiceGraph().serviceExecution
+                val providerId = "mdoc-no-kid-provider"
+                val provider = (app as SoftwareKmsProviderFactoryImpl.Graph).softwareKmsProvider.create(
+                    SoftwareKmsProviderConfig(id = providerId), execution,
+                )
+                val kms = session.graph.asKeyManagerServiceGraph().keyManagerService
+                kms.registerProvider(provider, makeDefaultKms = true)
+                val holder = kms.generateKey(providerId = providerId, alias = "holder-a", alg = SignatureAlgorithm.ECDSA_SHA256)
+                kms.generateKey(providerId = providerId, alias = "holder-b", alg = SignatureAlgorithm.ECDSA_SHA256)
+                val publicInfo = CoseJoseKeyMappingService.toCoseKeyInfo(holder.joseToManagedKeyInfo(KeyVisibility.PUBLIC))
+                val msoPublicKey = (requireNotNull(publicInfo.key) as CoseKey).copy(kid = null, original = null)
+                val document = document(msoPublicKey)
+                val request = DocRequest(
+                    itemsRequest = DeviceItemsRequest(docType = document.docType, nameSpaces = emptyMap()), original = null,
+                )
+                val authentication = DeviceAuthentication.fromOid4vp(
+                    clientId = "redirect_uri:https://verifier.example/response",
+                    nonce = "no-kid-request-nonce", jwkThumbprint = null,
+                    responseUri = "https://verifier.example/response", docType = document.docType,
+                    deviceNamespaces = com.sphereon.mdoc.data.device.DeviceNameSpaces(emptyMap()),
+                )
+                val cose = (session.graph as CryptoServices.Graph).cryptoServices.cose as CoseCryptoServiceImpl
+                val service = MdocSignServiceImpl(
+                    cose, execution, MobileSecurityObjectCborCodecImpl(), SessionTranscriptCborCodecImpl(),
+                )
+                val selector = KeyInfo<CoseKey>(alias = holder.alias, providerId = providerId)
+                val prepared = service.prepareDeviceAuthenticationSigning(
+                    request, document, authentication, selector,
+                ).getOrThrow()
+                assertEquals(holder.alias, prepared.keyReference)
+                val signature = kms.signDigest(
+                    keyInfo = selector,
+                    digest = hash(prepared.sigStructure, DigestAlg.SHA256),
+                    signatureAlgorithm = SignatureAlgorithm.ECDSA_SHA256,
+                    signatureEncoding = SignatureEncoding.RAW, requireX5Chain = false,
+                )
+                val completed = service.completeDeviceAuthenticationSigning(
+                    request, document, authentication, selector, prepared, signature,
+                )
+                assertTrue(completed.isOk, "A matching custody key must work without an issuer-supplied kid: $completed")
+                val immediate = service.deviceSignDocument(
+                    request, document, authentication, selector,
+                    unprotectedHeader = null, protectedHeader = null, requireDeviceX5Chain = false, macKeys = null,
+                )
+                assertTrue(immediate.deviceSigned?.deviceAuth?.deviceSignature != null)
+
+                val unrelated = KeyInfo<CoseKey>(alias = "holder-b", providerId = providerId)
+                val preparedForUnrelatedAlias = service.prepareDeviceAuthenticationSigning(
+                    request, document, authentication, unrelated,
+                ).getOrThrow()
+                assertEquals("holder-b", preparedForUnrelatedAlias.keyReference)
+                val unrelatedSignature = kms.signDigest(
+                    keyInfo = unrelated,
+                    digest = hash(preparedForUnrelatedAlias.sigStructure, DigestAlg.SHA256),
+                    signatureAlgorithm = SignatureAlgorithm.ECDSA_SHA256,
+                    signatureEncoding = SignatureEncoding.RAW, requireX5Chain = false,
+                )
+                val rejected = service.completeDeviceAuthenticationSigning(
+                    request, document, authentication, unrelated, preparedForUnrelatedAlias, unrelatedSignature,
+                )
+                assertTrue(rejected.isErr, "A signature from a key that does not match the MSO must be rejected")
+                assertFailsWith<IllegalArgumentException> {
+                    service.deviceSignDocument(
+                        request, document, authentication, unrelated,
+                        unprotectedHeader = null, protectedHeader = null, requireDeviceX5Chain = false, macKeys = null,
+                    )
+                }
+            } finally {
+                app.destroy()
+            }
+        }
+
+    @Test
+    fun preparedSigningAcceptsOpaqueWscaReferenceWithoutKmsLookupAndRequiresAReference(): TestResult =
+        runTest {
+            val app = createMdocCryptoTestAppGraph(this@MdocPreparedDeviceAuthenticationSigningTest)
+            try {
+                val context = app.userContextManager.getAnonymous()
+                val session = context.sessionContextManager.createOrGetFromId(
+                    "mdoc-opaque-wsca-reference-test", principalType = com.sphereon.di.context.PrincipalType.USER,
+                )
+                val execution = session.asCoreApiServiceGraph().serviceExecution
+                val providerId = "mdoc-opaque-reference-provider"
+                val provider = (app as SoftwareKmsProviderFactoryImpl.Graph).softwareKmsProvider.create(
+                    SoftwareKmsProviderConfig(id = providerId), execution,
+                )
+                val kms = session.graph.asKeyManagerServiceGraph().keyManagerService
+                kms.registerProvider(provider, makeDefaultKms = true)
+                val holder = kms.generateKey(providerId = providerId, alias = "real-managed-key", alg = SignatureAlgorithm.ECDSA_SHA256)
+                val holderPublic = CoseJoseKeyMappingService.toCoseKeyInfo(holder.joseToManagedKeyInfo(KeyVisibility.PUBLIC))
+                val msoPublicKey = (requireNotNull(holderPublic.key) as CoseKey).copy(kid = null, original = null)
+                val document = document(msoPublicKey)
+                val request = DocRequest(
+                    itemsRequest = DeviceItemsRequest(docType = document.docType, nameSpaces = emptyMap()), original = null,
+                )
+                val authentication = DeviceAuthentication.fromOid4vp(
+                    clientId = "redirect_uri:https://verifier.example/response",
+                    nonce = "opaque-reference-request-nonce", jwkThumbprint = null,
+                    responseUri = "https://verifier.example/response", docType = document.docType,
+                    deviceNamespaces = com.sphereon.mdoc.data.device.DeviceNameSpaces(emptyMap()),
+                )
+                val service = MdocSignServiceImpl(
+                    coseCryptoService = (session.graph as CryptoServices.Graph).cryptoServices.cose as CoseCryptoServiceImpl,
+                    execution = execution,
+                    mobileSecurityObjectCborCodec = MobileSecurityObjectCborCodecImpl(),
+                    sessionTranscriptCborCodec = SessionTranscriptCborCodecImpl(),
+                )
+                val opaqueReference = KeyInfo<CoseKey>(alias = "opaque-wsca-reference")
+                val prepared = service.prepareDeviceAuthenticationSigning(
+                    request, document, authentication, opaqueReference,
+                ).getOrThrow()
+                assertEquals("opaque-wsca-reference", prepared.keyReference)
+                assertTrue(prepared.publicDeviceKeyCbor.isNotEmpty())
+
+                val signature = kms.signDigest(
+                    keyInfo = KeyInfo<CoseKey>(alias = holder.alias, providerId = providerId),
+                    digest = hash(prepared.sigStructure, DigestAlg.SHA256),
+                    signatureAlgorithm = SignatureAlgorithm.ECDSA_SHA256,
+                    signatureEncoding = SignatureEncoding.RAW, requireX5Chain = false,
+                )
+                assertTrue(
+                    service.completeDeviceAuthenticationSigning(request, document, authentication, opaqueReference, prepared, signature).isOk,
+                    "External signing over the MSO key may complete when the opaque reference is resolved by its secure component",
+                )
+
+                val missingReference = service.prepareDeviceAuthenticationSigning(
+                    request, document, authentication, null,
+                )
+                assertTrue(missingReference.isErr, "An MSO without kid still requires a signer reference")
+            } finally {
+                app.destroy()
+            }
+        }
+
     @Test
     fun preparedDeviceAuthenticationUsesExactVerifiedSignatureAndRejectsChangedInputs(): TestResult =
         runTest {

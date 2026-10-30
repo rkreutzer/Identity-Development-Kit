@@ -3152,6 +3152,24 @@ components:
           $ref: '#/components/schemas/X509DistinguishedName'
         subjectKeyInfo:
           $ref: '#/components/schemas/ResolvedKeyInfo'
+        certificateAuthorityPathLengthConstraint:
+          type: integer
+          minimum: 0
+          description: >
+            When present, issue this certificate as a certificate authority with the supplied
+            path-length constraint. The issuer and subject must identify the same persisted
+            managed key; the response is a self-signed CA certificate. The issuer's private key
+            is used only through its configured KMS provider.
+        keyUsage:
+          type: array
+          uniqueItems: true
+          description: >
+            Optional key usage values for a non-CA certificate. CA certificates automatically
+            include keyCertSign and cRLSign. keyCertSign and cRLSign cannot be requested for
+            non-CA certificates.
+          items:
+            type: string
+            enum: [digitalSignature, keyCertSign, cRLSign]
         subject:
           $ref: '#/components/schemas/X509DistinguishedName'
         serialNumber:

@@ -108,8 +108,7 @@ class WscaWalletSecurityGate(
             put("wallet_unit_id", walletUnitId)
             request.keyRef?.let { put("operationKeyRef", it) }
             request.audience?.let { put("audience", it) }
-            request.operationType?.let { put("operationType", it) }
-                ?: put("operationType", namedOperationType(request.operation))
+            put("operationType", request.operationType ?: namedOperationType(request.operation))
             request.operationHash?.let { put("operationHash", it) }
             request.nonce?.let { put("nonce", it) }
         }

@@ -357,7 +357,7 @@ class TokenExchangeJourneyCommandImplTest {
         HandleTokenRequestCommandImpl(
             execution = ctx.execution,
             parseTokenRequestCommand = parse(recorder, grantParameters, dpopProof),
-            verifyClientAuthenticationCommand = authenticate(recorder),
+            verifyClientAuthenticationCommand = lazyOf(authenticate(recorder)),
             serversConfigProvider = configProvider,
             verifyDpopProofCommand = verifyDpop,
             dpopProofJtiCache = lazyOf(InMemoryDpopProofJtiCacheImpl(InMemorySingleUseObjectStore())),

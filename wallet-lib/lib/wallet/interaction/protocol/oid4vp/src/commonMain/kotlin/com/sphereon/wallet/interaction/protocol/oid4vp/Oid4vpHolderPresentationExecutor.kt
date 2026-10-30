@@ -185,7 +185,7 @@ class Oid4vpHolderPresentationExecutor(
             check(stagedPreparedPresentation && privateValues[JWT_SIGNING_STARTED] == null && privateValues[JWT_DISPATCH_STARTED] == null)
             val saved = readPrepared(privateValues)
             saved.requireUsable(context, resolved, boundSelection, selectedIdsByRequirement(privateValues, state), binding, nowEpochSeconds(), responseMode)
-            return Oid4vpPresentationPreparation.ApprovalRequired(saved.operations)
+            return saved.approvalRequired() ?: prepareFailed(WalletInteractionFailureCodes.OID4VP_RESPONSE_CREATION_FAILED, "wallet.interaction.error.oid4vp_response_creation_failed", null)
         }
         if (stagedPreparedPresentation) {
             if (stagedJwt) checkNotNull(preparedJwtSigningProvider) { "Prepared JWT signer is required for backend JWT presentation" }
@@ -237,7 +237,7 @@ class Oid4vpHolderPresentationExecutor(
             ).sealed()
             saved.requireUsable(context, resolved, boundSelection, selectedIdsByRequirement(privateValues, state), binding, nowEpochSeconds(), responseMode)
             putPrivate(context, mapOf(JWT_PREPARED to Oid4vpWalletInteractionProtocolAdapter.json.encodeToString(saved), KEY_BINDING_ISSUED_AT_PRIVATE_KEY to issuedAt.toString()))
-            return Oid4vpPresentationPreparation.ApprovalRequired(saved.operations)
+            return saved.approvalRequired() ?: prepareFailed(WalletInteractionFailureCodes.OID4VP_RESPONSE_CREATION_FAILED, "wallet.interaction.error.oid4vp_response_creation_failed", null)
         }
         if (operations.isEmpty()) return Oid4vpPresentationPreparation.Ready
         context.privateSessionStore.put(
@@ -404,6 +404,11 @@ class Oid4vpHolderPresentationExecutor(
                 return failed(WalletInteractionFailureCodes.OID4VP_RESPONSE_CREATION_FAILED, "wallet.interaction.error.oid4vp_response_creation_failed", it)
             } ?: return failed(WalletInteractionFailureCodes.OID4VP_RESPONSE_CREATION_FAILED, "wallet.interaction.error.oid4vp_response_creation_failed", retryable = false)
         } else null
+        // The mdoc SessionTranscript commits to the verifier key the response is encrypted to; a
+        // recipient binding that no longer names that key must never reach an mdoc signature.
+        if (preparedPresentation?.mdocSigning?.any { it.signing.recipientBinding?.matchesVerifierEncryptionKey(resolved.value) == false } == true) {
+            return failed(WalletInteractionFailureCodes.OID4VP_RESPONSE_CREATION_FAILED, "wallet.interaction.error.oid4vp_response_creation_failed", retryable = false)
+        }
         val dataIntegrityBinding =
             dataIntegrityHolderBindingProvider
                 .applyHolderBinding(

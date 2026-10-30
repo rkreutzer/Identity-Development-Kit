@@ -6,6 +6,7 @@ import com.sphereon.core.api.encodeToHex
 import com.sphereon.crypto.core.generic.DigestAlg
 import com.sphereon.crypto.core.generic.hash
 import com.sphereon.wallet.interaction.CapturedInteractionInput
+import com.sphereon.wallet.interaction.CapturedInteractionLaunchAttributes
 import com.sphereon.wallet.interaction.CapturedInteractionRuntimePlanResolver
 import com.sphereon.wallet.interaction.LockedCapturedInteractionRuntimePlan
 import com.sphereon.wallet.interaction.ProtocolExecutionOwner
@@ -87,6 +88,55 @@ class CapturedInteractionOwnerBoundaryTest {
         assertEquals(WalletEntryPointKind.DEEP_LINK, adapter.lastEntryPoint?.kind)
     }
 
+    @Test
+    fun allowlistedLaunchPreferencesSurviveOwnerLockWithoutReplacingCaptureEvidence() = runTest {
+        val adapter = RecordingAdapter()
+        val engine =
+            PolicyLockedCapturedInteractionClient(
+                testWalletInteractionEngine(adapters = listOf(adapter)),
+                CapturedInteractionRuntimePlanResolver {
+                    Ok(
+                        lockedPlan().copy(
+                            evidence =
+                                mapOf(
+                                    CapturedInteractionLaunchAttributes.OID4VCI_DPOP_ENABLED to "false",
+                                    "lockedEvidence" to "recorded",
+                                ),
+                        ),
+                    )
+                },
+            )
+
+        engine.startCaptured(
+            capturedInput().copy(
+                launchAttributes = mapOf(
+                    CapturedInteractionLaunchAttributes.OID4VCI_CLIENT_AUTHENTICATION_METHOD to "private_key_jwt",
+                    CapturedInteractionLaunchAttributes.OID4VCI_DPOP_ENABLED to "true",
+                    CapturedInteractionLaunchAttributes.OID4VCI_CREDENTIAL_BATCH_SIZE to "10",
+                ),
+            ),
+        )
+
+        assertEquals("private_key_jwt", adapter.lastAttributes[CapturedInteractionLaunchAttributes.OID4VCI_CLIENT_AUTHENTICATION_METHOD])
+        assertEquals("false", adapter.lastAttributes[CapturedInteractionLaunchAttributes.OID4VCI_DPOP_ENABLED])
+        assertEquals("10", adapter.lastAttributes[CapturedInteractionLaunchAttributes.OID4VCI_CREDENTIAL_BATCH_SIZE])
+        assertEquals("recorded", adapter.lastAttributes["lockedEvidence"])
+        assertEquals("profile-a", adapter.lastAttributes["walletProfileRef"])
+    }
+
+    @Test
+    fun capturedLaunchAttributesRejectClientIdentityAndSecretOverrides() {
+        val identityOverride = assertFailsWith<IllegalArgumentException> {
+            capturedInput().copy(launchAttributes = mapOf("oid4vci.client.id" to "unregistered-client"))
+        }
+        assertEquals("wallet_interaction_capture_launch_attribute_not_allowed", identityOverride.message)
+
+        val secretOverride = assertFailsWith<IllegalArgumentException> {
+            capturedInput().copy(launchAttributes = mapOf("oid4vci.iae.code.verifier" to "secret-verifier"))
+        }
+        assertEquals("wallet_interaction_capture_launch_attribute_not_allowed", secretOverride.message)
+    }
+
     private fun lockedPlan(owner: ProtocolExecutionOwner = ProtocolExecutionOwner.WALLET_BACKEND) =
         LockedCapturedInteractionRuntimePlan(
             walletUnitId = "wallet-unit-a",
@@ -118,6 +168,7 @@ private class RecordingAdapter(
     var semanticCalls: Int = 0
     var lastEntryPoint: WalletEntryPoint? = null
     var lastExecutionOwner: ProtocolExecutionOwner? = null
+    var lastAttributes: Map<String, String> = emptyMap()
 
     override val capability: WalletProtocolCapability =
         WalletProtocolCapability(
@@ -141,6 +192,7 @@ private class RecordingAdapter(
         semanticCalls += 1
         lastEntryPoint = entryPoint
         lastExecutionOwner = context.executionOwner
+        lastAttributes = context.attributes
         return WalletInteractionSession(
             context.sessionId,
             WalletInteractionState(

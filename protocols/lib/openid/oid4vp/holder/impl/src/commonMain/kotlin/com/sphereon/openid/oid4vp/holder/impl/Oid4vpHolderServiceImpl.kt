@@ -22,6 +22,7 @@ import com.sphereon.core.api.error.IdkError
 import com.sphereon.di.session.SessionScope
 import com.sphereon.oauth2.common.model.AuthorizationRequest
 import com.sphereon.oauth2.common.model.AuthorizationResponse
+import com.sphereon.oauth2.common.model.AuthorizationErrorResponse
 import com.sphereon.openid.oid4vp.common.ResponseMode
 import com.sphereon.openid.oid4vp.holder.CreateAuthorizationResponseArgs
 import com.sphereon.openid.oid4vp.holder.CreateAuthorizationResponseCommand
@@ -178,6 +179,20 @@ class Oid4vpHolderServiceImpl(
         signatures: List<HolderJwtVpSigningResult>,
     ): IdkResult<AuthorizationResponse, IdkError> =
         finalizeJwtVpResponseCommand.execute(FinalizeJwtVpResponseArgs(prepared, signatures))
+
+    override suspend fun submitAuthorizationErrorResponse(
+        resolvedRequest: ResolvedOid4vpRequest,
+        error: AuthorizationErrorResponse,
+        responseMode: ResponseMode?,
+        jarmOptions: JarmOptions?,
+    ): IdkResult<SubmissionResult, IdkError> = submitAuthorizationResponseCommand.execute(
+        SubmitAuthorizationResponseArgs(
+            resolvedRequest = resolvedRequest,
+            errorResponse = error,
+            responseMode = responseMode,
+            jarmOptions = jarmOptions,
+        ),
+    )
 
     override suspend fun submitAuthorizationResponse(
         resolvedRequest: ResolvedOid4vpRequest,

@@ -72,14 +72,16 @@ class KeyInfoIdentifierResolutionServiceImpl(
         args: ManagedIdentifierOptsOrResult,
         applyDuring: (ManagedIdentifierOptsOrResult) -> ManagedIdentifierOptsOrResult,
     ): IdkResult<ManagedIdentifierKeyResult, IdkErrorType> {
-        log.debug("Resolving managed key identifier: ${args.identifier.toString().take(100)}...")
+        log.debug("MANAGED_KEY_IDENTIFIER_RESOLUTION stage=begin")
         if (!supports(args)) {
+            log.warn("MANAGED_KEY_IDENTIFIER_RESOLUTION_FAILED stage=argument-type")
             return IdkError
                 .COMMAND_ARG_NOT_SUPPORTED_ERROR(message = "Managed identifier opts for Key expected. Type ${args.method ?: args.identifier} not supported")
                 .asErrorResult()
         }
         val optsResult = asSupportedOpts(args)
         if (optsResult.isErr) {
+            log.warn("MANAGED_KEY_IDENTIFIER_RESOLUTION_FAILED stage=options-normalization")
             return optsResult.error.asErrorResult()
         }
 
@@ -103,7 +105,7 @@ class KeyInfoIdentifierResolutionServiceImpl(
                     // see a typed error rather than a raw exception bubbling out of the resolver.
                     // Without this, a missing/unknown key throws PKIException and the higher-level
                     // IdkResult-based contract is bypassed.
-                    log.debug("KMS lookup failed for identifier ${opts.identifier}: ${expected.message}")
+                    log.warn("MANAGED_KEY_IDENTIFIER_RESOLUTION_FAILED stage=kms-lookup exception=${expected::class.simpleName}")
                     return IdkError
                         .NOT_FOUND_ERROR(
                             resource = "Key",
@@ -127,7 +129,7 @@ class KeyInfoIdentifierResolutionServiceImpl(
             context = args.context,
             identifier = managedKeyInfo.key,
         ).asOkResult()
-            .also { log.debug("Resolved managed key identifier: ${args.identifier.toString().take(100)}") }
+            .also { log.debug("MANAGED_KEY_IDENTIFIER_RESOLUTION stage=complete") }
     }
 
     private fun ManagedKeyInfoType<*>.withRequestedKid(kid: String): ManagedKeyInfoType<*> =

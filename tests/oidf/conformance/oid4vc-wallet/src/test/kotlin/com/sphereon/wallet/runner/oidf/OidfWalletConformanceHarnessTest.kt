@@ -33,6 +33,67 @@ import kotlin.time.Duration.Companion.minutes
 
 class OidfWalletConformanceHarnessTest {
     @Test
+    fun issuerInitiatedFapiModulesUseTheCredentialOfferInsteadOfDroppingIssuerState() {
+        val fapiOptions = mapOf("fapi_profile" to "vci_haip", "vci_grant_type" to "authorization_code")
+        assertFalse(
+            oidfWalletInitiatedIssuance(
+                mapOf("vci_authorization_code_flow_variant" to "issuer_initiated"),
+                fapiOptions,
+            ),
+        )
+        assertTrue(
+            oidfWalletInitiatedIssuance(
+                mapOf("vci_authorization_code_flow_variant" to "wallet_initiated"),
+                fapiOptions,
+            ),
+        )
+        assertFalse(
+            oidfWalletInitiatedIssuance(
+                mapOf("vci_authorization_code_flow_variant" to "wallet_initiated"),
+                fapiOptions + ("vci_authorization_code_flow_variant" to "issuer_initiated"),
+            ),
+        )
+        assertTrue(
+            oidfWalletInitiatedIssuance(
+                mapOf("vci_authorization_code_flow_variant" to "issuer_initiated"),
+                fapiOptions + ("vci_authorization_code_flow_variant" to "wallet_initiated"),
+            ),
+        )
+        assertFalse(oidfWalletInitiatedIssuance(emptyMap(), emptyMap()))
+        assertTrue(
+            oidfWalletInitiatedIssuance(
+                emptyMap(),
+                emptyMap(),
+                "fapi2-security-profile-final-client-test-happy-path",
+            ),
+        )
+        assertFalse(
+            oidfWalletInitiatedIssuance(
+                mapOf("vci_authorization_code_flow_variant" to "issuer_initiated"),
+                fapiOptions,
+                "fapi2-security-profile-final-client-test-happy-path",
+            ),
+        )
+    }
+
+    @Test
+    fun encryptionUsesTheSelectedPlanVariantWhenTheModuleOnlyAddsFapiOptions() {
+        assertTrue(
+            oidfCredentialRequestEncryption(
+                mapOf("vci_credential_encryption" to "encrypted"),
+                mapOf("fapi_client_type" to "plain_oauth", "fapi_response_mode" to "plain_response"),
+            ),
+        )
+        assertFalse(
+            oidfCredentialRequestEncryption(
+                mapOf("vci_credential_encryption" to "encrypted"),
+                mapOf("vci_credential_encryption" to "plain"),
+            ),
+        )
+        assertFalse(oidfCredentialRequestEncryption(emptyMap(), emptyMap()))
+    }
+
+    @Test
     fun preprocessorProducesValidHeadlessWalletConfigWhenSuiteCheckoutExists() {
         val suiteDir = configuredOidfSuiteDir()
         if (suiteDir == null || !suiteDir.exists()) {

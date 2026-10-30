@@ -263,7 +263,7 @@ class Oid4vciE2ETest {
                 handleTokenRequestCommand = Oid4vciFakeHandleTokenRequestCommand(service, configProvider),
                 configProvider = configProvider,
                 baseUrlResolver = DefaultOAuth2ServerBaseUrlResolver(),
-                dpopNonceManager = Oid4vciFakeNoOpDpopNonceManager,
+                dpopNonceManager = lazyOf(Oid4vciFakeNoOpDpopNonceManager),
                 clientCertificateExtractor = Oid4vciFakeNoCertExtractor,
                 auditEmitter = NoOpOAuth2AuditEmitter,
             )

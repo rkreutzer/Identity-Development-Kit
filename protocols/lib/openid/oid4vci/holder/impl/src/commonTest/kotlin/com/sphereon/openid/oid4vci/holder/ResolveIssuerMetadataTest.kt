@@ -67,9 +67,27 @@ class ResolveIssuerMetadataTest {
     }
 
     @Test
-    fun issuerUrlWithTerminatingPathSlashRemovesSlashByDefault() {
+    fun issuerUrlWithTerminatingPathSlashPreservesPath() {
         val result = Oid4vciUrls.buildWellKnownUrl("https://issuer.example.com:8443/test/a/issuer/")
-        assertEquals("https://issuer.example.com:8443/.well-known/openid-credential-issuer/test/a/issuer", result)
+        assertEquals("https://issuer.example.com:8443/.well-known/openid-credential-issuer/test/a/issuer/", result)
+    }
+
+    @Test
+    fun terminatingPathSlashRoundTripsWithoutChangingIssuerIdentity() {
+        val issuer = "https://issuer.example.com:8443/test/a/issuer/"
+        val metadata = "https://issuer.example.com:8443/.well-known/openid-credential-issuer/test/a/issuer/"
+        assertEquals(issuer, Oid4vciUrls.buildIssuerUrl(issuer))
+        assertEquals(issuer, Oid4vciUrls.buildIssuerUrl(metadata))
+        assertEquals(metadata, Oid4vciUrls.buildWellKnownUrl(metadata))
+        assertEquals(metadata, Oid4vciUrls.buildWellKnownUrl(Oid4vciUrls.buildIssuerUrl(metadata)))
+    }
+
+    @Test
+    fun rootPathSlashIsPreservedAsPartOfIssuerIdentifier() {
+        val issuer = "https://issuer.example.com/"
+        val metadata = "https://issuer.example.com/.well-known/openid-credential-issuer/"
+        assertEquals(metadata, Oid4vciUrls.buildWellKnownUrl(issuer))
+        assertEquals(issuer, Oid4vciUrls.buildIssuerUrl(metadata))
     }
 
     @Test

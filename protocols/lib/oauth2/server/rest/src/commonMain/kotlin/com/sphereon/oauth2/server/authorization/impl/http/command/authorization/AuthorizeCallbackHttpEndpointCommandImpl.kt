@@ -51,16 +51,15 @@ import kotlinx.serialization.json.Json
  * user authentication: looks up the pending session by `session_id`, runs the issuance pipeline,
  * and renders the resulting [AuthorizationResponseData] per its [OAuth2ResponseMode].
  */
-@Inject
 @SingleIn(SessionScope::class)
 @ContributesIntoMap(SessionScope::class, binding = binding<HttpEndpointCommand>())
 @StringKey(AuthorizeCallbackHttpEndpointCommand.COMMAND_ID)
-class AuthorizeCallbackHttpEndpointCommandImpl(
+class AuthorizeCallbackHttpEndpointCommandImpl @Inject constructor(
     execution: SessionExecution,
     private val handleAuthorizeCallbackCommand: HandleAuthorizeCallbackCommand,
     private val loginSessionIdProvider: MutableOidcLoginSessionIdProvider,
     private val configProvider: OAuth2ServersConfigProvider,
-    private val requiredActionsRedirectHandler: RequiredActionsRedirectHandler,
+    requiredActionsRedirectHandlerFactory: () -> RequiredActionsRedirectHandler,
     private val baseUrlResolver: OAuth2ServerBaseUrlResolver,
 ) : HttpEndpointCommandAdapter(
         id = AuthorizeCallbackHttpEndpointCommand.COMMAND_ID,
@@ -68,6 +67,25 @@ class AuthorizeCallbackHttpEndpointCommandImpl(
         endpoint = AuthorizeCallbackHttpEndpointCommand.ENDPOINT,
     ),
     AuthorizeCallbackHttpEndpointCommand {
+    private val requiredActionsRedirectHandler: RequiredActionsRedirectHandler by lazy(requiredActionsRedirectHandlerFactory)
+
+    /** Source-compatible constructor for callers that already own these dependencies. */
+    constructor(
+        execution: SessionExecution,
+        handleAuthorizeCallbackCommand: HandleAuthorizeCallbackCommand,
+        loginSessionIdProvider: MutableOidcLoginSessionIdProvider,
+        configProvider: OAuth2ServersConfigProvider,
+        requiredActionsRedirectHandler: RequiredActionsRedirectHandler,
+        baseUrlResolver: OAuth2ServerBaseUrlResolver,
+    ) : this(
+        execution = execution,
+        handleAuthorizeCallbackCommand = handleAuthorizeCallbackCommand,
+        loginSessionIdProvider = loginSessionIdProvider,
+        configProvider = configProvider,
+        requiredActionsRedirectHandlerFactory = { requiredActionsRedirectHandler },
+        baseUrlResolver = baseUrlResolver,
+    )
+
     private val json =
         Json {
             prettyPrint = false

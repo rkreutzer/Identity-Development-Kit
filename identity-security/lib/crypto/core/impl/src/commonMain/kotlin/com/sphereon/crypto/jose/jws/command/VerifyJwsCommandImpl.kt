@@ -32,6 +32,7 @@ import com.sphereon.crypto.core.ResolvedKeyInfo
 import com.sphereon.crypto.core.generic.SignatureAlgorithm
 import com.sphereon.crypto.core.jose.JwaAlgorithm
 import com.sphereon.crypto.core.jose.Jwk
+import com.sphereon.crypto.core.jose.generateJwkThumbprint
 import com.sphereon.crypto.core.sign.SignatureService
 import com.sphereon.crypto.jose.jws.JwsJsonGeneralWithIdentifiers
 import com.sphereon.crypto.jose.jws.JwsJsonSignatureWithIdentifier
@@ -347,7 +348,14 @@ class VerifyJwsCommandImpl(
                     }
 
                 if (!isValid) {
-                    log.warn("JWS_VERIFICATION_FAILED stage=cryptographic-verification reason=signature_invalid signatureIndex=$index")
+                    val publicJwk = keyInfo.key as? Jwk
+                    val keyType = publicJwk?.kty?.value ?: "unavailable"
+                    val keyAlgorithm = keyInfo.signatureAlgorithm?.let { it::class.simpleName } ?: "unavailable"
+                    val publicThumbprint = publicJwk?.let { runCatching { generateJwkThumbprint(it) }.getOrNull() } ?: "unavailable"
+                    log.warn(
+                        "JWS_VERIFICATION_FAILED stage=cryptographic-verification reason=signature_invalid " +
+                            "signatureIndex=$index keyType=$keyType keyAlgorithm=$keyAlgorithm publicThumbprint=$publicThumbprint",
+                    )
                     errorMessages.add("Signature $index: Invalid signature")
                     anyCryptoFailed = true
                 }

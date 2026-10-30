@@ -22,8 +22,12 @@ import com.nimbusds.jose.JWSHeader
 import com.nimbusds.jose.JWSObject
 import com.nimbusds.jose.Payload
 import com.nimbusds.jose.crypto.ECDSASigner
+import com.nimbusds.jose.jwk.Curve
 import com.nimbusds.jose.jwk.gen.ECKeyGenerator
+import com.nimbusds.jose.util.Base64
 import com.sphereon.core.api.IdkResult
+import com.sphereon.core.api.decodeFromBase64Url
+import com.sphereon.core.api.encodeToBase64Url
 import com.sphereon.core.api.context.SessionExecution
 import com.sphereon.core.api.error.IdkError
 import com.sphereon.crypto.core.KeyType
@@ -2225,8 +2229,16 @@ class JwsMockedErrorPathsTest {
             val mockIdentifierService = mockk<com.sphereon.crypto.resolution.IdentifierService>()
             val mockSignatureService = mockk<SignatureService>()
 
-            // Create a mock external identifier result for x5c
-            val ecJwk = Jwk(kty = JwaKeyType.EC, crv = JwaCurve.P_256, x = "test-x", y = "test-y")
+            // Chain resolution is mocked, but its public key and JWS signature must match mathematically.
+            val nimbusJwk = ECKeyGenerator(Curve.P_256).generate()
+            val publicJwk = nimbusJwk.toPublicJWK()
+            val ecJwk = Jwk(
+                kty = JwaKeyType.EC,
+                crv = JwaCurve.P_256,
+                x = publicJwk.x.toString(),
+                y = publicJwk.y.toString(),
+                alg = JwaAlgorithm.ES256,
+            )
             val resolvedKeyInfo = ResolvedKeyInfo.fromKey(ecJwk)
             val externalResult = mockk<ExternalIdentifierResult.X5c>(relaxed = true)
             every { externalResult.keyInfo } returns resolvedKeyInfo
@@ -2240,7 +2252,8 @@ class JwsMockedErrorPathsTest {
             coEvery { mockIdentifierService.resolve(any<com.sphereon.crypto.resolution.extern.ExternalIdentifierX5cOpts>()) } returns
                 IdkResult.ok(externalResult)
 
-            coEvery { mockSignatureService.isValidRawSignature(any(), any(), any()) } returns true
+            coEvery { mockSignatureService.isValidRawSignature(any(), any(), any()) } throws
+                IllegalStateException("X.509 verification must not require a configured KMS provider")
 
             val command =
                 com.sphereon.crypto.jose.jws.command.VerifyJwsCommandImpl(
@@ -2249,9 +2262,13 @@ class JwsMockedErrorPathsTest {
                     signatureService = mockSignatureService,
                 )
 
-            // Create a JWS with x5c in header
-            // eyJhbGciOiJFUzI1NiIsIng1YyI6WyJjZXJ0MSIsImNlcnQyIl19 is base64url of {"alg":"ES256","x5c":["cert1","cert2"]}
-            val jwsWithX5c = JwsCompact("eyJhbGciOiJFUzI1NiIsIng1YyI6WyJjZXJ0MSIsImNlcnQyIl19.dGVzdA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            val signed = JWSObject(
+                JWSHeader.Builder(JWSAlgorithm.ES256)
+                    .x509CertChain(listOf(Base64("cert1"), Base64("cert2")))
+                    .build(),
+                Payload("test"),
+            ).apply { sign(ECDSASigner(nimbusJwk)) }
+            val jwsWithX5c = JwsCompact(signed.serialize())
             val args = VerifyJwsArgs(jws = jwsWithX5c, identifier = null)
             val result = command.execute(args)
 
@@ -2264,6 +2281,16 @@ class JwsMockedErrorPathsTest {
                     },
                 )
             }
+            val parts = signed.serialize().split('.')
+            val signature = parts[2].decodeFromBase64Url().apply {
+                this[0] = (this[0].toInt() xor 1).toByte()
+            }
+            val tampered = command.execute(args.copy(
+                jws = JwsCompact("${parts[0]}.${parts[1]}.${signature.encodeToBase64Url()}"),
+            ))
+            assertTrue(tampered.isOk, "A tampered signature must produce a verification result")
+            assertFalse(tampered.value.isValid, "Successful chain resolution must not accept a tampered JWS")
+            coVerify(exactly = 0) { mockSignatureService.isValidRawSignature(any(), any(), any()) }
         }
 
     @Test

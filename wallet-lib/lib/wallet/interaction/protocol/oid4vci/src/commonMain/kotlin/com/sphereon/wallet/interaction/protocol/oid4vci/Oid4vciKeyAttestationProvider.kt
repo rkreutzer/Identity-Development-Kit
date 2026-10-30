@@ -62,6 +62,9 @@ class SecureComponentOid4vciKeyAttestationProvider(
     private val wsca: Wsca by lazy { wscaProvider() }
 
     override suspend fun attest(request: Oid4vciKeyAttestationRequest): IdkResult<String, IdkError> {
+        if (!request.requirement?.keyStorage.isNullOrEmpty() || !request.requirement?.userAuthentication.isNullOrEmpty()) {
+            return Err(IdkError.ILLEGAL_ARGUMENT_ERROR(message = "OID4VCI key attestation cannot claim unevidenced key-storage or user-authentication assurance values"))
+        }
         val algorithm =
             request.signingAlgorithm.toSignatureAlgorithmOrNull()
                 ?: return Err(
@@ -82,7 +85,7 @@ class SecureComponentOid4vciKeyAttestationProvider(
                     walletUnitId = request.walletUnitId,
                     walletAccountId = request.walletAccountId,
                     operationBinding = request.operationBinding,
-                    profile = WalletUnitAttestationProfile.TS03_JWT,
+                    profile = WalletUnitAttestationProfile.OID4VCI_JWT,
                     attestedKeys = listOf(key),
                     audience = request.audience,
                     nonce = request.nonce,

@@ -19,6 +19,7 @@ package com.sphereon.data.store.asset
 import com.sphereon.data.store.asset.model.AssetInfo
 import com.sphereon.data.store.asset.model.AssetNamespace
 import com.sphereon.data.store.asset.model.AssetReference
+import com.sphereon.data.store.asset.model.ResolvedAsset
 import com.sphereon.data.store.blob.BlobInfo
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
@@ -60,6 +61,28 @@ class AssetModelSerializationTest {
                     """"contentType":"image/png","localBlob":{"path":"assets/acme/brand/by-hash/abc","tenantId":"acme"}}""",
             ),
         )
+    }
+
+    @Test
+    fun shouldSerializeResolvedAssetBytesAsBase64Text() {
+        val asset =
+            ResolvedAsset(
+                data = byteArrayOf(1, 2, 3),
+                contentType = "image/png",
+                info =
+                    AssetInfo(
+                        uri = "/public/assets/acme/brand/abc.png",
+                        contentType = "image/png",
+                        hash = "abc",
+                        sizeBytes = 3L,
+                    ),
+            )
+        val encoded = json.encodeToString(ResolvedAsset.serializer(), asset)
+        assertEquals(
+            """{"data":"AQID","contentType":"image/png","info":{"uri":"/public/assets/acme/brand/abc.png","contentType":"image/png","hash":"abc","sizeBytes":3}}""",
+            encoded,
+        )
+        assertEquals(asset, json.decodeFromString(ResolvedAsset.serializer(), encoded))
     }
 
     @Test
